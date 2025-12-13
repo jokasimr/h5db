@@ -4,7 +4,7 @@
 
 Comprehensive test suite for the h5db DuckDB extension covering all implemented features from Phases 3 and 4.
 
-**Test Results**: ✅ **103/103 assertions passing** (100%)
+**Test Results**: ✅ **166/166 assertions passing** (100%)
 
 ## Test Organization
 
@@ -84,9 +84,22 @@ The test suite is located in `test/sql/h5db.test` and follows DuckDB's SQLLogicT
     - Column naming with multiple datasets
     - Type detection with multiple datasets
 
+16. **Run-Start Encoding (RSE) Tests** (23 tests)
+    - h5_rse() scalar function creates correct struct
+    - Basic RSE expansion with int32 values
+    - High compression ratio (1000 rows from 4 runs)
+    - String value support (fixed and variable-length)
+    - Aggregation queries on RSE columns
+    - Filtering with WHERE clause on RSE data
+    - Edge cases: single run, no compression
+    - Mixed regular and RSE columns
+    - Column ordering and naming with RSE
+    - Type detection for RSE columns (INTEGER, VARCHAR)
+    - Error handling: no regular columns, non-existent datasets
+
 ## Test Data
 
-Test data is located in `test/data/` and consists of three HDF5 files:
+Test data is located in `test/data/` and consists of four HDF5 files:
 
 ### 1. simple.h5
 - **Purpose**: Basic functionality testing
@@ -112,6 +125,15 @@ Test data is located in `test/data/` and consists of three HDF5 files:
   - 2D array: shape (5, 4)
   - 3D array: shape (5, 4, 3)
   - 4D array: shape (5, 4, 3, 2)
+
+### 4. run_encoded.h5
+- **Purpose**: Run-start encoding (RSE) testing
+- **Contents**:
+  - experiment1: 10 rows, 3 runs (int32 values: 100, 200, 300)
+  - experiment2: 1000 rows, 4 runs (high compression, int32 status values)
+  - experiment3: 8 rows, 3 runs (variable-length string values: "low", "high")
+  - edge_cases: single run (all same value)
+  - no_compression: 5 rows, 5 runs (worst case for RLE)
 
 ## Running the Tests
 
@@ -165,6 +187,16 @@ All tests passed (103 assertions in 1 test case)
 - Minimum row count behavior (uses shortest dataset)
 - Nested group paths with multiple datasets
 - Mixing scalar and array datasets
+
+✅ **h5_rse() function and Run-Start Encoding**:
+- Creating RSE column specifications with h5_rse()
+- Expanding run-encoded data to full tables
+- Support for all numeric types (int8-64, uint8-64, float32/64)
+- Support for string types (fixed and variable-length)
+- High compression ratios (250x tested)
+- Mixing regular and RSE columns
+- Aggregation and filtering on RSE data
+- Validation (run_starts starts at 0, strictly increasing, same size as values)
 
 ✅ **Column naming**:
 - Dataset name extraction (last component of path)
@@ -251,10 +283,11 @@ Exit code 0 indicates all tests passed.
 Current test execution time: **< 1 second** on modern hardware
 
 Test dataset sizes:
-- simple.h5: 11 KB
-- types.h5: 10 KB
-- multidim.h5: 4 KB
-- **Total**: 25 KB
+- simple.h5: 12 KB
+- types.h5: 11 KB
+- multidim.h5: 4.3 KB
+- run_encoded.h5: 33 KB
+- **Total**: 60 KB
 
 These are intentionally small for fast testing. Real-world HDF5 files can be GB-TB in size.
 
@@ -280,9 +313,9 @@ These are intentionally small for fast testing. Real-world HDF5 files can be GB-
 
 ## Conclusion
 
-The test suite provides comprehensive coverage of all Phase 3 and Phase 4 features:
-- ✅ 103 assertions passing
-- ✅ All major functionality tested including multi-dataset reading
+The test suite provides comprehensive coverage of all Phase 3, Phase 4, and RSE features:
+- ✅ 166 assertions passing
+- ✅ All major functionality tested including multi-dataset reading and run-start encoding
 - ✅ Error handling verified
 - ✅ Integration scenarios covered
 - ✅ Fast execution (< 1s)

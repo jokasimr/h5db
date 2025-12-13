@@ -71,35 +71,51 @@ SELECT h5_rse('state_run_starts', 'state_values');
 
 ```cpp
 static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto &run_starts = args.data[0];
-    auto &values = args.data[1];
+    auto &run_starts_vec = args.data[0];
+    auto &values_vec = args.data[1];
 
-    auto run_starts_data = FlatVector::GetData<string_t>(run_starts);
-    auto values_data = FlatVector::GetData<string_t>(values);
+    UnifiedVectorFormat run_starts_data;
+    UnifiedVectorFormat values_data;
+    run_starts_vec.ToUnifiedFormat(args.size(), run_starts_data);
+    values_vec.ToUnifiedFormat(args.size(), values_data);
 
-    // Create struct: {encoding: 'rse', run_starts: ..., values: ...}
-    auto result_data = FlatVector::GetData<struct_entry_t>(result);
+    auto run_starts_ptr = UnifiedVectorFormat::GetData<string_t>(run_starts_data);
+    auto values_ptr = UnifiedVectorFormat::GetData<string_t>(values_data);
+
+    // Get struct child vectors
     auto &children = StructVector::GetEntries(result);
+    D_ASSERT(children.size() == 3);
 
     for (idx_t i = 0; i < args.size(); i++) {
-        // Set encoding field
-        children[0]->SetValue(i, Value("rse"));
-        // Set run_starts field
-        children[0]->SetValue(i, run_starts_data[i].GetString());
-        // Set values field
-        children[1]->SetValue(i, values_data[i].GetString());
+        auto run_starts_idx = run_starts_data.sel->get_index(i);
+        auto values_idx = values_data.sel->get_index(i);
+
+        // Set the three struct fields
+        FlatVector::GetData<string_t>(*children[0])[i] =
+            StringVector::AddString(*children[0], "rse");
+        FlatVector::GetData<string_t>(*children[1])[i] =
+            StringVector::AddString(*children[1], run_starts_ptr[run_starts_idx]);
+        FlatVector::GetData<string_t>(*children[2])[i] =
+            StringVector::AddString(*children[2], values_ptr[values_idx]);
+    }
+
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+    if (args.size() == 1) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
     }
 }
 
 void RegisterH5RseFunction(ExtensionLoader &loader) {
+    child_list_t<LogicalType> struct_children = {
+        {"encoding", LogicalType::VARCHAR},
+        {"run_starts", LogicalType::VARCHAR},
+        {"values", LogicalType::VARCHAR}
+    };
+
     auto h5_rse = ScalarFunction(
         "h5_rse",
         {LogicalType::VARCHAR, LogicalType::VARCHAR},
-        LogicalType::STRUCT({
-            {"encoding", LogicalType::VARCHAR},
-            {"run_starts", LogicalType::VARCHAR},
-            {"values", LogicalType::VARCHAR}
-        }),
+        LogicalType::STRUCT(struct_children),
         H5RseFunction
     );
     loader.RegisterFunction(h5_rse);
@@ -172,11 +188,13 @@ static unique_ptr<FunctionData> H5ReadBind(...) {
         auto &input_val = input.inputs[i];
 
         if (input_val.type().id() == LogicalTypeId::STRUCT) {
-            // RSE column
-            auto &struct_val = StructValue::GetChildren(input_val);
-            std::string encoding = struct_val[0].GetValue<string>();
-            std::string run_starts = struct_val[1].GetValue<string>();
-            std::string values = struct_val[2].GetValue<string>();
+            // RSE column - extract struct fields
+            auto &children = StructValue::GetChildren(input_val);
+            D_ASSERT(children.size() == 3);
+
+            string encoding = children[0].GetValue<string>();
+            string run_starts = children[1].GetValue<string>();
+            string values = children[2].GetValue<string>();
 
             if (encoding != "rse") {
                 throw InvalidInputException("Unknown encoding: " + encoding);
@@ -264,20 +282,69 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(...) {
             // Read entire run_starts and values arrays
             RSEColumn rse;
 
-            // Read run_starts
+            // Read run_starts - handle different integer types
             hid_t starts_ds = H5Dopen2(result->file_id, col.run_starts_path.c_str(), H5P_DEFAULT);
             hid_t starts_space = H5Dget_space(starts_ds);
             hsize_t num_runs;
             H5Sget_simple_extent_dims(starts_space, &num_runs, nullptr);
 
-            std::vector<int64_t> starts_data(num_runs);
-            H5Dread(starts_ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, starts_data.data());
+            hid_t starts_type = H5Dget_type(starts_ds);
+            H5T_class_t type_class = H5Tget_class(starts_type);
+            size_t type_size = H5Tget_size(starts_type);
+            H5T_sign_t sign = H5Tget_sign(starts_type);
 
             rse.run_starts.resize(num_runs);
-            for (size_t i = 0; i < num_runs; i++) {
-                rse.run_starts[i] = starts_data[i];
+
+            // Read based on actual type
+            if (type_class == H5T_INTEGER) {
+                if (sign == H5T_SGN_2) {  // Signed
+                    if (type_size == 4) {
+                        std::vector<int32_t> temp(num_runs);
+                        H5Dread(starts_ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (size_t i = 0; i < num_runs; i++) {
+                            rse.run_starts[i] = static_cast<idx_t>(temp[i]);
+                        }
+                    } else if (type_size == 8) {
+                        std::vector<int64_t> temp(num_runs);
+                        H5Dread(starts_ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (size_t i = 0; i < num_runs; i++) {
+                            rse.run_starts[i] = static_cast<idx_t>(temp[i]);
+                        }
+                    } else {
+                        throw IOException("Unsupported run_starts integer size");
+                    }
+                } else {  // Unsigned
+                    if (type_size == 4) {
+                        std::vector<uint32_t> temp(num_runs);
+                        H5Dread(starts_ds, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (size_t i = 0; i < num_runs; i++) {
+                            rse.run_starts[i] = static_cast<idx_t>(temp[i]);
+                        }
+                    } else if (type_size == 8) {
+                        std::vector<uint64_t> temp(num_runs);
+                        H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (size_t i = 0; i < num_runs; i++) {
+                            rse.run_starts[i] = static_cast<idx_t>(temp[i]);
+                        }
+                    } else {
+                        throw IOException("Unsupported run_starts integer size");
+                    }
+                }
+            } else {
+                throw IOException("run_starts must be integer type");
             }
 
+            // Validate run_starts
+            if (num_runs > 0 && rse.run_starts[0] != 0) {
+                throw IOException("run_starts must begin with 0");
+            }
+            for (size_t i = 1; i < num_runs; i++) {
+                if (rse.run_starts[i] <= rse.run_starts[i-1]) {
+                    throw IOException("run_starts must be strictly increasing");
+                }
+            }
+
+            H5Tclose(starts_type);
             H5Sclose(starts_space);
             H5Dclose(starts_ds);
 
@@ -287,14 +354,94 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(...) {
             hsize_t num_values;
             H5Sget_simple_extent_dims(values_space, &num_values, nullptr);
 
-            // Read based on type
-            if (col.values_type_id == H5T_NATIVE_INT32) {
-                std::vector<int32_t> vals(num_values);
-                H5Dread(values_ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals.data());
-                for (auto v : vals) rse.values.push_back(Value::INTEGER(v));
+            // Validate: run_starts and values must have same size
+            if (num_runs != num_values) {
+                throw IOException("run_starts and values must have the same number of elements");
             }
-            // ... handle other types ...
 
+            // Read based on type - inline switch statement
+            // Get the type class and details
+            hid_t values_type = H5Dget_type(values_ds);
+            H5T_class_t values_class = H5Tget_class(values_type);
+
+            if (values_class == H5T_INTEGER) {
+                size_t val_size = H5Tget_size(values_type);
+                H5T_sign_t val_sign = H5Tget_sign(values_type);
+
+                if (val_sign == H5T_SGN_2) {  // Signed
+                    if (val_size == 1) {
+                        std::vector<int8_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_INT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::TINYINT(v));
+                    } else if (val_size == 2) {
+                        std::vector<int16_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_INT16, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::SMALLINT(v));
+                    } else if (val_size == 4) {
+                        std::vector<int32_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::INTEGER(v));
+                    } else if (val_size == 8) {
+                        std::vector<int64_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::BIGINT(v));
+                    }
+                } else {  // Unsigned
+                    if (val_size == 1) {
+                        std::vector<uint8_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::UTINYINT(v));
+                    } else if (val_size == 2) {
+                        std::vector<uint16_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_UINT16, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::USMALLINT(v));
+                    } else if (val_size == 4) {
+                        std::vector<uint32_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::UINTEGER(v));
+                    } else if (val_size == 8) {
+                        std::vector<uint64_t> temp(num_values);
+                        H5Dread(values_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                        for (auto v : temp) rse.values.push_back(Value::UBIGINT(v));
+                    }
+                }
+            } else if (values_class == H5T_FLOAT) {
+                size_t val_size = H5Tget_size(values_type);
+                if (val_size == 4) {
+                    std::vector<float> temp(num_values);
+                    H5Dread(values_ds, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                    for (auto v : temp) rse.values.push_back(Value::FLOAT(v));
+                } else if (val_size == 8) {
+                    std::vector<double> temp(num_values);
+                    H5Dread(values_ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                    for (auto v : temp) rse.values.push_back(Value::DOUBLE(v));
+                }
+            } else if (values_class == H5T_STRING) {
+                htri_t is_variable = H5Tis_variable_str(values_type);
+                if (is_variable > 0) {
+                    // Variable-length strings
+                    std::vector<char*> temp(num_values);
+                    H5Dread(values_ds, values_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                    for (size_t i = 0; i < num_values; i++) {
+                        rse.values.push_back(Value(temp[i] ? string(temp[i]) : string()));
+                    }
+                    H5Dvlen_reclaim(values_type, values_space, H5P_DEFAULT, temp.data());
+                } else {
+                    // Fixed-length strings
+                    size_t str_len = H5Tget_size(values_type);
+                    std::vector<char> temp(num_values * str_len);
+                    H5Dread(values_ds, values_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                    for (size_t i = 0; i < num_values; i++) {
+                        char *str_ptr = temp.data() + (i * str_len);
+                        size_t actual_len = strnlen(str_ptr, str_len);
+                        rse.values.push_back(Value(string(str_ptr, actual_len)));
+                    }
+                }
+            } else {
+                throw IOException("Unsupported values dataset type");
+            }
+
+            H5Tclose(values_type);
             H5Sclose(values_space);
             H5Dclose(values_ds);
 
@@ -354,8 +501,8 @@ static void H5ReadScan(...) {
                                      : bind_data.num_rows;
             }
 
-            // Expand values for this chunk
-            auto *output_data = FlatVector::GetData<int32_t>(result_vector);  // Example for int32
+            // Expand values for this chunk - switch on column type
+            LogicalType col_type = col.duckdb_type;
 
             for (idx_t i = 0; i < to_read; i++) {
                 idx_t row = gstate.position + i;
@@ -368,8 +515,49 @@ static void H5ReadScan(...) {
                                          : bind_data.num_rows;
                 }
 
-                // Emit current run's value
-                output_data[i] = rse.values[rse.current_run].GetValue<int32_t>();
+                // Emit current run's value - switch on type
+                auto &current_value = rse.values[rse.current_run];
+
+                switch (col_type.id()) {
+                    case LogicalTypeId::TINYINT:
+                        FlatVector::GetData<int8_t>(result_vector)[i] = current_value.GetValue<int8_t>();
+                        break;
+                    case LogicalTypeId::SMALLINT:
+                        FlatVector::GetData<int16_t>(result_vector)[i] = current_value.GetValue<int16_t>();
+                        break;
+                    case LogicalTypeId::INTEGER:
+                        FlatVector::GetData<int32_t>(result_vector)[i] = current_value.GetValue<int32_t>();
+                        break;
+                    case LogicalTypeId::BIGINT:
+                        FlatVector::GetData<int64_t>(result_vector)[i] = current_value.GetValue<int64_t>();
+                        break;
+                    case LogicalTypeId::UTINYINT:
+                        FlatVector::GetData<uint8_t>(result_vector)[i] = current_value.GetValue<uint8_t>();
+                        break;
+                    case LogicalTypeId::USMALLINT:
+                        FlatVector::GetData<uint16_t>(result_vector)[i] = current_value.GetValue<uint16_t>();
+                        break;
+                    case LogicalTypeId::UINTEGER:
+                        FlatVector::GetData<uint32_t>(result_vector)[i] = current_value.GetValue<uint32_t>();
+                        break;
+                    case LogicalTypeId::UBIGINT:
+                        FlatVector::GetData<uint64_t>(result_vector)[i] = current_value.GetValue<uint64_t>();
+                        break;
+                    case LogicalTypeId::FLOAT:
+                        FlatVector::GetData<float>(result_vector)[i] = current_value.GetValue<float>();
+                        break;
+                    case LogicalTypeId::DOUBLE:
+                        FlatVector::GetData<double>(result_vector)[i] = current_value.GetValue<double>();
+                        break;
+                    case LogicalTypeId::VARCHAR: {
+                        string str = current_value.GetValue<string>();
+                        FlatVector::GetData<string_t>(result_vector)[i] =
+                            StringVector::AddString(result_vector, str);
+                        break;
+                    }
+                    default:
+                        throw IOException("Unsupported RSE column type");
+                }
             }
         }
     }
