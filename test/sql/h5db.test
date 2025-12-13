@@ -1,0 +1,532 @@
+# name: test/sql/h5db.test
+# description: test h5db extension
+# group: [h5db]
+
+# Require statement will ensure this test is run with this extension loaded
+require h5db
+
+# Test basic extension loading
+query I
+SELECT h5db('Sam');
+----
+H5db Sam 🐥
+
+query I
+SELECT h5db_openssl_version('Michael') ILIKE 'H5db Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
+
+query I
+SELECT h5db_version('test') ILIKE 'H5db test, HDF5 version 1.%';
+----
+true
+
+# =============================================================================
+# h5_tree() Tests
+# =============================================================================
+
+# Test h5_tree on simple.h5 - should list all objects
+query IIII
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE type = 'group'),
+       COUNT(*) FILTER (WHERE type = 'dataset'),
+       COUNT(*) FILTER (WHERE dtype = 'int32')
+FROM h5_tree('test/data/simple.h5');
+----
+10	3	7	2
+
+# Test h5_tree shows correct types for specific datasets
+query IIII
+SELECT
+    COUNT(*) FILTER (WHERE path = '/integers' AND dtype = 'int32'),
+    COUNT(*) FILTER (WHERE path = '/floats' AND dtype = 'float64'),
+    COUNT(*) FILTER (WHERE path = '/strings' AND dtype = 'string'),
+    COUNT(*) FILTER (WHERE path = '/matrix' AND dtype = 'int32' AND shape = '(5, 4)')
+FROM h5_tree('test/data/simple.h5');
+----
+1	1	1	1
+
+# Test h5_tree on types.h5 - comprehensive type detection
+query III
+SELECT
+    COUNT(*) FILTER (WHERE dtype LIKE 'int%'),
+    COUNT(*) FILTER (WHERE dtype LIKE 'uint%'),
+    COUNT(*) FILTER (WHERE dtype LIKE 'float%')
+FROM h5_tree('test/data/types.h5');
+----
+4	3	2
+
+# Test h5_tree shows correct shapes for multi-dimensional arrays
+query IIII
+SELECT
+    COUNT(*) FILTER (WHERE path = '/array_1d' AND shape = '(10)'),
+    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = '(5, 4)'),
+    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = '(5, 4, 3)'),
+    COUNT(*) FILTER (WHERE path = '/array_4d' AND shape = '(5, 4, 3, 2)')
+FROM h5_tree('test/data/multidim.h5');
+----
+1	1	1	1
+
+# Test h5_tree error handling - non-existent file
+statement error
+SELECT * FROM h5_tree('nonexistent.h5');
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
+
+# =============================================================================
+# h5_read() Tests - 1D Numeric Types
+# =============================================================================
+
+# Test reading int32 dataset
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers');
+----
+10
+
+query I
+SELECT SUM(integers) FROM h5_read('test/data/simple.h5', '/integers');
+----
+45
+
+# Test reading different integer sizes
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int8');
+----
+3
+
+query I
+SELECT SUM(int8) FROM h5_read('test/data/types.h5', '/int8');
+----
+6
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int16');
+----
+3
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int32');
+----
+2
+
+query I
+SELECT SUM(int32) FROM h5_read('test/data/types.h5', '/int32');
+----
+30000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int64');
+----
+1
+
+# Test unsigned integers
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint8');
+----
+2
+
+query I
+SELECT MAX(uint8) FROM h5_read('test/data/types.h5', '/uint8');
+----
+255
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint16');
+----
+1
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint32');
+----
+1
+
+# Test float types
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/floats');
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/float32');
+----
+2
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/float64');
+----
+1
+
+# =============================================================================
+# h5_read() Tests - String Types
+# =============================================================================
+
+# Test fixed-length strings
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/strings');
+----
+3
+
+query I
+SELECT strings FROM h5_read('test/data/simple.h5', '/strings') ORDER BY strings;
+----
+hello
+test
+world
+
+# Test variable-length strings
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/var_strings');
+----
+3
+
+query I
+SELECT var_strings FROM h5_read('test/data/types.h5', '/var_strings') ORDER BY var_strings;
+----
+length
+strings
+variable
+
+# Test fixed-length strings from types.h5
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/fixed_strings');
+----
+2
+
+query I
+SELECT fixed_strings FROM h5_read('test/data/types.h5', '/fixed_strings') ORDER BY fixed_strings;
+----
+fixed
+width
+
+# =============================================================================
+# h5_read() Tests - Nested Group Paths
+# =============================================================================
+
+# Test reading from nested group
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/group1/data1');
+----
+5
+
+query I
+SELECT SUM(data1) FROM h5_read('test/data/simple.h5', '/group1/data1');
+----
+10.0
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/group1/data2');
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/group1/subgroup/nested_data');
+----
+100
+
+# =============================================================================
+# h5_read() Tests - 2D Arrays
+# =============================================================================
+
+# Test 2D array reading
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/matrix');
+----
+5
+
+# Test 2D array element access
+query I
+SELECT matrix[1] FROM h5_read('test/data/simple.h5', '/matrix') LIMIT 1;
+----
+0
+
+query I
+SELECT matrix[2] FROM h5_read('test/data/simple.h5', '/matrix') LIMIT 1;
+----
+1
+
+# Test 2D array from multidim.h5
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_2d');
+----
+5
+
+query I
+SELECT array_2d[1] FROM h5_read('test/data/multidim.h5', '/array_2d') LIMIT 1;
+----
+0
+
+query I
+SELECT array_2d[4] FROM h5_read('test/data/multidim.h5', '/array_2d') LIMIT 1;
+----
+3
+
+# Test sum of all elements in 2D array
+query I
+SELECT SUM(elem) FROM (
+    SELECT UNNEST(matrix) as elem FROM h5_read('test/data/simple.h5', '/matrix')
+);
+----
+190
+
+# =============================================================================
+# h5_read() Tests - 3D Arrays
+# =============================================================================
+
+# Test 3D array reading
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_3d');
+----
+5
+
+# Test 3D array access - first dimension
+query I
+SELECT array_3d[1][1] FROM h5_read('test/data/multidim.h5', '/array_3d') LIMIT 1;
+----
+0
+
+query I
+SELECT array_3d[1][2] FROM h5_read('test/data/multidim.h5', '/array_3d') LIMIT 1;
+----
+1
+
+query I
+SELECT array_3d[2][1] FROM h5_read('test/data/multidim.h5', '/array_3d') LIMIT 1;
+----
+3
+
+# Test that we get 5 rows with correct structure
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_3d') WHERE array_3d IS NOT NULL;
+----
+5
+
+# =============================================================================
+# h5_read() Tests - 4D Arrays
+# =============================================================================
+
+# Test 4D array reading
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_4d');
+----
+5
+
+# Test 4D array access
+query I
+SELECT array_4d[1][1][1] FROM h5_read('test/data/multidim.h5', '/array_4d') LIMIT 1;
+----
+0
+
+query I
+SELECT array_4d[1][1][2] FROM h5_read('test/data/multidim.h5', '/array_4d') LIMIT 1;
+----
+1
+
+# =============================================================================
+# h5_read() Tests - Error Handling
+# =============================================================================
+
+# Test error on non-existent file
+statement error
+SELECT * FROM h5_read('nonexistent.h5', '/dataset');
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
+
+# Test error on non-existent dataset
+statement error
+SELECT * FROM h5_read('test/data/simple.h5', '/nonexistent');
+----
+IO Error: Failed to open dataset: /nonexistent
+
+# =============================================================================
+# h5_read() Tests - Column Naming
+# =============================================================================
+
+# Test that column names are derived from dataset name (last part of path)
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/integers'));
+----
+integers
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/group1/data1'));
+----
+data1
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/group1/subgroup/nested_data'));
+----
+nested_data
+
+# =============================================================================
+# h5_read() Tests - Type Detection
+# =============================================================================
+
+# Test that types are correctly detected
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/integers'));
+----
+INTEGER
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/floats'));
+----
+DOUBLE
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/strings'));
+----
+VARCHAR
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/int8'));
+----
+TINYINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/uint8'));
+----
+UTINYINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/float32'));
+----
+FLOAT
+
+# Test array types
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/matrix'));
+----
+INTEGER[4]
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/multidim.h5', '/array_3d'));
+----
+BIGINT[3][4]
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/multidim.h5', '/array_4d'));
+----
+BIGINT[2][3][4]
+
+# =============================================================================
+# Integration Tests - Combining h5_tree() and h5_read()
+# =============================================================================
+
+# Use h5_tree to find datasets, then read them
+query I
+SELECT COUNT(*)
+FROM (
+    SELECT path FROM h5_tree('test/data/simple.h5') WHERE type = 'dataset' AND dtype = 'int32'
+) datasets;
+----
+2
+
+# Dynamic query: read all 1D int32 datasets
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/simple.h5', '/integers');
+----
+10
+
+# =============================================================================
+# Performance Tests - Large Dataset Handling
+# =============================================================================
+
+# Test reading dataset with 100 elements (nested_data)
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/group1/subgroup/nested_data');
+----
+100
+
+query II
+SELECT MIN(nested_data), MAX(nested_data)
+FROM h5_read('test/data/simple.h5', '/group1/subgroup/nested_data');
+----
+0	99
+
+# =============================================================================
+# Edge Cases
+# =============================================================================
+
+# Test reading 1D array (should work as scalar values)
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_1d');
+----
+10
+
+query I
+SELECT SUM(array_1d) FROM h5_read('test/data/multidim.h5', '/array_1d');
+----
+45
+
+# Test that root group ("/." path) appears in h5_tree
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/simple.h5') WHERE path = '/.';
+----
+1
+
+# =============================================================================
+# Multi-Dataset Reading Tests
+# =============================================================================
+
+# Test reading two 1D datasets
+query II
+SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats') LIMIT 1;
+----
+0	0.16153323088505145
+
+# Test reading three datasets with different types
+query II
+SELECT COUNT(*), SUM(integers) FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings');
+----
+3	3
+
+# Test that minimum row count is used (strings has 3, integers has 10)
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers', '/strings');
+----
+3
+
+# Test reading from nested groups
+query II
+SELECT data1, data2 FROM h5_read('test/data/simple.h5', '/group1/data1', '/group1/data2') LIMIT 1;
+----
+0.0	1
+
+# Test reading scalar and array datasets together
+query I
+SELECT matrix[1] FROM h5_read('test/data/simple.h5', '/integers', '/matrix') LIMIT 1;
+----
+0
+
+# Test reading multiple datasets with different integer types
+query II
+SELECT int8, int16 FROM h5_read('test/data/types.h5', '/int8', '/int16') LIMIT 1;
+----
+1	100
+
+# Test reading multiple string datasets
+query II
+SELECT fixed_strings, var_strings FROM h5_read('test/data/types.h5', '/fixed_strings', '/var_strings') ORDER BY fixed_strings LIMIT 1;
+----
+fixed	variable
+
+# Test reading multiple multi-dimensional arrays
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_2d', '/array_3d');
+----
+5
+
+# Test column naming with multiple datasets
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/integers', '/floats')) ORDER BY column_name;
+----
+floats
+integers
+
+# Test type detection with multiple datasets
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/simple.h5', '/integers', '/matrix')) ORDER BY column_name;
+----
+INTEGER
+INTEGER[4]
