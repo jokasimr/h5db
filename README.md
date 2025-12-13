@@ -15,11 +15,12 @@ H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scient
 - **Read HDF5 datasets**: Access datasets from HDF5 files using table-valued functions
 - **Hierarchical navigation**: Read datasets from nested groups with full path support
 - **Multiple datasets**: Read and combine multiple datasets in a single query
+- **Run-start encoding**: Efficient reading of run-length encoded data with automatic expansion
 - **Type mapping**: Automatic conversion between HDF5 and DuckDB data types
 - **Multi-dimensional arrays**: Support for N-dimensional datasets using DuckDB's array types
 - **Metadata access**: Inspect file structure and dataset attributes
 
-### Planned Functionality
+### Quick Start
 
 ```sql
 -- List all datasets and groups in an HDF5 file
@@ -34,9 +35,28 @@ SELECT * FROM h5_read('data.h5', '/group1/subgroup/dataset');
 -- Read multiple datasets (horizontal stacking)
 SELECT * FROM h5_read('data.h5', '/dataset1', '/dataset2');
 
--- Get attributes
-SELECT * FROM h5_attributes('data.h5', '/dataset_name');
+-- Read run-start encoded data (automatic expansion)
+SELECT * FROM h5_read(
+    'data.h5',
+    '/timestamp',                                      -- Regular column
+    h5_rse('/state_run_starts', '/state_values')      -- Run-encoded column
+);
+
+-- Combine regular and run-encoded columns with aggregation
+SELECT status, COUNT(*) as count, AVG(measurement) as avg_val
+FROM h5_read(
+    'experiment.h5',
+    '/data/measurement',
+    h5_rse('/data/status_starts', '/data/status_vals')
+)
+GROUP BY status;
 ```
+
+### Documentation
+
+- **[RSE_USAGE.md](RSE_USAGE.md)** - Complete guide to run-start encoding support
+- **[PLAN.md](PLAN.md)** - Implementation roadmap and current status
+- **[TEST_SUITE_SUMMARY.md](TEST_SUITE_SUMMARY.md)** - Test coverage details
 
 
 ## Building
@@ -70,14 +90,24 @@ To run the extension code, simply start the shell with `./build/release/duckdb`.
 Once loaded, you can use the H5DB functions to query HDF5 files:
 
 ```sql
--- Example: Read a dataset from an HDF5 file
+-- List all datasets in a file
+D SELECT * FROM h5_tree('example.h5');
+
+-- Read a regular dataset
 D SELECT * FROM h5_read('example.h5', '/measurements');
 
--- Example: List all datasets in a file
-D SELECT * FROM h5_tree('example.h5');
+-- Read multiple datasets
+D SELECT * FROM h5_read('example.h5', '/timestamps', '/measurements');
+
+-- Read run-start encoded data (expands automatically)
+D SELECT * FROM h5_read(
+    'example.h5',
+    '/timestamps',
+    h5_rse('/state_run_starts', '/state_values')
+);
 ```
 
-**Note**: The extension is currently under development. See the [PLAN.md](PLAN.md) file for implementation roadmap and current status.
+For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE.md)**.
 
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:

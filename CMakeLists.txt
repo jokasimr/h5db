@@ -16,6 +16,10 @@ project(${TARGET_NAME})
 include_directories(src/include)
 include_directories(${HDF5_INCLUDE_DIRS})
 
+# Require C++17 for std::variant
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 set(EXTENSION_SOURCES src/h5db_extension.cpp src/h5_functions.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
