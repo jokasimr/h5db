@@ -452,12 +452,29 @@ using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec>;
 // Regular column runtime state
 struct RegularColumnState {
     hid_t dataset_id;
+    hid_t file_space;  // Cached dataspace handle (reused across chunks)
 };
 
 // RSE column runtime state
 struct RSEColumnState {
     std::vector<idx_t> run_starts;
-    std::vector<Value> values;
+
+    // Typed storage for values (eliminates Value object overhead)
+    using RSEValueStorage = std::variant<
+        std::vector<int8_t>,
+        std::vector<int16_t>,
+        std::vector<int32_t>,
+        std::vector<int64_t>,
+        std::vector<uint8_t>,
+        std::vector<uint16_t>,
+        std::vector<uint32_t>,
+        std::vector<uint64_t>,
+        std::vector<float>,
+        std::vector<double>,
+        std::vector<string>
+    >;
+    RSEValueStorage values;
+
     idx_t current_run;
     idx_t next_run_start;
 };
@@ -480,9 +497,12 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
     H5ReadGlobalState() : file_id(-1), position(0) {}
 
     ~H5ReadGlobalState() {
-        // Close all regular column datasets
+        // Close all regular column datasets and cached dataspaces
         for (auto& state : column_states) {
             if (auto* reg_state = std::get_if<RegularColumnState>(&state)) {
+                if (reg_state->file_space >= 0) {
+                    H5Sclose(reg_state->file_space);
+                }
                 if (reg_state->dataset_id >= 0) {
                     H5Dclose(reg_state->dataset_id);
                 }
@@ -767,8 +787,16 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                     throw IOException("Failed to open dataset: " + spec.path);
                 }
 
+                // Cache the file dataspace (reused across all chunks)
+                hid_t file_space = H5Dget_space(dataset_id);
+                if (file_space < 0) {
+                    H5Dclose(dataset_id);
+                    throw IOException("Failed to get dataspace for dataset: " + spec.path);
+                }
+
                 RegularColumnState state;
                 state.dataset_id = dataset_id;
+                state.file_space = file_space;
                 result->column_states.push_back(std::move(state));
 
             } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
@@ -857,22 +885,22 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                 }
 
                 // Read values using stored type and type dispatcher
-                rse_col.values.reserve(num_values);
-
-                // Use type dispatcher based on DuckDB column type (determined in Bind)
+                // Directly populate typed vector (no Value object overhead)
                 DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
                     using T = typename decltype(type_tag)::type;
 
                     if constexpr (std::is_same_v<T, string>) {
                         // String handling
                         htri_t is_variable = H5Tis_variable_str(spec.values_h5_type);
+                        std::vector<string> string_values;
+                        string_values.reserve(num_values);
 
                         if (is_variable > 0) {
                             // Variable-length strings
                             std::vector<char*> temp(num_values);
                             H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
                             for (size_t i = 0; i < num_values; i++) {
-                                rse_col.values.push_back(Value(temp[i] ? string(temp[i]) : string()));
+                                string_values.push_back(temp[i] ? string(temp[i]) : string());
                             }
                             // Reclaim memory
                             hsize_t mem_dim = num_values;
@@ -887,18 +915,15 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                             for (size_t i = 0; i < num_values; i++) {
                                 char *str_ptr = buffer.data() + (i * str_len);
                                 size_t actual_len = strnlen(str_ptr, str_len);
-                                rse_col.values.push_back(Value(string(str_ptr, actual_len)));
+                                string_values.push_back(string(str_ptr, actual_len));
                             }
                         }
+                        rse_col.values = std::move(string_values);
                     } else {
-                        // Numeric types: read and convert to DuckDB Value
-                        std::vector<T> temp(num_values);
-                        H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-
-                        // Convert to DuckDB Value based on type
-                        for (auto v : temp) {
-                            rse_col.values.push_back(Value::CreateValue(v));
-                        }
+                        // Numeric types: read directly into typed vector
+                        std::vector<T> typed_values(num_values);
+                        H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, typed_values.data());
+                        rse_col.values = std::move(typed_values);
                     }
                 });
 
@@ -926,30 +951,45 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
     DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
         using T = typename decltype(type_tag)::type;
 
-        // Single-pass expansion (type-specific loop)
-        for (idx_t i = 0; i < to_read; i++) {
-            idx_t row = position + i;
+        // Access typed vector directly (no Value overhead)
+        const auto& typed_values = std::get<std::vector<T>>(state.values);
 
-            // Advance run if needed
-            while (row >= state.next_run_start) {
+        // Batch process runs: fill rows belonging to same run in tight loop
+        idx_t i = 0;
+        while (i < to_read) {
+            idx_t current_row = position + i;
+
+            // Advance to correct run if needed (rare - only at run boundaries)
+            while (current_row >= state.next_run_start) {
                 state.current_run++;
                 state.next_run_start = (state.current_run + 1 < state.run_starts.size())
                                      ? state.run_starts[state.current_run + 1]
                                      : num_rows;
             }
 
-            // Emit current run's value based on type
-            auto &current_value = state.values[state.current_run];
+            // Calculate how many rows belong to current run
+            idx_t rows_in_current_run = state.next_run_start - current_row;
+            idx_t rows_to_fill = std::min(rows_in_current_run, to_read - i);
 
+            // Get the value for this run
+            const T& run_value = typed_values[state.current_run];
+
+            // Tight loop: fill all rows with same value (no conditionals!)
             if constexpr (std::is_same_v<T, string>) {
-                // VARCHAR needs special handling for string storage
-                string str = current_value.template GetValue<string>();
-                FlatVector::GetData<string_t>(result_vector)[i] =
-                    StringVector::AddString(result_vector, str);
+                // VARCHAR: need to call StringVector::AddString for each
+                auto result_data = FlatVector::GetData<string_t>(result_vector);
+                for (idx_t j = 0; j < rows_to_fill; j++) {
+                    result_data[i + j] = StringVector::AddString(result_vector, run_value);
+                }
             } else {
-                // Numeric types: direct assignment
-                FlatVector::GetData<T>(result_vector)[i] = current_value.template GetValue<T>();
+                // Numeric types: direct assignment - compiler can vectorize this!
+                auto result_data = FlatVector::GetData<T>(result_vector);
+                for (idx_t j = 0; j < rows_to_fill; j++) {
+                    result_data[i + j] = run_value;
+                }
             }
+
+            i += rows_to_fill;
         }
     });
 }
@@ -961,7 +1001,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
 
     // Create memory and file dataspaces for reading
     hid_t mem_space;
-    hid_t file_space = H5Dget_space(dataset_id);
+    hid_t file_space = state.file_space;  // Use cached dataspace
 
     if (spec.ndims == 1) {
         // 1D dataset
@@ -1007,7 +1047,6 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
                                     H5P_DEFAULT, string_data.data());
 
             if (status < 0) {
-                H5Sclose(file_space);
                 H5Sclose(mem_space);
                 throw IOException("Failed to read string data from dataset: " + spec.path);
             }
@@ -1034,7 +1073,6 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
                                     file_space, H5P_DEFAULT, buffer.data());
 
             if (status < 0) {
-                H5Sclose(file_space);
                 H5Sclose(mem_space);
                 throw IOException("Failed to read string data from dataset: " + spec.path);
             }
@@ -1062,7 +1100,6 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
             });
 
             if (status < 0) {
-                H5Sclose(file_space);
                 H5Sclose(mem_space);
                 throw IOException("Failed to read data from dataset: " + spec.path);
             }
@@ -1088,14 +1125,13 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
             });
 
             if (status < 0) {
-                H5Sclose(file_space);
                 H5Sclose(mem_space);
                 throw IOException("Failed to read data from dataset: " + spec.path);
             }
         }
     }
 
-    H5Sclose(file_space);
+    // Note: file_space is cached and will be closed in destructor
     H5Sclose(mem_space);
 }
 
