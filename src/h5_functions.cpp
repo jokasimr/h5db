@@ -75,6 +75,42 @@ public:
     }
 };
 
+// Type tag for compile-time type dispatch
+template<typename T>
+struct TypeTag { using type = T; };
+
+// Type dispatcher - centralizes all type switching logic
+// Takes a DuckDB LogicalType and a lambda/function that accepts TypeTag<T>
+template<typename Func>
+auto DispatchOnDuckDBType(LogicalType logical_type, Func&& func) {
+    switch (logical_type.id()) {
+        case LogicalTypeId::TINYINT:
+            return func(TypeTag<int8_t>{});
+        case LogicalTypeId::SMALLINT:
+            return func(TypeTag<int16_t>{});
+        case LogicalTypeId::INTEGER:
+            return func(TypeTag<int32_t>{});
+        case LogicalTypeId::BIGINT:
+            return func(TypeTag<int64_t>{});
+        case LogicalTypeId::UTINYINT:
+            return func(TypeTag<uint8_t>{});
+        case LogicalTypeId::USMALLINT:
+            return func(TypeTag<uint16_t>{});
+        case LogicalTypeId::UINTEGER:
+            return func(TypeTag<uint32_t>{});
+        case LogicalTypeId::UBIGINT:
+            return func(TypeTag<uint64_t>{});
+        case LogicalTypeId::FLOAT:
+            return func(TypeTag<float>{});
+        case LogicalTypeId::DOUBLE:
+            return func(TypeTag<double>{});
+        case LogicalTypeId::VARCHAR:
+            return func(TypeTag<string>{});
+        default:
+            throw IOException("Unsupported DuckDB type");
+    }
+}
+
 // Convert HDF5 type to string representation
 std::string H5TypeToString(hid_t type_id) {
     H5T_class_t type_class = H5Tget_class(type_id);
@@ -150,7 +186,8 @@ std::string H5GetShapeString(hid_t dataset_id) {
     return result;
 }
 
-// Structure to hold information about an HDF5 object
+// ==================== h5_tree Implementation ====================
+
 struct H5ObjectInfo {
     std::string path;
     std::string type;  // "group" or "dataset"
@@ -405,6 +442,8 @@ struct RSEColumnSpec {
     std::string values_path;
     std::string column_name;
     LogicalType column_type;
+    H5TypeHandle run_starts_h5_type;  // HDF5 type for run_starts (determined in Bind)
+    H5TypeHandle values_h5_type;      // HDF5 type for values (determined in Bind)
 };
 
 // A column can be either regular or RSE
@@ -527,6 +566,31 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
             rse_spec.values_path = values;
             rse_spec.column_name = GetColumnName(values);
 
+            // Open run_starts dataset to determine type (with error suppression)
+            hid_t starts_ds;
+            {
+                H5ErrorSuppressor suppress;
+                starts_ds = H5Dopen2(file_id, run_starts.c_str(), H5P_DEFAULT);
+            }
+
+            if (starts_ds < 0) {
+                H5Fclose(file_id);
+                throw IOException("Failed to open RSE run_starts dataset: " + run_starts);
+            }
+
+            hid_t starts_type = H5Dget_type(starts_ds);
+            if (starts_type < 0) {
+                H5Dclose(starts_ds);
+                H5Fclose(file_id);
+                throw IOException("Failed to get type for RSE run_starts dataset: " + run_starts);
+            }
+
+            // Store run_starts type (H5TypeHandle will copy and manage it)
+            rse_spec.run_starts_h5_type = H5TypeHandle(starts_type);
+
+            H5Tclose(starts_type);
+            H5Dclose(starts_ds);
+
             // Open values dataset to determine type (with error suppression)
             hid_t values_ds;
             {
@@ -546,6 +610,10 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
                 throw IOException("Failed to get type for RSE values dataset: " + values);
             }
 
+            // Store values type (H5TypeHandle will copy and manage it)
+            rse_spec.values_h5_type = H5TypeHandle(values_type);
+
+            // Determine DuckDB column type from values
             rse_spec.column_type = H5TypeToDuckDBType(values_type);
 
             H5Tclose(values_type);
@@ -704,10 +772,10 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                 result->column_states.push_back(std::move(state));
 
             } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
-                // RSE column - load run_starts and values
+                // RSE column - load run_starts and values using stored types from Bind
                 RSEColumnState rse_col;
 
-                // Open run_starts and values datasets (with error suppression)
+                // Open datasets (types were inspected in Bind phase)
                 hid_t starts_ds;
                 hid_t values_ds;
                 {
@@ -724,28 +792,22 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                     }
                 }
 
-                // Get run_starts size
+                // Get array sizes
                 hid_t starts_space = H5Dget_space(starts_ds);
                 hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(starts_space);
                 H5Sclose(starts_space);
 
-                if (num_runs_hssize < 0) {
-                    H5Dclose(values_ds);
-                    H5Dclose(starts_ds);
-                    throw IOException("Failed to get run_starts size for: " + spec.run_starts_path);
-                }
-                size_t num_runs = static_cast<size_t>(num_runs_hssize);
-
-                // Get values size
                 hid_t values_space = H5Dget_space(values_ds);
                 hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
                 H5Sclose(values_space);
 
-                if (num_values_hssize < 0) {
+                if (num_runs_hssize < 0 || num_values_hssize < 0) {
                     H5Dclose(values_ds);
                     H5Dclose(starts_ds);
-                    throw IOException("Failed to get values size for: " + spec.values_path);
+                    throw IOException("Failed to get dataset sizes for RSE column");
                 }
+
+                size_t num_runs = static_cast<size_t>(num_runs_hssize);
                 size_t num_values = static_cast<size_t>(num_values_hssize);
 
                 // Validate: run_starts and values must have same size
@@ -756,63 +818,25 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                                     std::to_string(num_runs) + " and " + std::to_string(num_values));
                 }
 
-                // Read run_starts - handle different integer types
-                rse_col.run_starts.resize(num_runs);
-                hid_t starts_type = H5Dget_type(starts_ds);
-                H5T_class_t starts_class = H5Tget_class(starts_type);
-                size_t starts_size = H5Tget_size(starts_type);
-
+                // Read run_starts - validate it's an integer type, then let HDF5 convert to idx_t (uint64_t)
+                H5T_class_t starts_class = H5Tget_class(spec.run_starts_h5_type);
                 if (starts_class != H5T_INTEGER) {
-                    H5Tclose(starts_type);
                     H5Dclose(values_ds);
                     H5Dclose(starts_ds);
                     throw IOException("RSE run_starts must be integer type");
                 }
 
-                H5T_sign_t starts_sign = H5Tget_sign(starts_type);
+                // Read directly into run_starts - HDF5 automatically converts from file type to uint64_t
+                rse_col.run_starts.resize(num_runs);
+                herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+                                       rse_col.run_starts.data());
 
-                // Read run_starts based on type
-                if (starts_sign == H5T_SGN_2) {  // Signed
-                    if (starts_size == 4) {
-                        std::vector<int32_t> temp(num_runs);
-                        H5Dread(starts_ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (size_t i = 0; i < num_runs; i++) {
-                            rse_col.run_starts[i] = static_cast<idx_t>(temp[i]);
-                        }
-                    } else if (starts_size == 8) {
-                        std::vector<int64_t> temp(num_runs);
-                        H5Dread(starts_ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (size_t i = 0; i < num_runs; i++) {
-                            rse_col.run_starts[i] = static_cast<idx_t>(temp[i]);
-                        }
-                    } else {
-                        H5Tclose(starts_type);
-                        H5Dclose(values_ds);
-                        H5Dclose(starts_ds);
-                        throw IOException("Unsupported signed integer size for run_starts: " + std::to_string(starts_size));
-                    }
-                } else {  // Unsigned
-                    if (starts_size == 4) {
-                        std::vector<uint32_t> temp(num_runs);
-                        H5Dread(starts_ds, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (size_t i = 0; i < num_runs; i++) {
-                            rse_col.run_starts[i] = static_cast<idx_t>(temp[i]);
-                        }
-                    } else if (starts_size == 8) {
-                        std::vector<uint64_t> temp(num_runs);
-                        H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (size_t i = 0; i < num_runs; i++) {
-                            rse_col.run_starts[i] = static_cast<idx_t>(temp[i]);
-                        }
-                    } else {
-                        H5Tclose(starts_type);
-                        H5Dclose(values_ds);
-                        H5Dclose(starts_ds);
-                        throw IOException("Unsupported unsigned integer size for run_starts: " + std::to_string(starts_size));
-                    }
+                if (status < 0) {
+                    H5Dclose(values_ds);
+                    H5Dclose(starts_ds);
+                    throw IOException("Failed to read run_starts from: " + spec.run_starts_path);
                 }
 
-                H5Tclose(starts_type);
                 H5Dclose(starts_ds);
 
                 // Validate run_starts
@@ -826,114 +850,58 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
                         throw IOException("RSE run_starts must be strictly increasing");
                     }
                 }
-                // Validate that run_starts don't exceed dataset bounds
                 if (num_runs > 0 && rse_col.run_starts.back() >= bind_data.num_rows) {
                     H5Dclose(values_ds);
                     throw IOException("RSE run_starts contains index " + std::to_string(rse_col.run_starts.back()) +
                                      " which exceeds dataset length " + std::to_string(bind_data.num_rows));
                 }
 
-                // Read values - handle different types
+                // Read values using stored type and type dispatcher
                 rse_col.values.reserve(num_values);
-                hid_t values_type = H5Dget_type(values_ds);
-                H5T_class_t values_class = H5Tget_class(values_type);
-                size_t values_size = H5Tget_size(values_type);
 
-                if (values_class == H5T_INTEGER) {
-                    H5T_sign_t values_sign = H5Tget_sign(values_type);
+                // Use type dispatcher based on DuckDB column type (determined in Bind)
+                DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
+                    using T = typename decltype(type_tag)::type;
 
-                    if (values_sign == H5T_SGN_2) {  // Signed
-                        if (values_size == 1) {
-                            std::vector<int8_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_INT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::TINYINT(v));
-                        } else if (values_size == 2) {
-                            std::vector<int16_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_INT16, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::SMALLINT(v));
-                        } else if (values_size == 4) {
-                            std::vector<int32_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::INTEGER(v));
-                        } else if (values_size == 8) {
-                            std::vector<int64_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_INT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::BIGINT(v));
+                    if constexpr (std::is_same_v<T, string>) {
+                        // String handling
+                        htri_t is_variable = H5Tis_variable_str(spec.values_h5_type);
+
+                        if (is_variable > 0) {
+                            // Variable-length strings
+                            std::vector<char*> temp(num_values);
+                            H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
+                            for (size_t i = 0; i < num_values; i++) {
+                                rse_col.values.push_back(Value(temp[i] ? string(temp[i]) : string()));
+                            }
+                            // Reclaim memory
+                            hsize_t mem_dim = num_values;
+                            hid_t mem_space = H5Screate_simple(1, &mem_dim, nullptr);
+                            H5Dvlen_reclaim(spec.values_h5_type, mem_space, H5P_DEFAULT, temp.data());
+                            H5Sclose(mem_space);
                         } else {
-                            H5Tclose(values_type);
-                            H5Dclose(values_ds);
-                            throw IOException("Unsupported signed integer size for values: " + std::to_string(values_size));
+                            // Fixed-length strings
+                            size_t str_len = H5Tget_size(spec.values_h5_type);
+                            std::vector<char> buffer(num_values * str_len);
+                            H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, buffer.data());
+                            for (size_t i = 0; i < num_values; i++) {
+                                char *str_ptr = buffer.data() + (i * str_len);
+                                size_t actual_len = strnlen(str_ptr, str_len);
+                                rse_col.values.push_back(Value(string(str_ptr, actual_len)));
+                            }
                         }
-                    } else {  // Unsigned
-                        if (values_size == 1) {
-                            std::vector<uint8_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::UTINYINT(v));
-                        } else if (values_size == 2) {
-                            std::vector<uint16_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_UINT16, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::USMALLINT(v));
-                        } else if (values_size == 4) {
-                            std::vector<uint32_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::UINTEGER(v));
-                        } else if (values_size == 8) {
-                            std::vector<uint64_t> temp(num_values);
-                            H5Dread(values_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                            for (auto v : temp) rse_col.values.push_back(Value::UBIGINT(v));
-                        } else {
-                            H5Tclose(values_type);
-                            H5Dclose(values_ds);
-                            throw IOException("Unsupported unsigned integer size for values: " + std::to_string(values_size));
-                        }
-                    }
-                } else if (values_class == H5T_FLOAT) {
-                    if (values_size == 4) {
-                        std::vector<float> temp(num_values);
-                        H5Dread(values_ds, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (auto v : temp) rse_col.values.push_back(Value::FLOAT(v));
-                    } else if (values_size == 8) {
-                        std::vector<double> temp(num_values);
-                        H5Dread(values_ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (auto v : temp) rse_col.values.push_back(Value::DOUBLE(v));
                     } else {
-                        H5Tclose(values_type);
-                        H5Dclose(values_ds);
-                        throw IOException("Unsupported float size for values: " + std::to_string(values_size));
-                    }
-                } else if (values_class == H5T_STRING) {
-                    htri_t is_variable = H5Tis_variable_str(values_type);
+                        // Numeric types: read and convert to DuckDB Value
+                        std::vector<T> temp(num_values);
+                        H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
 
-                    if (is_variable > 0) {
-                        // Variable-length strings
-                        std::vector<char*> temp(num_values);
-                        H5Dread(values_ds, values_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp.data());
-                        for (size_t i = 0; i < num_values; i++) {
-                            rse_col.values.push_back(Value(temp[i] ? string(temp[i]) : string()));
-                        }
-                        // Create memory space for reclamation
-                        hsize_t mem_dim = num_values;
-                        hid_t mem_space = H5Screate_simple(1, &mem_dim, nullptr);
-                        H5Dvlen_reclaim(values_type, mem_space, H5P_DEFAULT, temp.data());
-                        H5Sclose(mem_space);
-                    } else {
-                        // Fixed-length strings
-                        size_t str_len = H5Tget_size(values_type);
-                        std::vector<char> buffer(num_values * str_len);
-                        H5Dread(values_ds, values_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, buffer.data());
-                        for (size_t i = 0; i < num_values; i++) {
-                            char *str_ptr = buffer.data() + (i * str_len);
-                            size_t actual_len = strnlen(str_ptr, str_len);
-                            rse_col.values.push_back(Value(string(str_ptr, actual_len)));
+                        // Convert to DuckDB Value based on type
+                        for (auto v : temp) {
+                            rse_col.values.push_back(Value::CreateValue(v));
                         }
                     }
-                } else {
-                    H5Tclose(values_type);
-                    H5Dclose(values_ds);
-                    throw IOException("Unsupported type class for RSE values: " + std::to_string(values_class));
-                }
+                });
 
-                H5Tclose(values_type);
                 H5Dclose(values_ds);
 
                 // Initialize runtime state
@@ -954,62 +922,36 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 // Helper function to scan an RSE column
 static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vector &result_vector,
                           idx_t position, idx_t to_read, hsize_t num_rows) {
-    // Single-pass expansion
-    for (idx_t i = 0; i < to_read; i++) {
-        idx_t row = position + i;
+    // Dispatch once per chunk, not per row
+    DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
+        using T = typename decltype(type_tag)::type;
 
-        // Advance run if needed
-        while (row >= state.next_run_start) {
-            state.current_run++;
-            state.next_run_start = (state.current_run + 1 < state.run_starts.size())
-                                 ? state.run_starts[state.current_run + 1]
-                                 : num_rows;
-        }
+        // Single-pass expansion (type-specific loop)
+        for (idx_t i = 0; i < to_read; i++) {
+            idx_t row = position + i;
 
-        // Emit current run's value based on type
-        auto &current_value = state.values[state.current_run];
+            // Advance run if needed
+            while (row >= state.next_run_start) {
+                state.current_run++;
+                state.next_run_start = (state.current_run + 1 < state.run_starts.size())
+                                     ? state.run_starts[state.current_run + 1]
+                                     : num_rows;
+            }
 
-        switch (spec.column_type.id()) {
-            case LogicalTypeId::TINYINT:
-                FlatVector::GetData<int8_t>(result_vector)[i] = current_value.template GetValue<int8_t>();
-                break;
-            case LogicalTypeId::SMALLINT:
-                FlatVector::GetData<int16_t>(result_vector)[i] = current_value.template GetValue<int16_t>();
-                break;
-            case LogicalTypeId::INTEGER:
-                FlatVector::GetData<int32_t>(result_vector)[i] = current_value.template GetValue<int32_t>();
-                break;
-            case LogicalTypeId::BIGINT:
-                FlatVector::GetData<int64_t>(result_vector)[i] = current_value.template GetValue<int64_t>();
-                break;
-            case LogicalTypeId::UTINYINT:
-                FlatVector::GetData<uint8_t>(result_vector)[i] = current_value.template GetValue<uint8_t>();
-                break;
-            case LogicalTypeId::USMALLINT:
-                FlatVector::GetData<uint16_t>(result_vector)[i] = current_value.template GetValue<uint16_t>();
-                break;
-            case LogicalTypeId::UINTEGER:
-                FlatVector::GetData<uint32_t>(result_vector)[i] = current_value.template GetValue<uint32_t>();
-                break;
-            case LogicalTypeId::UBIGINT:
-                FlatVector::GetData<uint64_t>(result_vector)[i] = current_value.template GetValue<uint64_t>();
-                break;
-            case LogicalTypeId::FLOAT:
-                FlatVector::GetData<float>(result_vector)[i] = current_value.template GetValue<float>();
-                break;
-            case LogicalTypeId::DOUBLE:
-                FlatVector::GetData<double>(result_vector)[i] = current_value.template GetValue<double>();
-                break;
-            case LogicalTypeId::VARCHAR: {
+            // Emit current run's value based on type
+            auto &current_value = state.values[state.current_run];
+
+            if constexpr (std::is_same_v<T, string>) {
+                // VARCHAR needs special handling for string storage
                 string str = current_value.template GetValue<string>();
                 FlatVector::GetData<string_t>(result_vector)[i] =
                     StringVector::AddString(result_vector, str);
-                break;
+            } else {
+                // Numeric types: direct assignment
+                FlatVector::GetData<T>(result_vector)[i] = current_value.template GetValue<T>();
             }
-            default:
-                throw IOException("Unsupported RSE value type");
         }
-    }
+    });
 }
 
 // Helper function to scan a regular dataset column
@@ -1111,48 +1053,13 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
         // Handle numeric data
         if (spec.ndims == 1) {
             // 1D dataset: read directly into DuckDB vector
-            void *data_ptr = nullptr;
-
-            // Get pointer to the correct type in the DuckDB vector
-            switch (spec.column_type.id()) {
-                case LogicalTypeId::TINYINT:
-                    data_ptr = FlatVector::GetData<int8_t>(result_vector);
-                    break;
-                case LogicalTypeId::SMALLINT:
-                    data_ptr = FlatVector::GetData<int16_t>(result_vector);
-                    break;
-                case LogicalTypeId::INTEGER:
-                    data_ptr = FlatVector::GetData<int32_t>(result_vector);
-                    break;
-                case LogicalTypeId::BIGINT:
-                    data_ptr = FlatVector::GetData<int64_t>(result_vector);
-                    break;
-                case LogicalTypeId::UTINYINT:
-                    data_ptr = FlatVector::GetData<uint8_t>(result_vector);
-                    break;
-                case LogicalTypeId::USMALLINT:
-                    data_ptr = FlatVector::GetData<uint16_t>(result_vector);
-                    break;
-                case LogicalTypeId::UINTEGER:
-                    data_ptr = FlatVector::GetData<uint32_t>(result_vector);
-                    break;
-                case LogicalTypeId::UBIGINT:
-                    data_ptr = FlatVector::GetData<uint64_t>(result_vector);
-                    break;
-                case LogicalTypeId::FLOAT:
-                    data_ptr = FlatVector::GetData<float>(result_vector);
-                    break;
-                case LogicalTypeId::DOUBLE:
-                    data_ptr = FlatVector::GetData<double>(result_vector);
-                    break;
-                default:
-                    H5Sclose(file_space);
-                    H5Sclose(mem_space);
-                    throw IOException("Unsupported data type for reading");
-            }
-
-            herr_t status = H5Dread(dataset_id, spec.h5_type_id, mem_space,
-                                    file_space, H5P_DEFAULT, data_ptr);
+            // Use type dispatcher to get typed pointer and read data
+            herr_t status = DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
+                using T = typename decltype(type_tag)::type;
+                void *data_ptr = FlatVector::GetData<T>(result_vector);
+                return H5Dread(dataset_id, spec.h5_type_id, mem_space,
+                              file_space, H5P_DEFAULT, data_ptr);
+            });
 
             if (status < 0) {
                 H5Sclose(file_space);
@@ -1172,49 +1079,13 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumn
                 current_type = ArrayType::GetChildType(current_type);
             }
 
-            // Get pointer to the innermost child data based on base type
-            void *child_data = nullptr;
-
-            switch (current_type.id()) {
-                case LogicalTypeId::TINYINT:
-                    child_data = FlatVector::GetData<int8_t>(*current_vector);
-                    break;
-                case LogicalTypeId::SMALLINT:
-                    child_data = FlatVector::GetData<int16_t>(*current_vector);
-                    break;
-                case LogicalTypeId::INTEGER:
-                    child_data = FlatVector::GetData<int32_t>(*current_vector);
-                    break;
-                case LogicalTypeId::BIGINT:
-                    child_data = FlatVector::GetData<int64_t>(*current_vector);
-                    break;
-                case LogicalTypeId::UTINYINT:
-                    child_data = FlatVector::GetData<uint8_t>(*current_vector);
-                    break;
-                case LogicalTypeId::USMALLINT:
-                    child_data = FlatVector::GetData<uint16_t>(*current_vector);
-                    break;
-                case LogicalTypeId::UINTEGER:
-                    child_data = FlatVector::GetData<uint32_t>(*current_vector);
-                    break;
-                case LogicalTypeId::UBIGINT:
-                    child_data = FlatVector::GetData<uint64_t>(*current_vector);
-                    break;
-                case LogicalTypeId::FLOAT:
-                    child_data = FlatVector::GetData<float>(*current_vector);
-                    break;
-                case LogicalTypeId::DOUBLE:
-                    child_data = FlatVector::GetData<double>(*current_vector);
-                    break;
-                default:
-                    H5Sclose(file_space);
-                    H5Sclose(mem_space);
-                    throw IOException("Unsupported array element type");
-            }
-
-            // Read data directly into the array child vector
-            herr_t status = H5Dread(dataset_id, spec.h5_type_id, mem_space,
-                                    file_space, H5P_DEFAULT, child_data);
+            // Get pointer to the innermost child data and read using type dispatcher
+            herr_t status = DispatchOnDuckDBType(current_type, [&](auto type_tag) {
+                using T = typename decltype(type_tag)::type;
+                void *child_data = FlatVector::GetData<T>(*current_vector);
+                return H5Dread(dataset_id, spec.h5_type_id, mem_space,
+                              file_space, H5P_DEFAULT, child_data);
+            });
 
             if (status < 0) {
                 H5Sclose(file_space);
@@ -1276,6 +1147,328 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
     h5_read.varargs = LogicalType::ANY;
 
     loader.RegisterFunction(h5_read);
+}
+
+//===--------------------------------------------------------------------===//
+// h5_attributes - Read attributes from HDF5 datasets/groups
+//===--------------------------------------------------------------------===//
+
+// Helper to convert HDF5 attribute type (including arrays) to DuckDB type
+static LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
+    H5T_class_t type_class = H5Tget_class(type_id);
+
+    if (type_class == H5T_ARRAY) {
+        // Get the base type of the array
+        hid_t base_type = H5Tget_super(type_id);
+        if (base_type < 0) {
+            throw IOException("Failed to get array base type");
+        }
+
+        // Get array dimensions
+        int ndims = H5Tget_array_ndims(type_id);
+        if (ndims < 0) {
+            H5Tclose(base_type);
+            throw IOException("Failed to get array dimensions");
+        }
+        if (ndims != 1) {
+            H5Tclose(base_type);
+            throw IOException("Only 1D array attributes are supported, found " + std::to_string(ndims) + "D array");
+        }
+
+        // Get the size of the array
+        hsize_t dims[1];
+        if (H5Tget_array_dims2(type_id, dims) < 0) {
+            H5Tclose(base_type);
+            throw IOException("Failed to get array dimensions");
+        }
+
+        // Convert base type to DuckDB type
+        LogicalType element_type = H5TypeToDuckDBType(base_type);
+        H5Tclose(base_type);
+
+        // Return ARRAY type with fixed size
+        return LogicalType::ARRAY(element_type, dims[0]);
+    }
+
+    // For non-array types, use the existing converter
+    return H5TypeToDuckDBType(type_id);
+}
+
+struct AttributeInfo {
+    std::string name;
+    LogicalType type;
+    H5TypeHandle h5_type;
+};
+
+struct H5AttributesBindData : public TableFunctionData {
+    std::string filename;
+    std::string object_path;
+    std::vector<AttributeInfo> attributes;
+};
+
+struct H5AttributesGlobalState : public GlobalTableFunctionState {
+    bool done = false;
+};
+
+// Callback for H5Aiterate2 to collect attribute names
+static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const H5A_info_t *ainfo, void *op_data) {
+    auto &attributes = *reinterpret_cast<std::vector<AttributeInfo>*>(op_data);
+
+    // Open the attribute
+    hid_t attr_id = H5Aopen(location_id, attr_name, H5P_DEFAULT);
+    if (attr_id < 0) {
+        throw IOException("Failed to open attribute: " + std::string(attr_name));
+    }
+
+    // Get the attribute's datatype
+    hid_t type_id = H5Aget_type(attr_id);
+    if (type_id < 0) {
+        H5Aclose(attr_id);
+        throw IOException("Failed to get type for attribute: " + std::string(attr_name));
+    }
+
+    // Get the dataspace to check if it's scalar or simple
+    hid_t space_id = H5Aget_space(attr_id);
+    if (space_id < 0) {
+        H5Tclose(type_id);
+        H5Aclose(attr_id);
+        throw IOException("Failed to get dataspace for attribute: " + std::string(attr_name));
+    }
+
+    H5S_class_t space_class = H5Sget_simple_extent_type(space_id);
+
+    // Check dataspace dimensions
+    int ndims = H5Sget_simple_extent_ndims(space_id);
+    hsize_t dims[H5S_MAX_RANK];
+    if (ndims > 0) {
+        H5Sget_simple_extent_dims(space_id, dims, nullptr);
+    }
+
+    H5Sclose(space_id);
+
+    // We support:
+    // 1. Scalar dataspaces (ndims == 0 or space_class == H5S_SCALAR)
+    // 2. Simple 1D dataspaces for array attributes
+    if (space_class != H5S_SCALAR && space_class != H5S_SIMPLE) {
+        H5Tclose(type_id);
+        H5Aclose(attr_id);
+        throw IOException("Attribute '" + std::string(attr_name) + "' has unsupported dataspace class");
+    }
+
+    if (space_class == H5S_SIMPLE && ndims > 1) {
+        H5Tclose(type_id);
+        H5Aclose(attr_id);
+        throw IOException("Attribute '" + std::string(attr_name) + "' has unsupported multidimensional dataspace (only 1D arrays supported)");
+    }
+
+    // Convert to DuckDB type
+    LogicalType duckdb_type;
+    try {
+        // If the dataspace is SIMPLE (1D), create an ARRAY type
+        if (space_class == H5S_SIMPLE && ndims == 1) {
+            LogicalType element_type = H5TypeToDuckDBType(type_id);
+            duckdb_type = LogicalType::ARRAY(element_type, dims[0]);
+        } else {
+            // For scalar dataspaces, use the normal converter (which handles H5T_ARRAY types)
+            duckdb_type = H5AttributeTypeToDuckDBType(type_id);
+        }
+    } catch (const std::exception &e) {
+        H5Tclose(type_id);
+        H5Aclose(attr_id);
+        throw IOException("Attribute '" + std::string(attr_name) + "' has unsupported type: " + std::string(e.what()));
+    }
+
+    // Store attribute info
+    AttributeInfo info;
+    info.name = attr_name;
+    info.type = duckdb_type;
+    info.h5_type = H5TypeHandle(type_id);
+
+    attributes.push_back(std::move(info));
+
+    H5Tclose(type_id);
+    H5Aclose(attr_id);
+
+    return 0; // Continue iteration
+}
+
+static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
+    auto result = make_uniq<H5AttributesBindData>();
+
+    // Get parameters
+    result->filename = input.inputs[0].GetValue<string>();
+    result->object_path = input.inputs[1].GetValue<string>();
+
+    // Open the HDF5 file
+    H5ErrorSuppressor suppress_errors;
+    hid_t file_id = H5Fopen(result->filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (file_id < 0) {
+        throw IOException("Failed to open HDF5 file: " + result->filename);
+    }
+
+    // Open the object (dataset or group)
+    hid_t obj_id = H5Oopen(file_id, result->object_path.c_str(), H5P_DEFAULT);
+    if (obj_id < 0) {
+        H5Fclose(file_id);
+        throw IOException("Failed to open object: " + result->object_path + " in file: " + result->filename);
+    }
+
+    // Iterate through attributes
+    hsize_t idx = 0;
+    herr_t status = H5Aiterate2(obj_id, H5_INDEX_NAME, H5_ITER_NATIVE, &idx, attr_info_callback, &result->attributes);
+
+    H5Oclose(obj_id);
+    H5Fclose(file_id);
+
+    if (status < 0) {
+        throw IOException("Failed to iterate attributes for: " + result->object_path);
+    }
+
+    // Build the return schema - one column per attribute
+    for (const auto &attr : result->attributes) {
+        names.push_back(attr.name);
+        return_types.push_back(attr.type);
+    }
+
+    return std::move(result);
+}
+
+static unique_ptr<GlobalTableFunctionState> H5AttributesInit(ClientContext &context, TableFunctionInitInput &input) {
+    return make_uniq<H5AttributesGlobalState>();
+}
+
+static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+    auto &gstate = input.global_state->Cast<H5AttributesGlobalState>();
+    auto &bind_data = input.bind_data->Cast<H5AttributesBindData>();
+
+    // Only return one row
+    if (gstate.done) {
+        output.SetCardinality(0);
+        return;
+    }
+
+    // Open the file and object
+    H5ErrorSuppressor suppress_errors;
+    hid_t file_id = H5Fopen(bind_data.filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (file_id < 0) {
+        throw IOException("Failed to open HDF5 file: " + bind_data.filename);
+    }
+
+    hid_t obj_id = H5Oopen(file_id, bind_data.object_path.c_str(), H5P_DEFAULT);
+    if (obj_id < 0) {
+        H5Fclose(file_id);
+        throw IOException("Failed to open object: " + bind_data.object_path);
+    }
+
+    // Read each attribute and fill the corresponding column
+    for (idx_t col_idx = 0; col_idx < bind_data.attributes.size(); col_idx++) {
+        const auto &attr_info = bind_data.attributes[col_idx];
+        auto &result_vector = output.data[col_idx];
+
+        // Open the attribute
+        hid_t attr_id = H5Aopen(obj_id, attr_info.name.c_str(), H5P_DEFAULT);
+        if (attr_id < 0) {
+            H5Oclose(obj_id);
+            H5Fclose(file_id);
+            throw IOException("Failed to open attribute: " + attr_info.name);
+        }
+
+        // Read the attribute value based on its type
+        if (attr_info.type.id() == LogicalTypeId::ARRAY) {
+            // Handle array attributes
+            auto array_child_type = ArrayType::GetChildType(attr_info.type);
+            auto array_size = ArrayType::GetSize(attr_info.type);
+
+            // Get the child vector where array data is stored
+            auto &child_vector = ArrayVector::GetEntry(result_vector);
+
+            // Dispatch on the element type to read the array data directly into child vector
+            DispatchOnDuckDBType(array_child_type, [&](auto type_tag) {
+                using T = typename decltype(type_tag)::type;
+
+                // Get pointer to child vector data
+                auto child_data = FlatVector::GetData<T>(child_vector);
+
+                // Read the array attribute directly into the child vector
+                if (H5Aread(attr_id, attr_info.h5_type.get(), child_data) < 0) {
+                    throw IOException("Failed to read array attribute: " + attr_info.name);
+                }
+            });
+
+        } else if (attr_info.type.id() == LogicalTypeId::VARCHAR) {
+            // Handle string attributes
+            htri_t is_variable = H5Tis_variable_str(attr_info.h5_type.get());
+
+            if (is_variable > 0) {
+                // Variable-length string
+                char* str_ptr = nullptr;
+                if (H5Aread(attr_id, attr_info.h5_type.get(), &str_ptr) < 0) {
+                    H5Aclose(attr_id);
+                    H5Oclose(obj_id);
+                    H5Fclose(file_id);
+                    throw IOException("Failed to read variable-length string attribute: " + attr_info.name);
+                }
+
+                if (str_ptr) {
+                    FlatVector::GetData<string_t>(result_vector)[0] =
+                        StringVector::AddString(result_vector, str_ptr);
+                    // Free HDF5-allocated string
+                    free(str_ptr);
+                } else {
+                    FlatVector::SetNull(result_vector, 0, true);
+                }
+
+            } else {
+                // Fixed-length string
+                size_t str_len = H5Tget_size(attr_info.h5_type.get());
+                std::vector<char> buffer(str_len);
+
+                if (H5Aread(attr_id, attr_info.h5_type.get(), buffer.data()) < 0) {
+                    H5Aclose(attr_id);
+                    H5Oclose(obj_id);
+                    H5Fclose(file_id);
+                    throw IOException("Failed to read fixed-length string attribute: " + attr_info.name);
+                }
+
+                // Find actual string length (may be null-terminated or space-padded)
+                size_t actual_len = strnlen(buffer.data(), str_len);
+                FlatVector::GetData<string_t>(result_vector)[0] =
+                    StringVector::AddString(result_vector, buffer.data(), actual_len);
+            }
+
+        } else {
+            // Handle scalar attributes - use type dispatcher
+            DispatchOnDuckDBType(attr_info.type, [&](auto type_tag) {
+                using T = typename decltype(type_tag)::type;
+
+                T value;
+                if (H5Aread(attr_id, attr_info.h5_type.get(), &value) < 0) {
+                    throw IOException("Failed to read attribute: " + attr_info.name);
+                }
+
+                // Store the value in the output vector
+                auto data = FlatVector::GetData<T>(result_vector);
+                data[0] = value;
+            });
+        }
+
+        H5Aclose(attr_id);
+    }
+
+    H5Oclose(obj_id);
+    H5Fclose(file_id);
+
+    gstate.done = true;
+    output.SetCardinality(1);
+}
+
+void RegisterH5AttributesFunction(ExtensionLoader &loader) {
+    TableFunction h5_attributes("h5_attributes", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+                                H5AttributesScan, H5AttributesBind, H5AttributesInit);
+    h5_attributes.name = "h5_attributes";
+
+    loader.RegisterFunction(h5_attributes);
 }
 
 } // namespace duckdb

@@ -64,6 +64,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterH5TreeFunction(loader);
 	RegisterH5ReadFunction(loader);
 	RegisterH5RseFunction(loader);
+	RegisterH5AttributesFunction(loader);
 }
 
 void H5dbExtension::Load(ExtensionLoader &loader) {

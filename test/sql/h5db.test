@@ -770,3 +770,50 @@ SELECT * FROM h5_read(
 );
 ----
 IO Error: Failed to open RSE values dataset: /nonexistent_values
+
+#===--------------------------------------------------------------------===#
+# h5_attributes tests
+#===--------------------------------------------------------------------===#
+
+# Test reading scalar and array attributes from a dataset
+query IITTIIIIIIRRT
+SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+42	1234	[1, 2, 3, 4, 5]	[1.1, 2.2, 3.3]	123456	9876543210	255	65535	4294967295	18446744073709551615	3.14159	2.718281828	Hello HDF5!
+
+# Test reading attributes from a group
+query ITI
+SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/group_with_attrs');
+----
+999	I am a group	[10, 20, 30]
+
+# Test verifying column names match attribute names
+query I
+SELECT int32_attr FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+123456
+
+# Test verifying string attribute
+query T
+SELECT string_attr FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+Hello HDF5!
+
+# Test verifying specific numeric attributes
+query IIR
+SELECT int8_attr, uint64_attr, float64_attr FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+42	18446744073709551615	2.718281828
+
+# Test error: non-existent file
+statement error
+SELECT * FROM h5_attributes('nonexistent.h5', '/dataset');
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
+
+# Test error: non-existent object path
+statement error
+SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/nonexistent_path');
+----
+IO Error: Failed to open object: /nonexistent_path
+

@@ -23,4 +23,7 @@ void RegisterH5ReadFunction(ExtensionLoader &loader);
 // Scalar function for creating RSE (run-start encoded) column specs
 void RegisterH5RseFunction(ExtensionLoader &loader);
 
+// Table function for reading HDF5 attributes
+void RegisterH5AttributesFunction(ExtensionLoader &loader);
+
 } // namespace duckdb
