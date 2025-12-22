@@ -421,5 +421,5 @@ See `test/data/run_encoded.h5` for complete working examples:
 ## See Also
 
 - [README.md](README.md) - Main h5db documentation
-- [TEST_SUITE_SUMMARY.md](TEST_SUITE_SUMMARY.md) - Test coverage details
-- [RUN_ENCODING_PLAN.md](RUN_ENCODING_PLAN.md) - Implementation details
+- [API.md](API.md) - Complete API reference
+- [docs/DEVELOPER.md](docs/DEVELOPER.md) - Developer guide

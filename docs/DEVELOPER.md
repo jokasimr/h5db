@@ -345,6 +345,40 @@ deactivate
    D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
    ```
 
+### Code Formatting
+
+The project uses automated code formatting to maintain consistency.
+
+**One-time setup** (already configured):
+```bash
+./scripts/setup-dev-env.sh              # Install formatting tools in venv
+./scripts/install-pre-commit-hook.sh    # Optional: auto-check on commit
+```
+
+**Before committing**:
+```bash
+source venv/bin/activate
+
+# Check formatting (fast)
+make format-check
+
+# Auto-fix formatting issues
+make format
+
+# Optional: run static analysis (slower)
+make tidy-check
+```
+
+**What gets formatted:**
+- C/C++ code: `clang-format` (uses DuckDB's .clang-format rules)
+- Python code: `black`
+- CMake files: `cmake-format`
+
+**Pre-commit hook** (if installed):
+- Automatically runs `make format-check` before each commit
+- Blocks commits with formatting issues
+- To bypass temporarily: `git commit --no-verify`
+
 ### Adding New Tests
 
 1. **Create test data** (if needed):
@@ -585,9 +619,9 @@ make clean        # Clean build artifacts
 ## Additional Resources
 
 - **Main README**: `README.md` - Project overview and usage
+- **API Reference**: `API.md` - Complete function reference
 - **RSE Documentation**: `RSE_USAGE.md` - Run-Start Encoding guide
-- **Architecture**: `ARCHITECTURE.md` - System architecture
-- **Test Coverage**: `test/RSE_EDGE_CASES_COVERAGE.md` - Edge case documentation
-- **Benchmarks**: `benchmark/README.md` - Performance benchmarking guide
+- **Project Status**: `STATUS.md` - Current implementation status
+- **CLAUDE.md**: `CLAUDE.md` - Instructions for AI agents working on this project
 
 For questions or issues, please check existing documentation or open an issue on GitHub.

@@ -12,13 +12,14 @@ H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scient
 
 ### Features
 
-- **Read HDF5 datasets**: Access datasets from HDF5 files using table-valued functions
-- **Hierarchical navigation**: Read datasets from nested groups with full path support
+- **Browse file structure**: List groups and datasets with `h5_tree()`
+- **Read datasets**: Access data from HDF5 files with `h5_read()`
+- **Read attributes**: Access dataset and group attributes with `h5_attributes()`
+- **Hierarchical navigation**: Full support for nested groups
 - **Multiple datasets**: Read and combine multiple datasets in a single query
 - **Run-start encoding**: Efficient reading of run-length encoded data with automatic expansion
 - **Type mapping**: Automatic conversion between HDF5 and DuckDB data types
-- **Multi-dimensional arrays**: Support for N-dimensional datasets using DuckDB's array types
-- **Metadata access**: Inspect file structure and dataset attributes
+- **Multi-dimensional arrays**: Support for 1D-4D datasets using DuckDB's array types
 
 ### Quick Start
 
@@ -50,14 +51,17 @@ FROM h5_read(
     h5_rse('/data/status_starts', '/data/status_vals')
 )
 GROUP BY status;
+
+-- Read attributes from a dataset or group
+SELECT * FROM h5_attributes('data.h5', '/dataset_name');
 ```
 
 ### Documentation
 
-- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** - Developer guide (building, testing, Python scripts)
+- **[API.md](API.md)** - Complete API reference for all functions
 - **[RSE_USAGE.md](RSE_USAGE.md)** - Complete guide to run-start encoding support
-- **[PLAN.md](PLAN.md)** - Implementation roadmap and current status
-- **[TEST_SUITE_SUMMARY.md](TEST_SUITE_SUMMARY.md)** - Test coverage details
+- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** - Developer guide (building, testing, development)
+- **[CLAUDE.md](CLAUDE.md)** - Instructions for AI agents working on this project
 
 
 ## Building
@@ -116,6 +120,9 @@ D SELECT * FROM h5_read(
     '/timestamps',
     h5_rse('/state_run_starts', '/state_values')
 );
+
+-- Read attributes
+D SELECT * FROM h5_attributes('example.h5', '/dataset_name');
 ```
 
 For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE.md)**.
