@@ -1,6 +1,6 @@
 # name: test/sql/rse_edge_cases.test
 # description: Comprehensive edge case tests for RSE (Run-Start Encoding) scanner
-# group: [h5db]
+# group: [sql]
 
 # These tests ensure the RSE scanner handles all edge cases correctly, including:
 # - Single row datasets

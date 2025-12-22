@@ -38,8 +38,7 @@ inline void H5dbVersionScalarFun(DataChunk &args, ExpressionState &state, Vector
 		unsigned majnum, minnum, relnum;
 		H5get_libversion(&majnum, &minnum, &relnum);
 
-		std::string version_str = "H5db " + name.GetString() +
-		                          ", HDF5 version " + std::to_string(majnum) + "." +
+		std::string version_str = "H5db " + name.GetString() + ", HDF5 version " + std::to_string(majnum) + "." +
 		                          std::to_string(minnum) + "." + std::to_string(relnum);
 		return StringVector::AddString(result, version_str);
 	});
@@ -52,12 +51,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register another scalar function
 	auto h5db_openssl_version_scalar_function = ScalarFunction("h5db_openssl_version", {LogicalType::VARCHAR},
-	                                                            LogicalType::VARCHAR, H5dbOpenSSLVersionScalarFun);
+	                                                           LogicalType::VARCHAR, H5dbOpenSSLVersionScalarFun);
 	loader.RegisterFunction(h5db_openssl_version_scalar_function);
 
 	// Register HDF5 version check function
-	auto h5db_version_scalar_function = ScalarFunction("h5db_version", {LogicalType::VARCHAR},
-	                                                     LogicalType::VARCHAR, H5dbVersionScalarFun);
+	auto h5db_version_scalar_function =
+	    ScalarFunction("h5db_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, H5dbVersionScalarFun);
 	loader.RegisterFunction(h5db_version_scalar_function);
 
 	// Register HDF5 table functions
