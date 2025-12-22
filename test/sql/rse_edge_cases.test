@@ -1,0 +1,631 @@
+# name: test/sql/rse_edge_cases.test
+# description: Comprehensive edge case tests for RSE (Run-Start Encoding) scanner
+# group: [h5db]
+
+# These tests ensure the RSE scanner handles all edge cases correctly, including:
+# - Single row datasets
+# - Single-entry runs
+# - Runs aligned with chunk boundaries (2048 rows = STANDARD_VECTOR_SIZE)
+# - Runs spanning multiple chunks
+# - CONSTANT_VECTOR optimization (entire chunk is one value)
+# - Different data types
+# - Mid-chunk run boundaries
+
+require h5db
+
+# =============================================================================
+# Test 1: Single Row Dataset
+# =============================================================================
+
+query II
+SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/single_row/index',
+    h5_rse('/single_row/run_starts', '/single_row/values')
+);
+----
+0	42
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/single_row/index',
+    h5_rse('/single_row/run_starts', '/single_row/values')
+);
+----
+1
+
+# =============================================================================
+# Test 2: Single-Entry Runs (every row is a different run)
+# Worst case for RLE - no compression benefit
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/single_entry_runs/index',
+    h5_rse('/single_entry_runs/run_starts', '/single_entry_runs/values')
+);
+----
+10
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/single_entry_runs/index',
+    h5_rse('/single_entry_runs/run_starts', '/single_entry_runs/values')
+);
+----
+10
+
+# Verify exact values
+query I
+SELECT SUM(values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/single_entry_runs/index',
+    h5_rse('/single_entry_runs/run_starts', '/single_entry_runs/values')
+);
+----
+5500
+
+# =============================================================================
+# Test 3: Runs Aligned Exactly with Chunk Boundaries (2048)
+# First run: rows 0-2047 (exactly one chunk)
+# Second run: rows 2048-4095 (exactly one chunk)
+# Third run: rows 4096-4099 (partial chunk)
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_aligned/index',
+    h5_rse('/chunk_aligned/run_starts', '/chunk_aligned/values')
+);
+----
+4100
+
+# Verify run distribution
+query III
+SELECT COUNT(*) FILTER (WHERE values = 1),
+       COUNT(*) FILTER (WHERE values = 2),
+       COUNT(*) FILTER (WHERE values = 3)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_aligned/index',
+    h5_rse('/chunk_aligned/run_starts', '/chunk_aligned/values')
+);
+----
+2048	2048	4
+
+# Verify transition at chunk boundary
+query II
+SELECT index, values FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_aligned/index',
+    h5_rse('/chunk_aligned/run_starts', '/chunk_aligned/values')
+)
+WHERE index BETWEEN 2046 AND 2050;
+----
+2046	1
+2047	1
+2048	2
+2049	2
+2050	2
+
+# =============================================================================
+# Test 4: Constant Value Across Multiple Chunks
+# 5000 rows all with same value - tests CONSTANT_VECTOR optimization
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/constant_multi_chunk/index',
+    h5_rse('/constant_multi_chunk/run_starts', '/constant_multi_chunk/values')
+);
+----
+5000
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/constant_multi_chunk/index',
+    h5_rse('/constant_multi_chunk/run_starts', '/constant_multi_chunk/values')
+);
+----
+1
+
+query I
+SELECT MAX(values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/constant_multi_chunk/index',
+    h5_rse('/constant_multi_chunk/run_starts', '/constant_multi_chunk/values')
+);
+----
+999
+
+# =============================================================================
+# Test 5: Run Boundary in Middle of Chunk
+# Tests transitions that don't align with chunk boundaries
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/mid_chunk_boundary/index',
+    h5_rse('/mid_chunk_boundary/run_starts', '/mid_chunk_boundary/values')
+);
+----
+3500
+
+query III
+SELECT COUNT(*) FILTER (WHERE values = 10),
+       COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values = 30)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/mid_chunk_boundary/index',
+    h5_rse('/mid_chunk_boundary/run_starts', '/mid_chunk_boundary/values')
+);
+----
+1001	2000	499
+
+# Verify transitions
+query II
+SELECT index, values FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/mid_chunk_boundary/index',
+    h5_rse('/mid_chunk_boundary/run_starts', '/mid_chunk_boundary/values')
+)
+WHERE index BETWEEN 999 AND 1002;
+----
+999	10
+1000	10
+1001	20
+1002	20
+
+# =============================================================================
+# Test 6: Large Run Followed by Many Small Runs
+# Tests scanner state management when switching from large to small runs
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/large_then_small/index',
+    h5_rse('/large_then_small/run_starts', '/large_then_small/values')
+);
+----
+3011
+
+query I
+SELECT COUNT(*) FILTER (WHERE values = 1) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/large_then_small/index',
+    h5_rse('/large_then_small/run_starts', '/large_then_small/values')
+);
+----
+3001
+
+# Verify the 10 single-row runs at the end
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/large_then_small/index',
+    h5_rse('/large_then_small/run_starts', '/large_then_small/values')
+)
+WHERE index >= 3001;
+----
+10
+
+# =============================================================================
+# Test 7-10: Different Data Types
+# =============================================================================
+
+# INT8
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int8/index',
+    h5_rse('/type_int8/run_starts', '/type_int8/values')
+);
+----
+100
+
+query II
+SELECT MIN(values), MAX(values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int8/index',
+    h5_rse('/type_int8/run_starts', '/type_int8/values')
+);
+----
+-128	127
+
+# INT64
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int64/index',
+    h5_rse('/type_int64/run_starts', '/type_int64/values')
+);
+----
+100
+
+query III
+SELECT COUNT(*) FILTER (WHERE values = 9223372036854775807),
+       COUNT(*) FILTER (WHERE values = -9223372036854775808),
+       COUNT(*) FILTER (WHERE values = 0)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int64/index',
+    h5_rse('/type_int64/run_starts', '/type_int64/values')
+);
+----
+25	50	25
+
+# FLOAT32
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float32/index',
+    h5_rse('/type_float32/run_starts', '/type_float32/values')
+);
+----
+100
+
+query I
+SELECT COUNT(DISTINCT ROUND(values::DOUBLE, 5)) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float32/index',
+    h5_rse('/type_float32/run_starts', '/type_float32/values')
+);
+----
+3
+
+# FLOAT64
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float64/index',
+    h5_rse('/type_float64/run_starts', '/type_float64/values')
+);
+----
+100
+
+query I
+SELECT COUNT(DISTINCT ROUND(values, 10)) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float64/index',
+    h5_rse('/type_float64/run_starts', '/type_float64/values')
+);
+----
+3
+
+# STRING
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_string/index',
+    h5_rse('/type_string/run_starts', '/type_string/values')
+);
+----
+50
+
+query III
+SELECT COUNT(*) FILTER (WHERE values = 'alpha'),
+       COUNT(*) FILTER (WHERE values = 'beta'),
+       COUNT(*) FILTER (WHERE values = 'gamma')
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_string/index',
+    h5_rse('/type_string/run_starts', '/type_string/values')
+);
+----
+20	20	10
+
+# =============================================================================
+# Test 12: Exact One Chunk (2048 rows, single run)
+# Tests CONSTANT_VECTOR optimization for exactly one chunk
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/exact_one_chunk/index',
+    h5_rse('/exact_one_chunk/run_starts', '/exact_one_chunk/values')
+);
+----
+2048
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/exact_one_chunk/index',
+    h5_rse('/exact_one_chunk/run_starts', '/exact_one_chunk/values')
+);
+----
+1
+
+query I
+SELECT values FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/exact_one_chunk/index',
+    h5_rse('/exact_one_chunk/run_starts', '/exact_one_chunk/values')
+)
+LIMIT 1;
+----
+777
+
+# =============================================================================
+# Test 13: Exact Two Chunks (4096 rows, single run)
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/exact_two_chunks/index',
+    h5_rse('/exact_two_chunks/run_starts', '/exact_two_chunks/values')
+);
+----
+4096
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/exact_two_chunks/index',
+    h5_rse('/exact_two_chunks/run_starts', '/exact_two_chunks/values')
+);
+----
+1
+
+# =============================================================================
+# Test 14: Chunk + 1 Row (2049 rows, single run)
+# First chunk is constant, second chunk has 1 row
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_plus_one/index',
+    h5_rse('/chunk_plus_one/run_starts', '/chunk_plus_one/values')
+);
+----
+2049
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_plus_one/index',
+    h5_rse('/chunk_plus_one/run_starts', '/chunk_plus_one/values')
+);
+----
+1
+
+# Verify value at chunk boundary
+query II
+SELECT index, values FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_plus_one/index',
+    h5_rse('/chunk_plus_one/run_starts', '/chunk_plus_one/values')
+)
+WHERE index BETWEEN 2046 AND 2048;
+----
+2046	111
+2047	111
+2048	111
+
+# =============================================================================
+# Test 15: Chunk - 1 Row (2047 rows, single run)
+# Just under one chunk
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_minus_one/index',
+    h5_rse('/chunk_minus_one/run_starts', '/chunk_minus_one/values')
+);
+----
+2047
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_minus_one/index',
+    h5_rse('/chunk_minus_one/run_starts', '/chunk_minus_one/values')
+);
+----
+1
+
+# =============================================================================
+# Test 16: Multiple Runs Within First Chunk
+# 5 runs of ~400 rows each, all within first chunk
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/multi_runs_one_chunk/index',
+    h5_rse('/multi_runs_one_chunk/run_starts', '/multi_runs_one_chunk/values')
+);
+----
+2000
+
+query I
+SELECT COUNT(DISTINCT values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/multi_runs_one_chunk/index',
+    h5_rse('/multi_runs_one_chunk/run_starts', '/multi_runs_one_chunk/values')
+);
+----
+5
+
+query I
+SELECT SUM(values) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/multi_runs_one_chunk/index',
+    h5_rse('/multi_runs_one_chunk/run_starts', '/multi_runs_one_chunk/values')
+);
+----
+6000
+
+# =============================================================================
+# Test 17: Alternating Pattern Crossing Chunk Boundary
+# Pattern: 1000 rows of A, 1000 of B, 1000 of A, 1000 of B
+# Boundaries at 1000, 2000 (crosses chunk at 2048), 3000
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/alternating_cross_chunk/index',
+    h5_rse('/alternating_cross_chunk/run_starts', '/alternating_cross_chunk/values')
+);
+----
+4000
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 100),
+       COUNT(*) FILTER (WHERE values = 200)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/alternating_cross_chunk/index',
+    h5_rse('/alternating_cross_chunk/run_starts', '/alternating_cross_chunk/values')
+);
+----
+2000	2000
+
+# Verify values around chunk boundary (2048)
+# Run 1 (value 200): rows 1000-1999
+# Run 2 (value 100): rows 2000-2999
+query II
+SELECT index, values FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/alternating_cross_chunk/index',
+    h5_rse('/alternating_cross_chunk/run_starts', '/alternating_cross_chunk/values')
+)
+WHERE index BETWEEN 1998 AND 2002;
+----
+1998	200
+1999	200
+2000	100
+2001	100
+2002	100
+
+# =============================================================================
+# Test 18: Very Small Dataset (3 rows, 2 runs)
+# =============================================================================
+
+query II
+SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/very_small/index',
+    h5_rse('/very_small/run_starts', '/very_small/values')
+);
+----
+0	10
+1	10
+2	20
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/very_small/index',
+    h5_rse('/very_small/run_starts', '/very_small/values')
+);
+----
+3
+
+# =============================================================================
+# Integration Tests: Verify Correctness with Aggregations
+# =============================================================================
+
+# Test that aggregations work correctly across chunk boundaries
+# Sum of 0 to 4099 = 4100 * 4099 / 2 = 8402950
+query I
+SELECT SUM(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/chunk_aligned/index',
+    h5_rse('/chunk_aligned/run_starts', '/chunk_aligned/values')
+);
+----
+8402950
+
+# Test GROUP BY on RSE column across chunks
+query II
+SELECT values, COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/mid_chunk_boundary/index',
+    h5_rse('/mid_chunk_boundary/run_starts', '/mid_chunk_boundary/values')
+)
+GROUP BY values
+ORDER BY values;
+----
+10	1001
+20	2000
+30	499
+
+# Test filtering on RSE values that span chunk boundaries
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/constant_multi_chunk/index',
+    h5_rse('/constant_multi_chunk/run_starts', '/constant_multi_chunk/values')
+)
+WHERE values = 999 AND index >= 2048;
+----
+2952
+
+# =============================================================================
+# Type Detection Tests
+# =============================================================================
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int8/index',
+    h5_rse('/type_int8/run_starts', '/type_int8/values')
+))
+WHERE column_name = 'values';
+----
+TINYINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_int64/index',
+    h5_rse('/type_int64/run_starts', '/type_int64/values')
+))
+WHERE column_name = 'values';
+----
+BIGINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float32/index',
+    h5_rse('/type_float32/run_starts', '/type_float32/values')
+))
+WHERE column_name = 'values';
+----
+FLOAT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float64/index',
+    h5_rse('/type_float64/run_starts', '/type_float64/values')
+))
+WHERE column_name = 'values';
+----
+DOUBLE
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_string/index',
+    h5_rse('/type_string/run_starts', '/type_string/values')
+))
+WHERE column_name = 'values';
+----
+VARCHAR

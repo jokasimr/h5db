@@ -954,21 +954,41 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
         // Access typed vector directly (no Value overhead)
         const auto& typed_values = std::get<std::vector<T>>(state.values);
 
-        // Batch process runs: fill rows belonging to same run in tight loop
+        // Advance to correct run if needed (rare - only at run boundaries)
+        while (position >= state.next_run_start) {
+            state.current_run++;
+            state.next_run_start = (state.current_run + 1 < state.run_starts.size())
+                                 ? state.run_starts[state.current_run + 1]
+                                 : num_rows;
+        }
+
+        // OPTIMIZATION: Check if entire chunk belongs to single run
+        // With avg run length ~10k and chunk size 2048, this is true ~83% of the time!
+        idx_t rows_in_current_run = state.next_run_start - position;
+        if (rows_in_current_run >= to_read) {
+            // Entire chunk is one value - emit CONSTANT_VECTOR (no fill loop needed!)
+            result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+            const T& run_value = typed_values[state.current_run];
+
+            if constexpr (std::is_same_v<T, string>) {
+                auto result_data = ConstantVector::GetData<string_t>(result_vector);
+                result_data[0] = StringVector::AddString(result_vector, run_value);
+            } else {
+                auto result_data = ConstantVector::GetData<T>(result_vector);
+                result_data[0] = run_value;
+            }
+            return;
+        }
+
+        // Fall back to batched fill when chunk spans multiple runs
+        result_vector.SetVectorType(VectorType::FLAT_VECTOR);
         idx_t i = 0;
         while (i < to_read) {
+            // State is already correctly positioned from initial while loop or previous iteration
             idx_t current_row = position + i;
 
-            // Advance to correct run if needed (rare - only at run boundaries)
-            while (current_row >= state.next_run_start) {
-                state.current_run++;
-                state.next_run_start = (state.current_run + 1 < state.run_starts.size())
-                                     ? state.run_starts[state.current_run + 1]
-                                     : num_rows;
-            }
-
             // Calculate how many rows belong to current run
-            idx_t rows_in_current_run = state.next_run_start - current_row;
+            rows_in_current_run = state.next_run_start - current_row;
             idx_t rows_to_fill = std::min(rows_in_current_run, to_read - i);
 
             // Get the value for this run
@@ -990,6 +1010,14 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
             }
 
             i += rows_to_fill;
+
+            // If we've exhausted current run and there's more to read, advance to next run
+            if (i < to_read) {
+                state.current_run++;
+                state.next_run_start = (state.current_run + 1 < state.run_starts.size())
+                                     ? state.run_starts[state.current_run + 1]
+                                     : num_rows;
+            }
         }
     });
 }
