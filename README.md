@@ -54,35 +54,46 @@ GROUP BY status;
 
 ### Documentation
 
+- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** - Developer guide (building, testing, Python scripts)
 - **[RSE_USAGE.md](RSE_USAGE.md)** - Complete guide to run-start encoding support
 - **[PLAN.md](PLAN.md)** - Implementation roadmap and current status
 - **[TEST_SUITE_SUMMARY.md](TEST_SUITE_SUMMARY.md)** - Test coverage details
 
 
 ## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-### Build steps
-Now to build the extension, run:
-```sh
-make
+### Quick Start
+
+```bash
+# 1. Set up VCPKG (one-time setup)
+# (Not in this directory!)
+git clone https://github.com/Microsoft/vcpkg.git
+cd vcpkg
+./bootstrap-vcpkg.sh
+export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
+cd ..
+# If VCPKG is already installed VCPKG_TOOLCHAIN_PATH should exist.
+# If it does not exist it might be stored in an `.env` file.
+# If it isn't then the path might be `../vcpkg/scripts/buildsystems/vcpkg.cmake`. But you need to verify if that is the case.
+
+# 2. Clone and build h5db
+git clone <repository-url>
+cd h5db
+git submodule update --init --recursive
+
+# 3. Configure environment (update .env with your vcpkg path)
+source .env
+
+# 4. Build
+make -j$(nproc)
 ```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/h5db/h5db.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `h5db.duckdb_extension` is the loadable binary as it would be distributed.
+
+The main binaries will be built in:
+- `./build/release/duckdb` - DuckDB shell with h5db extension loaded
+- `./build/release/test/unittest` - Test runner
+- `./build/release/extension/h5db/h5db.duckdb_extension` - Loadable extension
+
+**For detailed build instructions, testing, and development workflows, see [docs/DEVELOPER.md](docs/DEVELOPER.md).**
 
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`.
@@ -109,11 +120,17 @@ D SELECT * FROM h5_read(
 
 For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE.md)**.
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
+## Running the Tests
+
+```bash
+# Run all tests
+source .env && ./build/release/test/unittest "test/*"
+
+# Or use the makefile target
 make test
 ```
+
+**For detailed testing instructions, test creation, and Python script usage, see [docs/DEVELOPER.md](docs/DEVELOPER.md).**
 
 ### Installing the deployed binaries
 To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
