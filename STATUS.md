@@ -53,17 +53,30 @@
 
 ### Type Support
 - ❌ Compound types (HDF5 structs) - not implemented
+  - Not in scope for now.
 - ❌ Enum types - not implemented
+  - Not in scope for now.
 - ❌ Reference types - not implemented
+  - Not in scope for now.
 - ❌ Variable-length arrays - not implemented
+  - Not in scope for now.
 
 ### Constraints
 - ⚠️ Maximum 4 dimensions for arrays
+  - Not in scope to fix for now.
 - ⚠️ RSE columns require at least one regular column
+  - Not in scope to fix for now.
 
 ### Technical Debt
 - ⚠️ Thread safety concerns with global error handler
+  - If this can be fixed it is good, but it's not high priority.
 - ⚠️ No NULL/fill value support
+  - Not in scope to fix for now.
+
+### HDF5 file frequently opened/closed
+- As it is now the HDF5 file is opened and closed every time a dataset or attribute is accessed.
+  - That can be quite inefficient when accessing many datasets.
+  - It would be good to be able to pre open a hdf5 file, and cache the file handle.
 
 ## Project Structure
 

@@ -379,6 +379,41 @@ make tidy-check
 - Blocks commits with formatting issues
 - To bypass temporarily: `git commit --no-verify`
 
+### Thread Safety Considerations
+
+**IMPORTANT**: The HDF5 library is not thread-safe. To prevent race conditions and crashes when DuckDB parallelizes query execution, all HDF5 API calls are protected by a global mutex (`hdf5_global_mutex`).
+
+**What this means for developers:**
+
+1. **When adding new HDF5 function calls**, always protect them with the mutex:
+   ```cpp
+   // Lock for all HDF5 operations (not thread-safe)
+   std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
+   // Now safe to call HDF5 API
+   hid_t file_id = H5Fopen(...);
+   ```
+
+2. **Protected locations** (as of 2024-12-22):
+   - `H5TreeInit`: File opening and tree traversal
+   - `H5ReadBind`: Schema determination
+   - `H5ReadInit`: Dataset opening during initialization
+   - `H5ReadScan`: Data reading (including RSE expansion)
+   - `H5AttributesBind`: Attribute metadata reading
+   - `H5AttributesScan`: Attribute value reading
+
+3. **Performance implications**:
+   - The mutex serializes all HDF5 operations across threads
+   - This prevents crashes but may reduce parallelism
+   - This is necessary for correctness with the current HDF5 build
+
+4. **Future optimizations** (if needed):
+   - Use thread-safe HDF5 builds (requires specific compile flags)
+   - Implement fine-grained locking per file handle
+   - Consider read-write locks for concurrent reads
+
+**Historical context**: A critical segmentation fault bug (BUG_UNION_ALL_SEGFAULT.md) was discovered when DuckDB created 12 threads for parallel execution of UNION ALL queries. The crash occurred in `H5C_protect` during parallel `H5ReadInit` calls. The global mutex fix resolved this issue.
+
 ### Adding New Tests
 
 1. **Create test data** (if needed):

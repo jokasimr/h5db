@@ -51,6 +51,7 @@ make tidy-check    # Static analysis (slower)
 2. **Don't forget to activate venv** - Everything needs it
 3. **Don't commit without formatting** - Run `make format` before commits
 4. **Don't modify DuckDB submodule** - Extension code is in `src/` only
+5. **Check your current directory if confused** - If you get path errors or command failures, run `pwd` to verify you're in the correct directory. Most commands should be run from the project root (`/home/johannes/personal/h5db`)
 
 ## File Structure
 

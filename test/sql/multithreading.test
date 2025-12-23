@@ -1,0 +1,555 @@
+# name: test/sql/multithreading.test
+# description: Multithreading tests for h5db extension - verify mutex protection
+# group: [sql]
+
+# These tests ensure that the h5db extension handles parallel execution correctly
+# by reading multiple datasets simultaneously. This stresses the global HDF5 mutex
+# protection to catch race conditions and thread safety issues.
+#
+# DuckDB will parallelize these queries using multiple threads, which historically
+# caused segmentation faults before the global mutex was added (see BUG_UNION_ALL_SEGFAULT.md)
+
+require h5db
+
+# =============================================================================
+# Test 1: UNION ALL with 2 Detectors (Basic Parallel Read)
+# Tests basic parallel reading of regular columns from similar datasets
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+2000
+
+query II
+SELECT MIN(time_offset), MAX(event_id) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+100	20999
+
+# =============================================================================
+# Test 2: UNION ALL with 5 Detectors (Previously Caused Segfault)
+# This is the critical threshold that used to crash before mutex protection
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/time_offset',
+      '/detector_3/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_4/time_offset',
+      '/detector_4/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_5/time_offset',
+      '/detector_5/event_id')
+);
+----
+5000
+
+# Verify aggregations work correctly across 5 detectors
+query III
+SELECT
+  COUNT(*) as total_events,
+  MIN(event_id) as first_id,
+  MAX(event_id) as last_id
+FROM (
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_4/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_5/event_id')
+);
+----
+5000	10000	50999
+
+# =============================================================================
+# Test 3: UNION ALL with RSE Columns (Complex Parallel Case)
+# Tests parallel RSE expansion across multiple detector scans
+# This combines parallel file access + RSE decompression
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/time_offset',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+);
+----
+3000
+
+# Verify RSE values are expanded correctly
+query II
+SELECT
+  COUNT(DISTINCT event_time_zero) as unique_time_zeros,
+  COUNT(*) as total_rows
+FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+);
+----
+30	3000
+
+# =============================================================================
+# Test 4: UNION ALL with 10 Detectors (Maximum Stress Test)
+# Tests all 10 detectors with regular columns
+# This should trigger significant parallelism in DuckDB
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_4/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_5/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_6/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_7/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_8/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_9/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_10/event_id')
+);
+----
+10000
+
+# Verify data integrity across all 10 detectors
+query III
+SELECT
+  COUNT(*) as total_rows,
+  MIN(event_id) as min_id,
+  MAX(event_id) as max_id
+FROM (
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_4/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_5/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_6/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_7/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_8/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_9/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_10/event_id')
+);
+----
+10000	10000	100999
+
+# =============================================================================
+# Test 5: UNION ALL with 10 Detectors + RSE (Ultimate Stress Test)
+# All 10 detectors with RSE columns - maximum parallelism + decompression
+# This is equivalent to the original failing bifrost query structure
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/time_offset',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_4/time_offset',
+      '/detector_4/event_id',
+      h5_rse('/detector_4/event_index', '/detector_4/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_5/time_offset',
+      '/detector_5/event_id',
+      h5_rse('/detector_5/event_index', '/detector_5/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_6/time_offset',
+      '/detector_6/event_id',
+      h5_rse('/detector_6/event_index', '/detector_6/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_7/time_offset',
+      '/detector_7/event_id',
+      h5_rse('/detector_7/event_index', '/detector_7/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_8/time_offset',
+      '/detector_8/event_id',
+      h5_rse('/detector_8/event_index', '/detector_8/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_9/time_offset',
+      '/detector_9/event_id',
+      h5_rse('/detector_9/event_index', '/detector_9/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_10/time_offset',
+      '/detector_10/event_id',
+      h5_rse('/detector_10/event_index', '/detector_10/event_time_zero'))
+);
+----
+10000
+
+# Verify RSE expansion across all detectors
+query II
+SELECT
+  COUNT(DISTINCT event_time_zero) as unique_time_zeros,
+  COUNT(*) as total_rows
+FROM (
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_4/event_id',
+      h5_rse('/detector_4/event_index', '/detector_4/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_5/event_id',
+      h5_rse('/detector_5/event_index', '/detector_5/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_6/event_id',
+      h5_rse('/detector_6/event_index', '/detector_6/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_7/event_id',
+      h5_rse('/detector_7/event_index', '/detector_7/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_8/event_id',
+      h5_rse('/detector_8/event_index', '/detector_8/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_9/event_id',
+      h5_rse('/detector_9/event_index', '/detector_9/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_10/event_id',
+      h5_rse('/detector_10/event_index', '/detector_10/event_time_zero'))
+);
+----
+100	10000
+
+# =============================================================================
+# Test 6: Complex Aggregation Over UNION ALL
+# Tests parallel aggregation with statistics across multiple detectors
+# =============================================================================
+
+query IIRI
+SELECT
+  MIN(time_offset) as min_time,
+  MAX(time_offset) as max_time,
+  AVG(event_id) as avg_event_id,
+  COUNT(*) as total_events
+FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset', '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_5/time_offset', '/detector_5/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_10/time_offset', '/detector_10/event_id')
+);
+----
+100	1000000	53832.833333	3000
+
+# =============================================================================
+# Test 7: JOIN Between Multiple Detectors
+# Forces parallel execution as DuckDB optimizes the join
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM
+  h5_read('test/data/multithreading_test.h5', '/detector_1/time_offset') d1,
+  h5_read('test/data/multithreading_test.h5', '/detector_2/time_offset') d2
+WHERE d1.time_offset // 1000 = d2.time_offset // 1000;
+----
+1000
+
+# =============================================================================
+# Test 8: Multiple Concurrent h5_tree Calls
+# Tests concurrent metadata access across the same file
+# =============================================================================
+
+query I
+SELECT
+  (SELECT COUNT(*) FROM h5_tree('test/data/multithreading_test.h5') WHERE path LIKE '/detector_1/%') +
+  (SELECT COUNT(*) FROM h5_tree('test/data/multithreading_test.h5') WHERE path LIKE '/detector_2/%') +
+  (SELECT COUNT(*) FROM h5_tree('test/data/multithreading_test.h5') WHERE path LIKE '/detector_3/%')
+  as total_datasets;
+----
+12
+
+# =============================================================================
+# Test 9: CTE with Multiple References
+# Common Table Expression that forces materialization and re-reading
+# =============================================================================
+
+query I
+WITH combined AS (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/event_id')
+)
+SELECT COUNT(*) FROM combined;
+----
+3000
+
+# =============================================================================
+# Test 10: Window Functions Over UNION ALL
+# Tests parallel window function execution with partitioning
+# =============================================================================
+
+query I
+SELECT COUNT(DISTINCT detector_group) FROM (
+  SELECT
+    CASE
+      WHEN event_id < 20000 THEN 1
+      WHEN event_id < 30000 THEN 2
+      ELSE 3
+    END as detector_group
+  FROM (
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+    UNION ALL
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+    UNION ALL
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+  )
+);
+----
+3
+
+# =============================================================================
+# Test 11: GROUP BY Over UNION ALL
+# Tests parallel grouping and aggregation across detectors
+# =============================================================================
+
+query II
+SELECT
+  bucket,
+  COUNT(*) as count
+FROM (
+  SELECT event_id // 1000 as bucket FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id // 1000 as bucket FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+  UNION ALL
+  SELECT event_id // 1000 as bucket FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+)
+GROUP BY bucket
+ORDER BY bucket
+LIMIT 5;
+----
+10	1000
+20	1000
+30	1000
+
+# =============================================================================
+# Test 12: ORDER BY Over UNION ALL (Forces Materialization)
+# ORDER BY forces DuckDB to materialize and sort all data
+# =============================================================================
+
+query I
+SELECT event_id FROM (
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_5/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_10/event_id')
+)
+ORDER BY event_id
+LIMIT 5;
+----
+10000
+10001
+10002
+10003
+10004
+
+query I
+SELECT event_id FROM (
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_5/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_10/event_id')
+)
+ORDER BY event_id DESC
+LIMIT 5;
+----
+100999
+100998
+100997
+100996
+100995
+
+# =============================================================================
+# Test 13: Nested Subqueries with UNION ALL
+# Tests deep query nesting with parallel execution
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM (
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+    UNION ALL
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+  ) sub1
+  UNION ALL
+  SELECT * FROM (
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+    UNION ALL
+    SELECT event_id FROM h5_read('test/data/multithreading_test.h5', '/detector_4/event_id')
+  ) sub2
+);
+----
+4000
+
+# =============================================================================
+# Test 14: Mixed Regular and RSE Columns with Filtering
+# Tests filtering on both regular and RSE-expanded columns
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+)
+WHERE event_id < 15000;
+----
+1000
+
+# Verify filtering works correctly with RSE values
+query I
+SELECT COUNT(DISTINCT event_time_zero) FROM (
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_4/event_id',
+      h5_rse('/detector_4/event_index', '/detector_4/event_time_zero'))
+  UNION ALL
+  SELECT event_time_zero FROM h5_read('test/data/multithreading_test.h5',
+      '/detector_5/event_id',
+      h5_rse('/detector_5/event_index', '/detector_5/event_time_zero'))
+)
+WHERE event_time_zero > 1003000000;
+----
+29
+
+# =============================================================================
+# Test 15: DISTINCT Over UNION ALL
+# Tests deduplication across multiple parallel scans
+# =============================================================================
+
+query I
+SELECT COUNT(DISTINCT val) FROM (
+  SELECT time_offset % 1000 as val FROM h5_read('test/data/multithreading_test.h5', '/detector_1/time_offset')
+  UNION ALL
+  SELECT time_offset % 1000 as val FROM h5_read('test/data/multithreading_test.h5', '/detector_2/time_offset')
+  UNION ALL
+  SELECT time_offset % 1000 as val FROM h5_read('test/data/multithreading_test.h5', '/detector_3/time_offset')
+);
+----
+3

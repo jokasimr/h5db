@@ -5,8 +5,14 @@
 #include <string>
 #include <limits>
 #include <variant>
+#include <mutex>
 
 namespace duckdb {
+
+// Global mutex for all HDF5 operations
+// HDF5 is not guaranteed to be thread-safe, so we serialize all HDF5 calls
+// This prevents crashes when DuckDB parallelizes table function execution
+static std::mutex hdf5_global_mutex;
 
 // RAII wrapper for HDF5 error suppression
 // Automatically disables HDF5 error printing on construction and restores it on destruction
@@ -284,6 +290,9 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 	auto result = make_uniq<H5TreeGlobalState>();
 
 	if (!bind_data.scanned) {
+		// Lock for all HDF5 operations (not thread-safe)
+		std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
 		// Open the HDF5 file (with error suppression)
 		hid_t file_id;
 		{
@@ -564,6 +573,9 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	result->filename = input.inputs[0].GetValue<string>();
 	size_t num_columns = input.inputs.size() - 1;
 
+	// Lock for all HDF5 operations (not thread-safe)
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
 	// Open file once (with error suppression)
 	hid_t file_id;
 	{
@@ -779,6 +791,9 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
+
+	// Lock for all HDF5 operations (not thread-safe)
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
 
 	// Open file (with error suppression)
 	{
@@ -1194,6 +1209,9 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	idx_t to_read = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
+	// Lock for all HDF5 operations (not thread-safe)
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
 	// Process each column (regular or RSE)
 	for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
 		auto &result_vector = output.data[col_idx];
@@ -1385,6 +1403,9 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	result->filename = input.inputs[0].GetValue<string>();
 	result->object_path = input.inputs[1].GetValue<string>();
 
+	// Lock for all HDF5 operations (not thread-safe)
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
 	// Open the HDF5 file
 	H5ErrorSuppressor suppress_errors;
 	hid_t file_id = H5Fopen(result->filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -1432,6 +1453,9 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 		output.SetCardinality(0);
 		return;
 	}
+
+	// Lock for all HDF5 operations (not thread-safe)
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
 
 	// Open the file and object
 	H5ErrorSuppressor suppress_errors;
