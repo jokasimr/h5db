@@ -1,5 +1,35 @@
 # Notes for AI Agents Working on H5DB
 
+## ⚠️ CRITICAL: Always Report Bugs You Discover
+
+**NEVER silently work around bugs you discover during testing or development.**
+
+If you find a bug:
+1. **STOP** - Do not work around it or change the test to avoid it
+2. **REPORT** - Explicitly tell the user what you found
+3. **FIX** - Fix the bug properly
+4. **TEST** - Verify the fix works
+
+### Example of WRONG Behavior ❌
+```
+Test fails: WHERE col != 20 returns 0 rows (should return 800)
+→ Change test to avoid != operator
+→ Move on without reporting
+```
+
+### Example of CORRECT Behavior ✅
+```
+Test fails: WHERE col != 20 returns 0 rows (should return 800)
+→ Report: "CRITICAL BUG: != operator doesn't work on RSE columns"
+→ Investigate root cause (missing COMPARE_NOTEQUAL handling)
+→ Fix the bug in TryClaimRSEFilter
+→ Verify fix with tests
+```
+
+**The user needs to know about ALL bugs, even if you can work around them!**
+
+---
+
 ## Critical: Always Use the Virtual Environment
 
 **ALWAYS use the project's Python virtual environment for all Python commands.**

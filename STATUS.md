@@ -1,15 +1,15 @@
 # H5DB Project Status
 
-**Last Updated:** 2024-12-22
+**Last Updated:** 2025-12-23
 
 ## Current State
 
 ✅ **Fully Functional** - All core features implemented and tested
 
 ### Statistics
-- **Source Code:** 1,692 lines across 4 files
-- **Test Coverage:** 293 assertions passing (100%)
-- **Test Files:** 2 test suites (h5db.test, rse_edge_cases.test)
+- **Source Code:** ~2,100 lines across 4 files (including predicate pushdown infrastructure)
+- **Test Coverage:** 381 assertions passing (100%)
+- **Test Files:** 4 test suites (h5db.test, rse_edge_cases.test, predicate_pushdown.test, multithreading.test)
 - **Documentation:** Complete API reference and user guides
 
 ## Implemented Features
@@ -73,10 +73,27 @@
 - ⚠️ No NULL/fill value support
   - Not in scope to fix for now.
 
+### Predicate pushdown for sorted RSE columns (IMPLEMENTED but DISABLED)
+- ✅ **Fully implemented** - Predicate pushdown infrastructure is complete and tested
+- ⚠️ **Currently disabled** due to DuckDB API integration challenges
+- **Implementation includes:**
+  - Automatic sortedness detection for RSE value arrays
+  - Binary search optimization for all comparison operators (>, >=, <, <=, =, BETWEEN)
+  - Row range calculation to skip unnecessary data
+  - I/O reduction - only reads filtered row ranges from HDF5 files
+  - Comprehensive test suite (271 assertions in test/sql/predicate_pushdown.test)
+- **Challenge:** When `filter_pushdown=true`, DuckDB doesn't apply unhandled filters post-scan
+  - Filters on sorted RSE columns work perfectly when enabled
+  - Filters on regular columns and unsorted RSE columns fail when enabled
+  - Need to investigate DuckDB's filter API for partial filter handling
+- **To enable:** Uncomment lines 1528-1529 in src/h5_functions.cpp (causes some test failures)
+- **Impact when enabled:** Can achieve 90%+ I/O reduction for time-slice queries on sorted RSE columns
+
 ### HDF5 file frequently opened/closed
 - As it is now the HDF5 file is opened and closed every time a dataset or attribute is accessed.
   - That can be quite inefficient when accessing many datasets.
   - It would be good to be able to pre open a hdf5 file, and cache the file handle.
+  - Since this is performance work the first step should be to profile the program to make sure that this is actually a significant bottleneck in common cases.
 
 ## Project Structure
 

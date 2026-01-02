@@ -1,11 +1,20 @@
 #include "h5_functions.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/list.hpp"
 #include <vector>
 #include <string>
 #include <limits>
 #include <variant>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -508,17 +517,35 @@ struct RSEColumnState {
 // Runtime state for a column (either regular or RSE)
 using ColumnState = std::variant<RegularColumnState, RSEColumnState>;
 
+// Row range for filtering (defined here for use in bind data and global state)
+struct RowRange {
+	idx_t start_row;
+	idx_t end_row;
+};
+
+// Filter claimed during pushdown complex filter callback
+struct ClaimedFilter {
+	idx_t column_index;        // Which column (index into bind_data.columns)
+	ExpressionType comparison; // Comparison type (>, <, =, >=, <=)
+	Value constant;            // The constant value to compare against
+};
+
 // Data for h5_read table function
 struct H5ReadBindData : public TableFunctionData {
 	std::string filename;
-	std::vector<ColumnSpec> columns; // Unified column specifications
-	hsize_t num_rows;                // Row count from regular datasets
+	vector<ColumnSpec> columns;            // Unified column specifications
+	hsize_t num_rows;                      // Row count from regular datasets
+	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
 };
 
 struct H5ReadGlobalState : public GlobalTableFunctionState {
 	hid_t file_id;
-	std::vector<ColumnState> column_states; // Unified column states
+	vector<ColumnState> column_states; // Unified column states
 	idx_t position;
+
+	// Row range filtering (for predicate pushdown on RSE columns)
+	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
+	idx_t current_range_idx = 0;       // Which range we're currently scanning
 
 	H5ReadGlobalState() : file_id(-1), position(0) {
 	}
@@ -559,6 +586,14 @@ static string GetColumnName(const string &dataset_path) {
 
 	return col_name;
 }
+
+//===--------------------------------------------------------------------===//
+// Predicate Pushdown Helpers (for RSE columns)
+//===--------------------------------------------------------------------===//
+
+//===--------------------------------------------------------------------===//
+// h5_read - Read datasets from HDF5 files
+//===--------------------------------------------------------------------===//
 
 // Bind function - opens datasets and determines schema
 static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunctionBindInput &input,
@@ -787,6 +822,31 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	return std::move(result);
 }
 
+// Helper: Intersect two sorted lists of row ranges
+static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vector<RowRange> &b) {
+	vector<RowRange> result;
+
+	size_t i = 0, j = 0;
+	while (i < a.size() && j < b.size()) {
+		idx_t start = std::max(a[i].start_row, b[j].start_row);
+		idx_t end = std::min(a[i].end_row, b[j].end_row);
+
+		// If ranges overlap, add the intersection
+		if (start < end) {
+			result.push_back({start, end});
+		}
+
+		// Advance the range that ends earlier
+		if (a[i].end_row < b[j].end_row) {
+			i++;
+		} else {
+			j++;
+		}
+	}
+
+	return result;
+}
+
 // Init function - open file and dataset for reading
 static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
@@ -976,9 +1036,280 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 		    col);
 	}
 
+	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
+	// Group claimed filters by column
+	unordered_map<idx_t, vector<pair<ExpressionType, Value>>> filters_by_column;
+	for (const auto &filter : bind_data.claimed_filters) {
+		filters_by_column[filter.column_index].push_back({filter.comparison, filter.constant});
+	}
+
+	// If we have filters on RSE columns, compute row ranges
+	if (!filters_by_column.empty()) {
+		vector<RowRange> ranges = {{0, bind_data.num_rows}};
+
+		for (const auto &[col_idx, col_filters] : filters_by_column) {
+			auto &rse_spec = std::get<RSEColumnSpec>(bind_data.columns[col_idx]);
+			auto &rse_state = std::get<RSEColumnState>(result->column_states[col_idx]);
+
+			// Compute ranges for this column
+			vector<RowRange> col_ranges =
+			    DispatchOnDuckDBType(rse_spec.column_type, [&](auto type_tag) -> vector<RowRange> {
+				    using T = typename decltype(type_tag)::type;
+				    auto &typed_values = std::get<std::vector<T>>(rse_state.values);
+
+				    // Convert filters to typed values
+				    vector<std::pair<ExpressionType, T>> typed_filters;
+				    for (const auto &[comparison, value] : col_filters) {
+					    typed_filters.push_back({comparison, value.GetValue<T>()});
+				    }
+
+				    // Loop through runs, building ranges where ALL filters are satisfied
+				    vector<RowRange> col_result;
+				    idx_t current_start = 0;
+				    bool in_range = false;
+
+				    for (size_t i = 0; i < typed_values.size(); i++) {
+					    const T &value = typed_values[i];
+					    idx_t run_start = rse_state.run_starts[i];
+
+					    // Check if this run's value satisfies ALL filters
+					    bool satisfies_all = true;
+					    for (const auto &[comparison, filter_val] : typed_filters) {
+						    bool matches = false;
+						    switch (comparison) {
+						    case ExpressionType::COMPARE_EQUAL:
+							    matches = (value == filter_val);
+							    break;
+						    case ExpressionType::COMPARE_GREATERTHAN:
+							    matches = (value > filter_val);
+							    break;
+						    case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+							    matches = (value >= filter_val);
+							    break;
+						    case ExpressionType::COMPARE_LESSTHAN:
+							    matches = (value < filter_val);
+							    break;
+						    case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+							    matches = (value <= filter_val);
+							    break;
+						    default:
+							    break;
+						    }
+						    if (!matches) {
+							    satisfies_all = false;
+							    break;
+						    }
+					    }
+
+					    if (satisfies_all && !in_range) {
+						    // Start new range
+						    current_start = run_start;
+						    in_range = true;
+					    } else if (!satisfies_all && in_range) {
+						    // End current range
+						    col_result.push_back({current_start, run_start});
+						    in_range = false;
+					    }
+				    }
+
+				    // Close final range if still open
+				    if (in_range) {
+					    col_result.push_back({current_start, bind_data.num_rows});
+				    }
+
+				    return col_result;
+			    });
+
+			// Intersect ranges from this column with accumulated ranges
+			ranges = IntersectRowRanges(ranges, col_ranges);
+		}
+
+		result->valid_row_ranges = std::move(ranges);
+	} else {
+		// No RSE filters - all rows are valid
+		result->valid_row_ranges.push_back({0, bind_data.num_rows});
+	}
+
 	result->position = 0;
 
 	return std::move(result);
+}
+
+// Helper: Flip comparison for when constant is on left side (e.g., 10 < col becomes col > 10)
+static ExpressionType FlipComparison(ExpressionType type) {
+	switch (type) {
+	case ExpressionType::COMPARE_LESSTHAN:
+		return ExpressionType::COMPARE_GREATERTHAN;
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+	case ExpressionType::COMPARE_GREATERTHAN:
+		return ExpressionType::COMPARE_LESSTHAN;
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return ExpressionType::COMPARE_LESSTHANOREQUALTO;
+	default:
+		return type; // EQUAL stays EQUAL
+	}
+}
+
+// Helper: Try to claim a filter on an RSE column
+static bool TryClaimRSEFilter(const unique_ptr<Expression> &expr, idx_t table_index,
+                              const unordered_map<idx_t, idx_t> &get_to_bind_map,
+                              const unordered_set<idx_t> &rse_columns, vector<ClaimedFilter> &claimed) {
+
+	// Handle comparison expressions: col > 10, col = 20, 10 < col, etc.
+	if (expr->expression_class == ExpressionClass::BOUND_COMPARISON) {
+		auto &comp = expr->Cast<BoundComparisonExpression>();
+
+		const BoundColumnRefExpression *colref = nullptr;
+		const BoundConstantExpression *constant = nullptr;
+		bool need_flip = false;
+
+		// Determine which side is the column and which is the constant
+		if (comp.left->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+		    comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
+			colref = &comp.left->Cast<BoundColumnRefExpression>();
+			constant = &comp.right->Cast<BoundConstantExpression>();
+			need_flip = false; // col > 10 is already in correct order
+		} else if (comp.left->expression_class == ExpressionClass::BOUND_CONSTANT &&
+		           comp.right->expression_class == ExpressionClass::BOUND_COLUMN_REF) {
+			colref = &comp.right->Cast<BoundColumnRefExpression>();
+			constant = &comp.left->Cast<BoundConstantExpression>();
+			need_flip = true; // 10 < col needs to become col > 10
+		}
+
+		// If we found a column-constant comparison, try to claim it
+		if (colref && constant && colref->binding.table_index == table_index) {
+			// Map from LogicalGet column index to bind_data column index
+			auto it = get_to_bind_map.find(colref->binding.column_index);
+			if (it != get_to_bind_map.end()) {
+				idx_t bind_data_col_idx = it->second;
+
+				// Check if this is an RSE column
+				if (rse_columns.count(bind_data_col_idx) > 0) {
+					ExpressionType comparison = need_flip ? FlipComparison(comp.type) : comp.type;
+
+					// Whitelist: Only claim comparison operators we can optimize with row ranges
+					// This matches the operators handled in the row range computation code
+					switch (comparison) {
+					case ExpressionType::COMPARE_EQUAL:
+					case ExpressionType::COMPARE_GREATERTHAN:
+					case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+					case ExpressionType::COMPARE_LESSTHAN:
+					case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
+						// These we can optimize - claim the filter
+						ClaimedFilter filter;
+						filter.column_index = bind_data_col_idx;
+						filter.comparison = comparison;
+						filter.constant = constant->value;
+						claimed.push_back(filter);
+						return true;
+					}
+					default:
+						// Unknown/unsupported comparison (e.g., !=, IS DISTINCT FROM, etc.)
+						// Don't claim - let DuckDB handle it post-scan
+						return false;
+					}
+				}
+			}
+		}
+	}
+
+	// Handle BETWEEN: col BETWEEN lower AND upper
+	if (expr->expression_class == ExpressionClass::BOUND_BETWEEN) {
+		auto &between = expr->Cast<BoundBetweenExpression>();
+
+		// Check if input is an RSE column reference
+		if (between.input->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+		    between.lower->expression_class == ExpressionClass::BOUND_CONSTANT &&
+		    between.upper->expression_class == ExpressionClass::BOUND_CONSTANT) {
+
+			auto &colref = between.input->Cast<BoundColumnRefExpression>();
+			auto &lower_const = between.lower->Cast<BoundConstantExpression>();
+			auto &upper_const = between.upper->Cast<BoundConstantExpression>();
+
+			if (colref.binding.table_index == table_index) {
+				// Map from LogicalGet column index to bind_data column index
+				auto it = get_to_bind_map.find(colref.binding.column_index);
+				if (it != get_to_bind_map.end()) {
+					idx_t bind_data_col_idx = it->second;
+
+					// Check if this is an RSE column
+					if (rse_columns.count(bind_data_col_idx) > 0) {
+						// Claim BETWEEN as two filters: col >= lower AND col <= upper
+						ClaimedFilter lower_filter;
+						lower_filter.column_index = bind_data_col_idx;
+						lower_filter.comparison = ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+						lower_filter.constant = lower_const.value;
+						claimed.push_back(lower_filter);
+
+						ClaimedFilter upper_filter;
+						upper_filter.column_index = bind_data_col_idx;
+						upper_filter.comparison = ExpressionType::COMPARE_LESSTHANOREQUALTO;
+						upper_filter.constant = upper_const.value;
+						claimed.push_back(upper_filter);
+
+						return true; // Indicate we claimed this filter
+					}
+				}
+			}
+		}
+	}
+
+	// Handle CONJUNCTION_AND (for other compound filters)
+	if (expr->expression_class == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conj = expr->Cast<BoundConjunctionExpression>();
+
+		if (conj.type == ExpressionType::CONJUNCTION_AND && conj.children.size() == 2) {
+			// Try to claim RSE filters from children
+			vector<ClaimedFilter> temp_claimed;
+			bool claimed_left =
+			    TryClaimRSEFilter(conj.children[0], table_index, get_to_bind_map, rse_columns, temp_claimed);
+			bool claimed_right =
+			    TryClaimRSEFilter(conj.children[1], table_index, get_to_bind_map, rse_columns, temp_claimed);
+
+			// If we claimed any RSE filters, add them to optimize I/O and return true
+			if (claimed_left || claimed_right) {
+				claimed.insert(claimed.end(), temp_claimed.begin(), temp_claimed.end());
+				return true; // Indicate we claimed something
+			}
+
+			// No RSE filters in this conjunction
+			return false;
+		}
+	}
+
+	return false; // Can't handle this filter
+}
+
+// Pushdown complex filter callback
+// This is called during query optimization to determine which filters we can handle
+static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                        vector<unique_ptr<Expression>> &filters) {
+	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
+
+	// Build set of RSE column indices (in bind_data.columns) for quick lookup
+	unordered_set<idx_t> rse_column_indices;
+	for (idx_t i = 0; i < bind_data.columns.size(); i++) {
+		if (std::holds_alternative<RSEColumnSpec>(bind_data.columns[i])) {
+			rse_column_indices.insert(i);
+		}
+	}
+
+	// Map LogicalGet column indices to bind_data column indices using column_ids
+	// This is structural (not name-based) and works correctly with projections/aliases
+	unordered_map<idx_t, idx_t> get_to_bind_map; // get column idx -> bind_data column idx
+	const auto &column_ids = get.GetColumnIds();
+	for (idx_t i = 0; i < column_ids.size(); i++) {
+		get_to_bind_map[i] = column_ids[i].GetPrimaryIndex();
+	}
+
+	idx_t table_index = get.table_index;
+
+	// Claim RSE filters for I/O optimization (but keep them in filter list for post-scan)
+	// DuckDB will apply all filters after scan to ensure correctness (defensive approach)
+	for (const auto &expr : filters) {
+		TryClaimRSEFilter(expr, table_index, get_to_bind_map, rse_column_indices, bind_data.claimed_filters);
+	}
 }
 
 // Scan function - read data chunks
@@ -1201,13 +1532,38 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
 	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
 
-	idx_t remaining = bind_data.num_rows - gstate.position;
-	if (remaining == 0) {
+	// Check if we've exhausted all row ranges
+	if (gstate.current_range_idx >= gstate.valid_row_ranges.size()) {
 		output.SetCardinality(0);
 		return;
 	}
 
-	idx_t to_read = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining);
+	// Get current range
+	const auto &range = gstate.valid_row_ranges[gstate.current_range_idx];
+
+	// If we haven't started this range yet, jump to it
+	if (gstate.position < range.start_row) {
+		gstate.position = range.start_row;
+	}
+
+	// If we've finished this range, move to next
+	if (gstate.position >= range.end_row) {
+		gstate.current_range_idx++;
+
+		if (gstate.current_range_idx >= gstate.valid_row_ranges.size()) {
+			output.SetCardinality(0);
+			return;
+		}
+
+		// Jump to start of next range
+		const auto &next_range = gstate.valid_row_ranges[gstate.current_range_idx];
+		gstate.position = next_range.start_row;
+	}
+
+	// Calculate how much to read from current range
+	const auto &current_range = gstate.valid_row_ranges[gstate.current_range_idx];
+	idx_t remaining_in_range = current_range.end_row - gstate.position;
+	idx_t to_read = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining_in_range);
 
 	// Lock for all HDF5 operations (not thread-safe)
 	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
@@ -1247,6 +1603,40 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	h5_read.name = "h5_read";
 	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse())
 	h5_read.varargs = LogicalType::ANY;
+
+	// ===================================================================================
+	// PREDICATE PUSHDOWN: Enabled for RSE columns
+	// ===================================================================================
+	// Implementation approach:
+	//   1. Bind time (pushdown_complex_filter callback):
+	//      - Parse Expression objects to identify filters on RSE columns
+	//      - Claim filters on RSE columns (store in bind_data) for I/O optimization
+	//      - Keep all filters in filter list for DuckDB to apply post-scan (defensive)
+	//      - Principle: filtering is cheap, reading data is expensive
+	//
+	//   2. Init time (H5ReadInit):
+	//      - Load RSE data for all RSE columns
+	//      - For each RSE column with filters:
+	//        * Loop through runs checking if value satisfies ALL filters on that column
+	//        * Build sorted, non-overlapping row ranges using state machine
+	//        * Works for both sorted and unsorted RSE columns!
+	//      - Store final row ranges in global state
+	//
+	//   3. Scan time (H5ReadScan):
+	//      - Iterate through row ranges, reading only matching rows
+	//      - Achieves I/O reduction even for unsorted RSE columns
+	//
+	// Benefits:
+	//   - Works for both sorted and unsorted RSE columns (linear scan approach)
+	//   - Row ranges automatically non-overlapping and sorted by construction
+	//   - Supports multiple filters on same column (AND conjunction)
+	//   - Handles mixed RSE and regular column filters correctly
+	// ===================================================================================
+
+	// Enable predicate pushdown for RSE columns
+	// We claim RSE filters for I/O optimization but keep them for post-scan verification
+	// DuckDB applies all filters post-scan (defensive, ensures correctness)
+	h5_read.pushdown_complex_filter = H5ReadPushdownComplexFilter;
 
 	loader.RegisterFunction(h5_read);
 }
