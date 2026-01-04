@@ -1,14 +1,14 @@
 # H5DB Project Status
 
-**Last Updated:** 2025-12-23
+**Last Updated:** 2026-01-04
 
 ## Current State
 
 ✅ **Fully Functional** - All core features implemented and tested
 
 ### Statistics
-- **Source Code:** ~2,100 lines across 4 files (including predicate pushdown infrastructure)
-- **Test Coverage:** 381 assertions passing (100%)
+- **Source Code:** ~2,140 lines in src/h5_functions.cpp
+- **Test Coverage:** 524 assertions passing (100%)
 - **Test Files:** 4 test suites (h5db.test, rse_edge_cases.test, predicate_pushdown.test, multithreading.test)
 - **Documentation:** Complete API reference and user guides
 
@@ -33,6 +33,7 @@
 - ✅ Attribute reading (from datasets and groups)
 - ✅ Chunked reading for memory efficiency
 - ✅ Type conversion (HDF5 → DuckDB)
+- ✅ Predicate pushdown for RSE columns (I/O optimization)
 
 ## Code Quality
 
@@ -68,44 +69,41 @@
   - Not in scope to fix for now.
 
 ### Technical Debt
-- ⚠️ Thread safety concerns with global error handler
+- ⚠️ Thread safety: HDF5 library is not thread-safe, all HDF5 API calls protected by global mutex
+  - Current solution prevents crashes but serializes HDF5 operations
   - If this can be fixed it is good, but it's not high priority.
 - ⚠️ No NULL/fill value support
   - Not in scope to fix for now.
 
-### Predicate pushdown for sorted RSE columns (IMPLEMENTED but DISABLED)
-- ✅ **Fully implemented** - Predicate pushdown infrastructure is complete and tested
-- ⚠️ **Currently disabled** due to DuckDB API integration challenges
-- **Implementation includes:**
-  - Automatic sortedness detection for RSE value arrays
-  - Binary search optimization for all comparison operators (>, >=, <, <=, =, BETWEEN)
-  - Row range calculation to skip unnecessary data
-  - I/O reduction - only reads filtered row ranges from HDF5 files
-  - Comprehensive test suite (271 assertions in test/sql/predicate_pushdown.test)
-- **Challenge:** When `filter_pushdown=true`, DuckDB doesn't apply unhandled filters post-scan
-  - Filters on sorted RSE columns work perfectly when enabled
-  - Filters on regular columns and unsorted RSE columns fail when enabled
-  - Need to investigate DuckDB's filter API for partial filter handling
-- **To enable:** Uncomment lines 1528-1529 in src/h5_functions.cpp (causes some test failures)
-- **Impact when enabled:** Can achieve 90%+ I/O reduction for time-slice queries on sorted RSE columns
-
-### HDF5 file frequently opened/closed
-- As it is now the HDF5 file is opened and closed every time a dataset or attribute is accessed.
-  - That can be quite inefficient when accessing many datasets.
-  - It would be good to be able to pre open a hdf5 file, and cache the file handle.
-  - Since this is performance work the first step should be to profile the program to make sure that this is actually a significant bottleneck in common cases.
+### Predicate Pushdown for RSE Columns (IMPLEMENTED and ENABLED)
+- ✅ **Fully implemented and enabled** - Predicate pushdown is actively working
+- ✅ **All tests passing** (see test/sql/predicate_pushdown.test)
+- **Implementation approach:**
+  - Filters on RSE columns are claimed during query optimization (bind time)
+  - Row ranges computed at init time by scanning RSE run-start arrays
+  - Only matching row ranges are read from HDF5 (I/O reduction)
+  - Defensive: DuckDB also applies filters post-scan for correctness
+  - Works for both sorted AND unsorted RSE columns
+- **Supported operators:** `>`, `>=`, `<`, `<=`, `=`, `BETWEEN`
+- **Not optimized:** `!=`, `OR` expressions, `NOT` expressions (still correct, just reads all rows)
+- **Benefits:**
+  - Significant I/O reduction for selective queries on RSE columns
+  - Multiple filters on same column (range intersection)
+  - Multiple RSE columns (cross-column range intersection)
+  - Mixed RSE + regular column filters (RSE optimizes I/O, regular filters post-scan)
+- **Test coverage:** Extensive test suite with 271 assertions covering all operators, edge cases, and complex expressions
 
 ## Project Structure
 
 ```
 h5db/
-├── src/                    # Source code (1,692 lines)
+├── src/                    # Source code (~2,140 lines)
 │   ├── h5db_extension.cpp # Extension entry point
-│   ├── h5_functions.cpp   # Core implementation
+│   ├── h5_functions.cpp   # Core implementation (2,140 lines)
 │   └── include/           # Headers
 ├── test/
-│   ├── sql/               # SQLLogicTests (293 assertions)
-│   └── data/              # Test HDF5 files (6 files)
+│   ├── sql/               # SQLLogicTests (524 assertions)
+│   └── data/              # Test HDF5 files + generators
 ├── docs/                   # Developer documentation
 ├── API.md                  # Complete API reference
 ├── RSE_USAGE.md           # Run-start encoding guide
@@ -120,8 +118,8 @@ h5db/
 source venv/bin/activate  # Activate development environment
 make format-check         # Check code formatting
 make format              # Auto-fix formatting
-make -j$(nproc)          # Build
-make test                # Run tests (293 assertions)
+make -j8                 # Build
+make test                # Run tests (524 assertions)
 ```
 
 ### Quality Checks
@@ -132,19 +130,19 @@ make tidy-check          # Static analysis (clang-tidy)
 ## Next Steps (If Continuing Development)
 
 ### High Priority
-1. **Thread Safety** - Address global error handler issues
-2. **Compound Types** - Map HDF5 structs to DuckDB STRUCT
-3. **NULL Support** - Map HDF5 fill values to SQL NULL
+1. **HDF5 C++ API** - We should use the HDF5 C++ api everywhere, this will unlock more opportunities for simplification.
+2. **Thread Safety** - Address global error handler issues
+3. **Parallellism** - The extension must support multiple threads in DUCKDB efficiently.
+4. **HDF5 IO optimizations** - Currently we're reading small chunks from the files. It migt be more efficient to read larger chunks
 
-### Medium Priority
-4. **Enum Support** - Map to DuckDB ENUM type
-5. **Extended Dimensions** - Support 5D+ arrays
-6. **Performance Benchmarking** - Profile with large datasets
-
-### Low Priority
-7. **Reference Types** - Follow HDF5 object references
-8. **Variable-length Arrays** - Map to DuckDB LIST type
-9. **Predicate Pushdown** - Optimize WHERE clauses
+### Low Priority (for now, zero priority)
+* **Compound Types** - Map HDF5 structs to DuckDB STRUCT
+* **NULL Support** - Map HDF5 fill values to SQL NULL
+* **Enum Support** - Map to DuckDB ENUM type
+* **Extended Dimensions** - Support 5D+ arrays
+* **File Handle Caching** - Reuse HDF5 file handles across multiple dataset reads
+* **Reference Types** - Follow HDF5 object references
+* **Variable-length Arrays** - Map to DuckDB LIST type
 
 ## Dependencies
 
@@ -180,8 +178,8 @@ All documentation is up-to-date and accurate:
 
 ## Conclusion
 
-H5DB is a **production-ready beta** extension that successfully enables SQL queries on HDF5 scientific data. The core functionality is complete, well-tested, and documented. The remaining work focuses on extended type support and performance optimization.
+H5DB is a **production-ready beta** extension that successfully enables SQL queries on HDF5 scientific data. The core functionality is complete, well-tested, and documented. Advanced features like predicate pushdown provide significant performance benefits for selective queries.
 
 **Maturity Level:** Beta - Ready for advanced users and testing
-**Production Readiness:** Address thread safety before production deployment
-**Feature Completeness:** ~70% (core features complete, extended types pending)
+**Production Readiness:** Thread safety handled via global mutex (prevents crashes, may limit parallelism)
+**Feature Completeness:** ~75% (core features + predicate pushdown complete, extended types pending)
