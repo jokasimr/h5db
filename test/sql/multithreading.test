@@ -553,3 +553,183 @@ SELECT COUNT(DISTINCT val) FROM (
 );
 ----
 3
+
+# =============================================================================
+# Test 16: RSE Value Distribution Correctness (Regression Test)
+# Tests that RSE values are assigned to correct rows with parallel scanning
+# This is a regression test for the bug where RSE state was shared across threads
+# causing incorrect value distributions
+# =============================================================================
+
+# Verify RSE GROUP BY gives correct distribution with default threading
+query II
+SELECT status_values, COUNT(*) as count
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values')
+)
+GROUP BY status_values
+ORDER BY status_values;
+----
+0	100000
+1	300000
+2	200000
+3	400000
+
+# =============================================================================
+# Test 17: RSE Predicate Pushdown with Parallel Scanning
+# Tests that row range filtering works correctly with RSE columns
+# =============================================================================
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values')
+)
+WHERE status_values = 1;
+----
+300000	100000	399999
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values')
+)
+WHERE status_values = 2;
+----
+200000	400000	599999
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values')
+)
+WHERE status_values = 3;
+----
+400000	600000	999999
+
+# =============================================================================
+# Test 18: Multiple RSE Columns with Parallel Scanning
+# Tests that multiple RSE columns are expanded correctly in parallel
+# =============================================================================
+
+query II
+SELECT category_values, COUNT(*) as count
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values'),
+    h5_rse('/category_run_starts', '/category_values')
+)
+GROUP BY category_values
+ORDER BY category_values;
+----
+10	500000
+20	500000
+
+# Verify cross-tabulation of two RSE columns
+query III
+SELECT status_values, category_values, COUNT(*) as count
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    h5_rse('/status_run_starts', '/status_values'),
+    h5_rse('/category_run_starts', '/category_values')
+)
+GROUP BY status_values, category_values
+ORDER BY status_values, category_values
+LIMIT 8;
+----
+0	10	50000
+0	20	50000
+1	10	150000
+1	20	150000
+2	10	100000
+2	20	100000
+3	10	200000
+3	20	200000
+
+# =============================================================================
+# Test 19: RSE with Regular Columns and Aggregations
+# Tests complex aggregations mixing RSE and regular columns
+# =============================================================================
+
+query IIII
+SELECT
+    status_values,
+    COUNT(*) as count,
+    MIN(index) as min_idx,
+    MAX(values) as max_val
+FROM h5_read(
+    'test/data/large_rse_test.h5',
+    '/index',
+    '/values',
+    h5_rse('/status_run_starts', '/status_values')
+)
+GROUP BY status_values
+ORDER BY status_values;
+----
+0	100000	0	99
+1	300000	100000	99
+2	200000	400000	99
+3	400000	600000	99
+
+# =============================================================================
+# Test 20: RSE Correctness Under Heavy Parallelism (Stress Test)
+# Uses UNION ALL to force DuckDB to parallelize aggressively
+# This would have exposed the RSE threading bug
+# =============================================================================
+
+query II
+SELECT status_values, SUM(count) as total_count
+FROM (
+    SELECT status_values, COUNT(*) as count
+    FROM h5_read(
+        'test/data/large_rse_test.h5',
+        '/index',
+        h5_rse('/status_run_starts', '/status_values')
+    )
+    WHERE index < 250000
+    GROUP BY status_values
+    UNION ALL
+    SELECT status_values, COUNT(*) as count
+    FROM h5_read(
+        'test/data/large_rse_test.h5',
+        '/index',
+        h5_rse('/status_run_starts', '/status_values')
+    )
+    WHERE index >= 250000 AND index < 500000
+    GROUP BY status_values
+    UNION ALL
+    SELECT status_values, COUNT(*) as count
+    FROM h5_read(
+        'test/data/large_rse_test.h5',
+        '/index',
+        h5_rse('/status_run_starts', '/status_values')
+    )
+    WHERE index >= 500000 AND index < 750000
+    GROUP BY status_values
+    UNION ALL
+    SELECT status_values, COUNT(*) as count
+    FROM h5_read(
+        'test/data/large_rse_test.h5',
+        '/index',
+        h5_rse('/status_run_starts', '/status_values')
+    )
+    WHERE index >= 750000
+    GROUP BY status_values
+)
+GROUP BY status_values
+ORDER BY status_values;
+----
+0	100000
+1	300000
+2	200000
+3	400000

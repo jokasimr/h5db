@@ -1,20 +1,16 @@
 # H5DB Project Status
 
-**Last Updated:** 2026-01-04
-
 ## Current State
 
 ✅ **Fully Functional** - All core features implemented and tested
 
-### Statistics
-- **Source Code:** ~2,140 lines in src/h5_functions.cpp
-- **Test Coverage:** 524 assertions passing (100%)
-- **Test Files:** 4 test suites (h5db.test, rse_edge_cases.test, predicate_pushdown.test, multithreading.test)
+### Overview
+- **Test Coverage:** Comprehensive test suite with all tests passing
 - **Documentation:** Complete API reference and user guides
 
 ## Implemented Features
 
-### Core Functions (4)
+### Core Functions
 1. ✅ `h5_tree()` - Browse HDF5 file structure
 2. ✅ `h5_read()` - Read datasets (with variadic arguments support)
 3. ✅ `h5_rse()` - Run-start encoding column specification
@@ -77,7 +73,7 @@
 
 ### Predicate Pushdown for RSE Columns (IMPLEMENTED and ENABLED)
 - ✅ **Fully implemented and enabled** - Predicate pushdown is actively working
-- ✅ **All tests passing** (see test/sql/predicate_pushdown.test)
+- ✅ **All tests passing**
 - **Implementation approach:**
   - Filters on RSE columns are claimed during query optimization (bind time)
   - Row ranges computed at init time by scanning RSE run-start arrays
@@ -91,18 +87,18 @@
   - Multiple filters on same column (range intersection)
   - Multiple RSE columns (cross-column range intersection)
   - Mixed RSE + regular column filters (RSE optimizes I/O, regular filters post-scan)
-- **Test coverage:** Extensive test suite with 271 assertions covering all operators, edge cases, and complex expressions
+- **Test coverage:** Comprehensive test suite covering all operators, edge cases, and complex expressions
 
 ## Project Structure
 
 ```
 h5db/
-├── src/                    # Source code (~2,140 lines)
+├── src/                    # Source code
 │   ├── h5db_extension.cpp # Extension entry point
-│   ├── h5_functions.cpp   # Core implementation (2,140 lines)
+│   ├── h5_functions.cpp   # Core implementation
 │   └── include/           # Headers
 ├── test/
-│   ├── sql/               # SQLLogicTests (524 assertions)
+│   ├── sql/               # SQLLogicTests
 │   └── data/              # Test HDF5 files + generators
 ├── docs/                   # Developer documentation
 ├── API.md                  # Complete API reference
@@ -119,7 +115,7 @@ source venv/bin/activate  # Activate development environment
 make format-check         # Check code formatting
 make format              # Auto-fix formatting
 make -j8                 # Build
-make test                # Run tests (524 assertions)
+make test                # Run tests
 ```
 
 ### Quality Checks
@@ -154,17 +150,10 @@ make tidy-check          # Static analysis (clang-tidy)
 
 ### Development Tools (in venv)
 - Python 3 with h5py, numpy
-- clang-format 11.0.1
+- clang-format
 - clang-tidy
 - cmake-format
 - black (Python formatter)
-
-## Version Information
-
-- **Extension Version:** 0.1.0 (pre-release)
-- **HDF5 Version:** 1.14.6
-- **DuckDB Target:** Latest stable
-- **License:** MIT
 
 ## Documentation Status
 

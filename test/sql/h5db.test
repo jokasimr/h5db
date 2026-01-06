@@ -759,7 +759,7 @@ SELECT * FROM h5_read(
     h5_rse('/nonexistent_starts', '/experiment1/state_values')
 );
 ----
-IO Error: Failed to open RSE run_starts dataset: /nonexistent_starts
+IO Error: Failed to open dataset: /nonexistent_starts
 
 # Test error: non-existent values dataset
 statement error
@@ -769,7 +769,7 @@ SELECT * FROM h5_read(
     h5_rse('/experiment1/state_run_starts', '/nonexistent_values')
 );
 ----
-IO Error: Failed to open RSE values dataset: /nonexistent_values
+IO Error: Failed to open dataset: /nonexistent_values
 
 #===--------------------------------------------------------------------===#
 # h5_attributes tests

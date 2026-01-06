@@ -28,7 +28,13 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(EXTENSION_SOURCES src/h5db_extension.cpp src/h5_functions.cpp)
+set(EXTENSION_SOURCES
+    src/h5db_extension.cpp
+    src/h5_common.cpp
+    src/h5_tree.cpp
+    src/h5_read.cpp
+    src/h5_attributes.cpp
+)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

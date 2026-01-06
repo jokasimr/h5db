@@ -86,7 +86,7 @@ cd h5db
 git submodule update --init --recursive
 
 # 3. Configure environment (update .env with your vcpkg path)
-source .env
+source venv/bin/activate
 
 # 4. Build
 make -j$(nproc)
@@ -131,7 +131,7 @@ For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE
 
 ```bash
 # Run all tests
-source .env && ./build/release/test/unittest "test/*"
+source venv/bin/activate && ./build/release/test/unittest "test/*"
 
 # Or use the makefile target
 make test

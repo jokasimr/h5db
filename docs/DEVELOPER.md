@@ -141,8 +141,8 @@ deactivate
 The simplest way to build:
 
 ```bash
-# Source environment variables
-source .env
+# Activate virtual environment (includes all tools and environment variables)
+source venv/bin/activate
 
 # Build the project (uses ninja and ccache automatically)
 make -j$(nproc)
@@ -164,13 +164,13 @@ build/release/
 
 ```bash
 # Release build (default, optimized)
-source .env && make
+source venv/bin/activate && make
 
 # Debug build (with debug symbols, no optimization)
-source .env && make debug
+source venv/bin/activate && make debug
 
 # Release with debug info
-source .env && make reldebug
+source venv/bin/activate && make reldebug
 ```
 
 ### First Build vs. Incremental Builds
@@ -194,7 +194,7 @@ If you need to start fresh:
 make clean
 
 # Then rebuild
-source .env && make -j$(nproc)
+source venv/bin/activate && make -j$(nproc)
 ```
 
 ---
@@ -207,9 +207,7 @@ The project uses DuckDB's SQLLogicTest framework. Tests are located in:
 
 ```
 test/
-├── sql/
-│   ├── h5db.test              # Main extension tests
-│   └── rse_edge_cases.test    # RSE scanner edge cases
+├── sql/                       # SQLLogicTest files
 └── data/
     ├── *.h5                   # HDF5 test files
     └── *.py                   # Scripts to generate test data
@@ -218,24 +216,15 @@ test/
 ### Running All Tests
 
 ```bash
-# Source environment and run all tests
-source .env && ./build/release/test/unittest "test/*"
-```
-
-**Expected output**:
-```
-===============================================================================
-All tests passed (293 assertions in 2 test cases)
+# Activate environment and run all tests
+source venv/bin/activate && ./build/release/test/unittest "test/*"
 ```
 
 ### Running Specific Tests
 
 ```bash
-# Run only the main h5db tests
-source .env && ./build/release/test/unittest "test/sql/h5db.test"
-
-# Run only RSE edge case tests
-source .env && ./build/release/test/unittest "test/sql/rse_edge_cases.test"
+# Run a specific test file
+source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test"
 ```
 
 ### Running Individual Test Cases
@@ -244,7 +233,7 @@ You can filter tests by pattern:
 
 ```bash
 # Run tests matching a pattern
-source .env && ./build/release/test/unittest "test/sql/h5db.test" -testcase="*rse*"
+source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test" -testcase="*pattern*"
 ```
 
 ### Using the Makefile Test Target
@@ -333,11 +322,11 @@ deactivate
 1. **Make code changes** in `src/`
 2. **Rebuild** the extension:
    ```bash
-   source .env && make -j$(nproc)
+   source venv/bin/activate && make -j$(nproc)
    ```
 3. **Run tests** to verify:
    ```bash
-   source .env && ./build/release/test/unittest "test/*"
+   source venv/bin/activate && ./build/release/test/unittest "test/*"
    ```
 4. **Interactive testing** with DuckDB CLI:
    ```bash
@@ -432,7 +421,7 @@ make tidy-check
 
 3. **Run the new tests**:
    ```bash
-   source .env && ./build/release/test/unittest "test/sql/mytest.test"
+   source venv/bin/activate && ./build/release/test/unittest "test/sql/mytest.test"
    ```
 
 ### Debugging
@@ -454,10 +443,10 @@ D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 
 ```bash
 # Build with debug symbols
-source .env && make debug
+source venv/bin/activate && make debug
 
 # Run under GDB
-gdb --args ./build/debug/test/unittest "test/sql/h5db.test"
+gdb --args ./build/debug/test/unittest "test/*"
 ```
 
 **Viewing test file contents**:
@@ -488,8 +477,6 @@ h5db/
 │
 ├── test/                    # Test suite
 │   ├── sql/                 # SQLLogicTest files
-│   │   ├── h5db.test
-│   │   └── rse_edge_cases.test
 │   └── data/                # Test data files
 │       ├── *.h5             # HDF5 test files
 │       └── *.py             # Data generation scripts
@@ -524,7 +511,7 @@ h5db/
 **Problem**: CMake can't find HDF5
 ```
 Solution: Ensure VCPKG_TOOLCHAIN_PATH is set correctly in .env:
-  source .env
+  source venv/bin/activate
   echo $VCPKG_TOOLCHAIN_PATH
   # Should print: /path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
@@ -533,7 +520,7 @@ Solution: Ensure VCPKG_TOOLCHAIN_PATH is set correctly in .env:
 ```
 Solution: Clean and rebuild:
   make clean
-  source .env && make -j$(nproc)
+  source venv/bin/activate && make -j$(nproc)
 ```
 
 **Problem**: Undefined reference errors
@@ -548,7 +535,7 @@ Solution: HDF5 libraries may not be linked. Check CMakeLists.txt includes:
 ```
 Solution: Tests expect to be run from project root:
   cd /path/to/h5db
-  source .env && ./build/release/test/unittest "test/*"
+  source venv/bin/activate && ./build/release/test/unittest "test/*"
 ```
 
 **Problem**: Python script fails with "ModuleNotFoundError"
@@ -570,8 +557,8 @@ Solution: Regenerate test data:
 
 **Problem**: Commands fail with "command not found"
 ```
-Solution: Source the .env file first:
-  source .env
+Solution: Activate the virtual environment first:
+  source venv/bin/activate
   make -j$(nproc)
 ```
 
@@ -596,32 +583,32 @@ Solution: Ensure vcpkg is bootstrapped and path is set:
 
 ```bash
 # Build
-source .env && make -j$(nproc)
+source venv/bin/activate && make -j$(nproc)
 
 # Test everything
-source .env && ./build/release/test/unittest "test/*"
+source venv/bin/activate && ./build/release/test/unittest "test/*"
 
 # Test specific file
-source .env && ./build/release/test/unittest "test/sql/h5db.test"
+source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test"
 
 # Run DuckDB CLI
 ./build/release/duckdb
 
 # Run Python script
-./venv/bin/python test/data/script.py
+./venv/bin/python test/data/<script>.py
 
 # Clean build
 make clean
 
-# Regenerate test data
+# Regenerate test data (example)
 cd test/data
-../../venv/bin/python create_rse_edge_cases.py
+../../venv/bin/python <create_script>.py
 cd ../..
 ```
 
 ### Environment Variables
 
-These are set in `.env`:
+These are set in `.env` and automatically loaded when you activate the virtual environment:
 
 - **`VCPKG_TOOLCHAIN_PATH`**: Path to vcpkg CMake toolchain
 - **`GEN`**: Build generator (ninja for fast builds)
@@ -639,6 +626,8 @@ To set the path dynamically (from vcpkg directory):
 cd /path/to/vcpkg
 export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
 ```
+
+**Note**: When you run `source venv/bin/activate`, the `.env` file is automatically sourced, so you get both the Python environment and all build variables.
 
 ### Build Targets
 
