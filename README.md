@@ -89,7 +89,7 @@ git submodule update --init --recursive
 source venv/bin/activate
 
 # 4. Build
-make -j$(nproc)
+make -j8
 ```
 
 The main binaries will be built in:

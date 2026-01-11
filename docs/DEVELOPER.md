@@ -145,7 +145,7 @@ The simplest way to build:
 source venv/bin/activate
 
 # Build the project (uses ninja and ccache automatically)
-make -j$(nproc)
+make -j8
 ```
 
 ### Build Outputs
@@ -194,7 +194,7 @@ If you need to start fresh:
 make clean
 
 # Then rebuild
-source venv/bin/activate && make -j$(nproc)
+source venv/bin/activate && make -j8
 ```
 
 ---
@@ -322,7 +322,7 @@ deactivate
 1. **Make code changes** in `src/`
 2. **Rebuild** the extension:
    ```bash
-   source venv/bin/activate && make -j$(nproc)
+   source venv/bin/activate && make -j8
    ```
 3. **Run tests** to verify:
    ```bash
@@ -520,7 +520,7 @@ Solution: Ensure VCPKG_TOOLCHAIN_PATH is set correctly in .env:
 ```
 Solution: Clean and rebuild:
   make clean
-  source venv/bin/activate && make -j$(nproc)
+  source venv/bin/activate && make -j8
 ```
 
 **Problem**: Undefined reference errors
@@ -559,7 +559,7 @@ Solution: Regenerate test data:
 ```
 Solution: Activate the virtual environment first:
   source venv/bin/activate
-  make -j$(nproc)
+  make -j8
 ```
 
 **Problem**: VCPKG dependencies not found
@@ -583,7 +583,7 @@ Solution: Ensure vcpkg is bootstrapped and path is set:
 
 ```bash
 # Build
-source venv/bin/activate && make -j$(nproc)
+source venv/bin/activate && make -j8
 
 # Test everything
 source venv/bin/activate && ./build/release/test/unittest "test/*"

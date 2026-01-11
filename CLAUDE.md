@@ -42,7 +42,7 @@ source venv/bin/activate
 make format-check
 make format
 make tidy-check
-make -j$(nproc)
+make -j8
 make test
 
 # Deactivate when done
@@ -60,7 +60,7 @@ The venv includes:
 
 ```bash
 source venv/bin/activate
-make -j$(nproc)    # Build
+make -j8    # Build
 make test          # Run tests
 ```
 
