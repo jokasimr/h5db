@@ -11,12 +11,15 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/list.hpp"
+#include <utility>
 #include <vector>
 #include <string>
 #include <limits>
 #include <variant>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
+#include <iostream>
 
 namespace duckdb {
 
@@ -47,10 +50,40 @@ struct RSEColumnSpec {
 // A column can be either regular or RSE
 using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec>;
 
+// Chunk cache data (separate struct to allow unique_ptr due to non-movable mutex/cv)
+struct Chunk {
+	idx_t chunk_size = 0; // Rows per chunk
+
+	// Typed storage - buffer with chunk_size capacity
+	using CacheStorage =
+	    std::variant<std::monostate, // No cache (for non-cacheable columns)
+	                 std::vector<int8_t>, std::vector<int16_t>, std::vector<int32_t>, std::vector<int64_t>,
+	                 std::vector<uint8_t>, std::vector<uint16_t>, std::vector<uint32_t>, std::vector<uint64_t>,
+	                 std::vector<float>, std::vector<double>,
+	                 std::vector<string> // Included for template instantiation (but not actually used for caching)
+	                 >;
+	CacheStorage cache; // Size: chunk_size elements
+
+	// Chunk state tracking
+	// end_row: One past the last row in this chunk. Chunk covers [end_row - chunk_size, end_row)
+	// Initialized to 0, which makes chunk appear stale (covers negative range)
+	std::atomic<idx_t> end_row {0};
+};
+
+struct ChunkCache {
+	Chunk chunks[2]; // Fixed size array (atomic members prevent std::vector usage)
+	// Synchronization
+	std::mutex mutex;           // Protects cv wait/notify only
+	std::condition_variable cv; // For threads waiting on chunks
+};
+
 // Regular column runtime state
 struct RegularColumnState {
 	H5DatasetHandle dataset;      // RAII wrapper - automatic cleanup
 	H5DataspaceHandle file_space; // Cached dataspace handle (reused across chunks)
+
+	// Chunk caching (unique_ptr because mutex/cv are non-movable)
+	std::unique_ptr<ChunkCache> chunk_cache;
 };
 
 // RSE column runtime state
@@ -94,16 +127,27 @@ struct H5ReadBindData : public TableFunctionData {
 struct H5ReadGlobalState : public GlobalTableFunctionState {
 	H5FileHandle file;                 // RAII wrapper for file handle
 	vector<ColumnState> column_states; // Unified column states
-	idx_t position;
+
+	// Position tracking (atomic for lock-free reads in chunk loading)
+	std::atomic<idx_t> position;      // This index and forward has not been started yet
+	std::atomic<idx_t> position_done; // All rows in [0, position_done) have been returned
 
 	// Row range filtering (for predicate pushdown on RSE columns)
 	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
-	idx_t current_range_idx = 0;       // Which range we're currently scanning
 
 	// Mutex for thread-safe range selection (enables parallel scanning)
 	std::mutex range_selection_mutex;
 
-	H5ReadGlobalState() : position(0) {
+	// Track out-of-order scan completions for position_done advancement
+	// Maps scan start position -> scan end position for completed scans
+	// that couldn't be merged into position_done yet (due to gaps)
+	std::map<idx_t, idx_t> completed_ranges;
+
+	// Chunk loading coordination: only one thread loads chunks at a time
+	// Other threads proceed with scanning cached data (enables parallel processing)
+	std::atomic<bool> someone_is_fetching {false};
+
+	H5ReadGlobalState() : position(0), position_done(0) {
 	}
 
 	// Override MaxThreads to enable parallel scanning
@@ -460,6 +504,48 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    RegularColumnState state;
 				    state.dataset = std::move(dataset);
 				    state.file_space = std::move(file_space);
+
+				    // Detect if this column is cacheable (Phase 1: 1D numerical only)
+				    bool is_cacheable = (spec.ndims == 1 && !spec.is_string);
+
+				    if (is_cacheable) {
+					    // Create cache structure (chunks array is already allocated)
+					    state.chunk_cache = std::make_unique<ChunkCache>();
+
+					    // Query HDF5 chunk size or use default
+					    idx_t chunk_size = 0;
+					    hid_t dcpl = H5Dget_create_plist(state.dataset);
+					    if (dcpl >= 0) {
+						    H5D_layout_t layout = H5Pget_layout(dcpl);
+						    if (layout == H5D_CHUNKED) {
+							    hsize_t chunk_dims[1];
+							    if (H5Pget_chunk(dcpl, 1, chunk_dims) >= 0) {
+								    chunk_size = chunk_dims[0];
+							    }
+						    }
+						    H5Pclose(dcpl);
+					    }
+
+					    // If not chunked or error, use default of 1MB / element_size
+					    if (chunk_size == 0) {
+						    constexpr idx_t DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024; // 8MB
+						    chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
+						    // Ensure at least some minimum chunk size
+						    if (chunk_size < 2048) {
+							    chunk_size = 2048;
+						    }
+					    }
+
+					    // Allocate typed cache buffer (chunk_size elements)
+					    DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
+						    using T = typename decltype(type_tag)::type;
+						    for (auto &chunk : state.chunk_cache->chunks) {
+							    chunk.cache = std::vector<T>(chunk_size);
+							    chunk.chunk_size = chunk_size;
+						    }
+					    });
+				    }
+
 				    result->column_states.push_back(std::move(state));
 
 			    } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
@@ -636,6 +722,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	}
 
 	result->position = 0;
+	result->position_done = 0;
 
 	return std::move(result);
 }
@@ -826,49 +913,29 @@ struct RangeSelection {
 	idx_t to_read;  // Number of rows to read
 };
 
+static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position) {
+	for (const auto &range : valid_row_ranges) {
+		if (position < range.end_row) {
+			idx_t start = position;
+			idx_t remains = MinValue<idx_t>(STANDARD_VECTOR_SIZE, range.end_row - position);
+			return {true, start, remains};
+		}
+		// if position == range.end_row, loop will move to next range automatically
+	}
+	return {false, 0, 0}; // no range after position
+}
+
 // Helper function to determine the next data range to read
 static RangeSelection GetNextDataRange(H5ReadGlobalState &gstate) {
 	// Thread-safe range selection for parallel scanning
 	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
+	auto range = NextRangeFrom(gstate.valid_row_ranges, gstate.position.load());
 
-	// Check if we've exhausted all row ranges
-	if (gstate.current_range_idx >= gstate.valid_row_ranges.size()) {
-		return {false, 0, 0};
+	if (range.has_data) {
+		// Advance position for next thread (critical for parallel scanning!)
+		gstate.position.store(gstate.position.load() + range.to_read);
 	}
-
-	// Get current range
-	const auto &range = gstate.valid_row_ranges[gstate.current_range_idx];
-
-	// If we haven't started this range yet, jump to it
-	if (gstate.position < range.start_row) {
-		gstate.position = range.start_row;
-	}
-
-	// If we've finished this range, move to next
-	if (gstate.position >= range.end_row) {
-		gstate.current_range_idx++;
-
-		if (gstate.current_range_idx >= gstate.valid_row_ranges.size()) {
-			return {false, 0, 0};
-		}
-
-		// Jump to start of next range
-		const auto &next_range = gstate.valid_row_ranges[gstate.current_range_idx];
-		gstate.position = next_range.start_row;
-	}
-
-	// Calculate how much to read from current range
-	const auto &current_range = gstate.valid_row_ranges[gstate.current_range_idx];
-	idx_t remaining_in_range = current_range.end_row - gstate.position;
-	idx_t to_read = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining_in_range);
-
-	// Save the position for this thread
-	idx_t thread_position = gstate.position;
-
-	// Advance position for next thread (critical for parallel scanning!)
-	gstate.position += to_read;
-
-	return {true, thread_position, to_read};
+	return range;
 }
 
 // Helper function to scan an RSE column
@@ -947,9 +1014,156 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 	});
 }
 
+// ==================== Chunk Caching Helpers ====================
+
+// Helper: Read data from HDF5 into typed cache buffer
+static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset, hid_t dataset_id, hid_t file_space_id,
+                               idx_t dataset_row_start, idx_t rows_to_read, LogicalType column_type) {
+	DispatchOnDuckDBType(column_type, [&](auto type_tag) {
+		using T = typename decltype(type_tag)::type;
+		auto &typed_cache = std::get<std::vector<T>>(cache);
+
+		// Lock for all HDF5 operations (not thread-safe)
+		std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
+		// Select hyperslab in file
+		hsize_t start[1] = {dataset_row_start};
+		hsize_t count[1] = {rows_to_read};
+		H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start, nullptr, count, nullptr);
+
+		// Create memory dataspace
+		hsize_t mem_dims[1] = {rows_to_read};
+		H5DataspaceHandle mem_space(1, mem_dims);
+
+		// Determine H5 type
+		hid_t h5_type;
+		if constexpr (std::is_same_v<T, int8_t>) {
+			h5_type = H5T_NATIVE_INT8;
+		} else if constexpr (std::is_same_v<T, int16_t>) {
+			h5_type = H5T_NATIVE_INT16;
+		} else if constexpr (std::is_same_v<T, int32_t>) {
+			h5_type = H5T_NATIVE_INT32;
+		} else if constexpr (std::is_same_v<T, int64_t>) {
+			h5_type = H5T_NATIVE_INT64;
+		} else if constexpr (std::is_same_v<T, uint8_t>) {
+			h5_type = H5T_NATIVE_UINT8;
+		} else if constexpr (std::is_same_v<T, uint16_t>) {
+			h5_type = H5T_NATIVE_UINT16;
+		} else if constexpr (std::is_same_v<T, uint32_t>) {
+			h5_type = H5T_NATIVE_UINT32;
+		} else if constexpr (std::is_same_v<T, uint64_t>) {
+			h5_type = H5T_NATIVE_UINT64;
+		} else if constexpr (std::is_same_v<T, float>) {
+			h5_type = H5T_NATIVE_FLOAT;
+		} else if constexpr (std::is_same_v<T, double>) {
+			h5_type = H5T_NATIVE_DOUBLE;
+		}
+
+		// Read into cache buffer at specified offset
+		herr_t status =
+		    H5Dread(dataset_id, h5_type, mem_space, file_space_id, H5P_DEFAULT, typed_cache.data() + buffer_offset);
+		if (status < 0) {
+			throw IOException("Failed to read chunk from HDF5 dataset");
+		}
+	});
+}
+
+// Helper: Copy data from typed cache to result vector
+static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_offset, idx_t rows_to_copy,
+                               Vector &result_vector, idx_t result_offset, LogicalType column_type) {
+	DispatchOnDuckDBType(column_type, [&](auto type_tag) {
+		using T = typename decltype(type_tag)::type;
+		const auto &typed_cache = std::get<std::vector<T>>(cache);
+
+		// Get result data pointer
+		auto result_data = FlatVector::GetData<T>(result_vector);
+
+		// Copy from cache to result
+		std::memcpy(result_data + result_offset, typed_cache.data() + buffer_offset, rows_to_copy * sizeof(T));
+	});
+}
+
+static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
+                          const std::vector<RowRange> &valid_row_ranges, idx_t position_done, idx_t total_rows,
+                          LogicalType column_type) {
+
+	idx_t max_end_row = 0;
+	for (Chunk &chunk : cache.chunks) {
+		auto end_row = chunk.end_row.load();
+		max_end_row = end_row > max_end_row ? end_row : max_end_row;
+	}
+	for (Chunk &chunk : cache.chunks) {
+		if (chunk.end_row.load() <= position_done) {
+			// Chunk is finished
+			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
+			if (next_range.has_data) {
+
+				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
+				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load,
+				                   column_type);
+
+				// Update end position and wake waiters
+				{
+					std::lock_guard<std::mutex> lock(cache.mutex);
+					chunk.end_row.store(next_range.position + rows_to_load);
+					cache.cv.notify_all();
+				}
+				max_end_row = next_range.position + rows_to_load;
+			}
+		}
+	}
+}
+
 // Helper function to scan a regular dataset column
-static void ScanRegularColumn(const RegularColumnSpec &spec, const RegularColumnState &state, Vector &result_vector,
+static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState &state, Vector &result_vector,
                               idx_t position, idx_t to_read) {
+	// Check if using cache
+	if (state.chunk_cache) {
+		auto &cache = *state.chunk_cache;
+		auto *chunk1 = &cache.chunks[0];
+		auto *chunk2 = &cache.chunks[1];
+
+		{
+			std::unique_lock<std::mutex> lock(cache.mutex);
+			cache.cv.wait(lock, [&] {
+				// Sort by end_row (earlier end = earlier start)
+				idx_t chunk1_end = chunk1->end_row.load();
+				idx_t chunk2_end = chunk2->end_row.load();
+
+				if (chunk1_end > chunk2_end) {
+					std::swap(chunk1, chunk2);
+					std::swap(chunk1_end, chunk2_end);
+				}
+				idx_t chunk1_start = chunk1_end < chunk1->chunk_size ? 0 : chunk1_end - chunk1->chunk_size;
+				return chunk1_start <= position && (position + to_read) <= chunk2_end;
+			});
+		}
+
+		// Copy data from chunks that overlap our read range [position, position + to_read)
+		for (Chunk *chunk : {chunk1, chunk2}) {
+			idx_t chunk_end = chunk->end_row.load();
+			idx_t chunk_start = (chunk_end > chunk->chunk_size) ? (chunk_end - chunk->chunk_size) : 0;
+
+			// Check if chunk overlaps our range
+			if (chunk_start < position + to_read && chunk_end > position) {
+				idx_t overlap_start = MaxValue<idx_t>(chunk_start, position);
+				idx_t overlap_end = MinValue<idx_t>(chunk_end, position + to_read);
+				idx_t overlap_size = overlap_end - overlap_start;
+
+				idx_t chunk_offset = overlap_start - chunk_start;
+				idx_t result_offset = overlap_start - position;
+
+				CopyFromTypedCache(chunk->cache, chunk_offset, overlap_size, result_vector, result_offset,
+				                   spec.column_type);
+			}
+		}
+
+		return; // Done with cached read
+	}
+
+	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+
+	// Non-cached path: fall back to direct HDF5 read
 	// Access RAII-wrapped handles from state
 	hid_t dataset_id = state.dataset.get();
 	hid_t file_space = state.file_space.get();
@@ -1045,7 +1259,38 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
 	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
 
-	// Determine next data range to read
+	// Step 1: Proactively load chunks for ALL cacheable regular columns
+	// Only one thread loads at a time; others proceed with scanning cached data
+	bool expected = false;
+	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
+		// Load stale chunks (on first scan, all chunks are stale since end_row=0)
+		for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
+			const auto &col_spec = bind_data.columns[col_idx];
+			auto &col_state = gstate.column_states[col_idx];
+
+			std::visit(
+			    [&](auto &&spec, auto &&state) {
+				    using SpecT = std::decay_t<decltype(spec)>;
+				    using StateT = std::decay_t<decltype(state)>;
+
+				    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
+				                  std::is_same_v<StateT, RegularColumnState>) {
+					    if (state.chunk_cache) {
+						    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
+						                  gstate.valid_row_ranges, gstate.position_done.load(), bind_data.num_rows,
+						                  spec.column_type);
+					    }
+				    }
+			    },
+			    col_spec, col_state);
+		}
+		// Done loading - release the flag so another thread can load next time
+		gstate.someone_is_fetching.store(false);
+	}
+	// If we lost the race, skip loading - another thread is handling it
+	// We'll wait in cv.wait if we need a chunk that's still being loaded
+
+	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
 	if (!range_selection.has_data) {
 		output.SetCardinality(0);
@@ -1054,9 +1299,6 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	idx_t position = range_selection.position;
 	idx_t to_read = range_selection.to_read;
-
-	// Lock for all HDF5 operations (not thread-safe)
-	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
 
 	// Process each column (regular or RSE)
 	for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
@@ -1084,6 +1326,35 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	}
 
 	output.SetCardinality(to_read);
+
+	// Update position_done to track completed scans
+	// This scan returned rows [position, position + to_read)
+	// position_done uses half-open interval: [0, position_done) has been returned
+	{
+		std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
+
+		idx_t scan_end = position + to_read;
+		idx_t current_done = gstate.position_done.load();
+
+		if (position == current_done) {
+			// This scan is contiguous with position_done - advance directly
+			gstate.position_done.store(scan_end);
+
+			// Merge any subsequent completed ranges that are now contiguous
+			while (true) {
+				current_done = gstate.position_done.load();
+				auto it = gstate.completed_ranges.find(current_done);
+				if (it == gstate.completed_ranges.end()) {
+					break;
+				}
+				gstate.position_done.store(it->second);
+				gstate.completed_ranges.erase(it);
+			}
+		} else {
+			// This scan completed out of order - store for later merging
+			gstate.completed_ranges[position] = scan_end;
+		}
+	}
 }
 
 // ==================== h5_rse Scalar Function ====================
