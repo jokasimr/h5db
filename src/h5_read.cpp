@@ -528,15 +528,13 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 					    // If not chunked or error, use default of 1MB / element_size
 					    if (chunk_size == 0) {
-						    constexpr idx_t DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024; // 8MB
+						    constexpr idx_t DEFAULT_CHUNK_BYTES = 1 * 1024 * 1024; // 4MB
 						    chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
 						    // Ensure at least some minimum chunk size
 						    if (chunk_size < 2048) {
 							    chunk_size = 2048;
 						    }
 					    }
-					    // DEBUG: something small - but larger than the vector sizes
-					    // chunk_size = 8 * 1000;
 
 					    // Allocate typed cache buffer (chunk_size elements)
 					    DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
@@ -1096,7 +1094,6 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 	}
 	for (Chunk &chunk : cache.chunks) {
 
-		// std::cout << "Needs reloading? " << dataset_id <<  std::endl;
 		if (chunk.end_row.load(std::memory_order_acquire) <= position_done.load(std::memory_order_acquire)) {
 			// Chunk is finished
 			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
@@ -1106,7 +1103,7 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load,
 				                   column_type);
 
-				idx_t new_end = next_range.position + rows_to_load;
+				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
 				chunk.end_row.notify_all();
 
@@ -1114,6 +1111,37 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 			}
 		}
 	}
+}
+
+static bool TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
+	bool expected = false;
+	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
+
+		for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
+			const auto &col_spec = bind_data.columns[col_idx];
+			auto &col_state = gstate.column_states[col_idx];
+
+			std::visit(
+			    [&](auto &&spec, auto &&state) {
+				    using SpecT = std::decay_t<decltype(spec)>;
+				    using StateT = std::decay_t<decltype(state)>;
+
+				    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
+				                  std::is_same_v<StateT, RegularColumnState>) {
+					    if (state.chunk_cache) {
+						    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
+						                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows,
+						                  spec.column_type);
+					    }
+				    }
+			    },
+			    col_spec, col_state);
+		}
+		// Done loading - release the flag so another thread can load next time
+		gstate.someone_is_fetching.store(false);
+		gstate.someone_is_fetching.notify_all();
+	}
+	return expected;
 }
 
 // Helper function to scan a regular dataset column
@@ -1126,16 +1154,6 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		auto *chunk1 = &cache.chunks[0];
 		auto *chunk2 = &cache.chunks[1];
 
-		/*
-		idx_t maxend = std::max(
-		    chunk1->end_row.load(std::memory_order_acquire),
-		    chunk2->end_row.load(std::memory_order_acquire)
-		);
-
-		std::cout << "Waiting " << std::to_string(position) + " " + std::to_string(position+to_read) + " " +
-		std::to_string(maxend) + "\n";
-		*/
-
 		for (;;) {
 			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
 			idx_t end2 = chunk2->end_row.load(std::memory_order_acquire);
@@ -1145,64 +1163,14 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 				std::swap(end1, end2);
 			}
 
-			// std::cout << "before: " + std::to_string(position) + " " + std::to_string(end1) + " " +
-			// std::to_string(end2)  + "\n";
-
 			if (position + to_read <= end2) {
-				// std::cout << std::to_string(position) + " " + std::to_string(position+to_read) + " " +
-				// std::to_string(end2) + "\n";
 				break;
 			}
-			// std::cout << "after: " + std::to_string(position) + " " + std::to_string(end1) + " " +
-			// std::to_string(end2)  + "\n";
 
-			bool expected = false;
-			if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
-
-				for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
-					const auto &col_spec = bind_data.columns[col_idx];
-					auto &col_state = gstate.column_states[col_idx];
-
-					std::visit(
-					    [&](auto &&spec, auto &&state) {
-						    using SpecT = std::decay_t<decltype(spec)>;
-						    using StateT = std::decay_t<decltype(state)>;
-
-						    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
-						                  std::is_same_v<StateT, RegularColumnState>) {
-							    if (state.chunk_cache) {
-								    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-								                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows,
-								                  spec.column_type);
-							    }
-						    }
-					    },
-					    col_spec, col_state);
-				}
-				// Done loading - release the flag so another thread can load next time
-				gstate.someone_is_fetching.store(false);
-				gstate.someone_is_fetching.notify_all();
-			} else {
+			if (!TryRefreshCache(gstate, bind_data)) {
 				chunk1->end_row.wait(end1, std::memory_order_relaxed);
 			}
 		}
-
-		/*
-		{
-		    std::unique_lock<std::mutex> lock(cache.mutex);
-		    cache.cv.wait(lock, [&] {
-		        idx_t chunk1_end = chunk1->end_row.load();
-		        idx_t chunk2_end = chunk2->end_row.load();
-
-		        if (chunk1_end > chunk2_end) {
-		            std::swap(chunk1, chunk2);
-		            std::swap(chunk1_end, chunk2_end);
-		        }
-		        idx_t chunk1_start = chunk1_end < chunk1->chunk_size ? 0 : chunk1_end - chunk1->chunk_size;
-		        return chunk1_start <= position && (position + to_read) <= chunk2_end;
-		    });
-		}
-		*/
 
 		// Copy data from chunks that overlap our read range [position, position + to_read)
 		for (Chunk *chunk : {chunk1, chunk2}) {
@@ -1326,68 +1294,13 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	// Step 1: Proactively load chunks for ALL cacheable regular columns
 	// Only one thread loads at a time; others proceed with scanning cached data
-	bool expected = false;
-	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
-
-		for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
-			const auto &col_spec = bind_data.columns[col_idx];
-			auto &col_state = gstate.column_states[col_idx];
-
-			std::visit(
-			    [&](auto &&spec, auto &&state) {
-				    using SpecT = std::decay_t<decltype(spec)>;
-				    using StateT = std::decay_t<decltype(state)>;
-
-				    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
-				                  std::is_same_v<StateT, RegularColumnState>) {
-					    if (state.chunk_cache) {
-						    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-						                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows,
-						                  spec.column_type);
-					    }
-				    }
-			    },
-			    col_spec, col_state);
-		}
-		// Done loading - release the flag so another thread can load next time
-		gstate.someone_is_fetching.store(false);
-		gstate.someone_is_fetching.notify_all();
-	}
-	// If we lost the race, skip loading - another thread is handling it
+	TryRefreshCache(gstate, bind_data);
 
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
 	if (!range_selection.has_data) {
-
 		gstate.someone_is_fetching.wait(true);
-
-		expected = false;
-		if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
-
-			for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
-				const auto &col_spec = bind_data.columns[col_idx];
-				auto &col_state = gstate.column_states[col_idx];
-
-				std::visit(
-				    [&](auto &&spec, auto &&state) {
-					    using SpecT = std::decay_t<decltype(spec)>;
-					    using StateT = std::decay_t<decltype(state)>;
-
-					    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
-					                  std::is_same_v<StateT, RegularColumnState>) {
-						    if (state.chunk_cache) {
-							    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-							                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows,
-							                  spec.column_type);
-						    }
-					    }
-				    },
-				    col_spec, col_state);
-			}
-			// Done loading - release the flag so another thread can load next time
-			gstate.someone_is_fetching.store(false);
-			gstate.someone_is_fetching.notify_all();
-		}
+		TryRefreshCache(gstate, bind_data);
 		output.SetCardinality(0);
 		return;
 	}
