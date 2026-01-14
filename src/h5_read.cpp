@@ -72,9 +72,6 @@ struct Chunk {
 
 struct ChunkCache {
 	Chunk chunks[2]; // Fixed size array (atomic members prevent std::vector usage)
-	                 // Synchronization
-	                 // std::mutex mutex;           // Protects cv wait/notify only
-	                 // std::condition_variable cv; // For threads waiting on chunks
 };
 
 // Regular column runtime state
@@ -1140,8 +1137,9 @@ static bool TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 		// Done loading - release the flag so another thread can load next time
 		gstate.someone_is_fetching.store(false);
 		gstate.someone_is_fetching.notify_all();
+		return true;
 	}
-	return expected;
+	return false;
 }
 
 // Helper function to scan a regular dataset column
@@ -1292,15 +1290,9 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
 	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
 
-	// Step 1: Proactively load chunks for ALL cacheable regular columns
-	// Only one thread loads at a time; others proceed with scanning cached data
-	TryRefreshCache(gstate, bind_data);
-
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
 	if (!range_selection.has_data) {
-		gstate.someone_is_fetching.wait(true);
-		TryRefreshCache(gstate, bind_data);
 		output.SetCardinality(0);
 		return;
 	}
