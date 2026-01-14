@@ -43,15 +43,21 @@ namespace duckdb {
 //   output.data[1] = col4 data
 
 struct LocalColumnIdx {
-	idx_t index;  // Index into column_states [0, 1, 2, ...]
-	explicit LocalColumnIdx(idx_t i) : index(i) {}
-	operator idx_t() const { return index; }
+	idx_t index; // Index into column_states [0, 1, 2, ...]
+	explicit LocalColumnIdx(idx_t i) : index(i) {
+	}
+	operator idx_t() const {
+		return index;
+	}
 };
 
 struct GlobalColumnIdx {
-	idx_t index;  // Index into bind_data.columns
-	explicit GlobalColumnIdx(idx_t i) : index(i) {}
-	operator idx_t() const { return index; }
+	idx_t index; // Index into bind_data.columns
+	explicit GlobalColumnIdx(idx_t i) : index(i) {
+	}
+	operator idx_t() const {
+		return index;
+	}
 };
 
 // ==================== h5_read Implementation ====================
@@ -157,7 +163,7 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	vector<ColumnState> column_states; // DENSE array: indexed by LOCAL position [0, 1, 2, ...]
 
 	// Projection pushdown support
-	vector<column_t> columns_to_scan;             // Global column indices (into bind_data.columns)
+	vector<column_t> columns_to_scan;            // Global column indices (into bind_data.columns)
 	unordered_map<idx_t, idx_t> global_to_local; // Maps global column idx -> local column_states idx
 
 	// Position tracking (atomic for lock-free reads in chunk loading)
@@ -207,8 +213,8 @@ static LocalColumnIdx GlobalToLocal(const H5ReadGlobalState &gstate, GlobalColum
 // Get global column index from columns_to_scan by local position
 static GlobalColumnIdx GetGlobalIdx(const H5ReadGlobalState &gstate, LocalColumnIdx local_idx) {
 	if (local_idx.index >= gstate.columns_to_scan.size()) {
-		throw InternalException("Local index %llu out of range (size=%llu)",
-		                       local_idx.index, gstate.columns_to_scan.size());
+		throw InternalException("Local index %llu out of range (size=%llu)", local_idx.index,
+		                        gstate.columns_to_scan.size());
 	}
 	return GlobalColumnIdx(gstate.columns_to_scan[local_idx.index]);
 }
@@ -1403,9 +1409,9 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 		LocalColumnIdx local_idx(i);
 		GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
 
-		auto &result_vector = output.data[i];                   // Sequential output
-		const auto &col_spec = bind_data.columns[global_idx];  // Global schema
-		auto &col_state = gstate.column_states[local_idx];     // Local (dense) state
+		auto &result_vector = output.data[i];                 // Sequential output
+		const auto &col_spec = bind_data.columns[global_idx]; // Global schema
+		auto &col_state = gstate.column_states[local_idx];    // Local (dense) state
 
 		// Use variant visiting to dispatch based on column type
 		std::visit(

@@ -186,9 +186,12 @@ All functions provide clear error messages for common issues:
 
 ## Performance Notes
 
-- **Chunked reading**: Data is read in chunks of 2048 rows for memory efficiency
+- **Projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely for significant performance gains
+- **Predicate pushdown**: For RSE columns, filters are applied during scan to reduce I/O by computing valid row ranges
+- **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row
+- **Parallel scanning**: Multiple threads can read different row ranges simultaneously for improved throughput
 
 ---
 
