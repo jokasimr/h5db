@@ -1,0 +1,19 @@
+# name: test/sql/large/deadlock_test_single_detector_2cols.test
+# description: Single detector, 2 columns, repeated 2 times (no UNION ALL)
+# group: [large]
+
+require h5db
+
+# First query: single detector, 2 columns
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_multithreading.h5',
+    '/detector_1/time_offset', '/detector_1/event_id');
+----
+2000000
+
+# Second query: same single detector, same 2 columns
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_multithreading.h5',
+    '/detector_1/time_offset', '/detector_1/event_id');
+----
+2000000

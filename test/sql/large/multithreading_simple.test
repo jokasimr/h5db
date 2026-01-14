@@ -1,0 +1,15 @@
+# name: test/sql/large/multithreading_simple.test
+# description: Simplified large multithreading test to isolate potential deadlock
+# group: [large]
+
+require h5db
+
+# Simple 2-detector UNION ALL test
+query I
+SELECT COUNT(*) FROM (
+  SELECT event_id FROM h5_read('test/data/large/large_multithreading.h5', '/detector_1/event_id')
+  UNION ALL
+  SELECT event_id FROM h5_read('test/data/large/large_multithreading.h5', '/detector_2/event_id')
+);
+----
+4000000

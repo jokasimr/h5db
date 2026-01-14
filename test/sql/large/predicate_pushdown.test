@@ -1,0 +1,1136 @@
+# name: test/sql/large/predicate_pushdown.test
+# description: Large-scale test (10M rows) for predicate pushdown optimization with parallel execution
+# group: [large]
+
+require h5db
+
+# Test file structure:
+# - Sorted int32 RSE: values [10, 20, 30, 40, 50], 2M rows per run (rows 0-9,999,999)
+# - Unsorted int32 RSE: values [50, 10, 30, 20, 40], 2M rows per run
+# - Sorted float RSE: values [1.5, 2.5, 3.5, 4.5, 5.5], 2M rows per run
+# - Sorted int64 RSE: values [100, 200, 300, 400, 500], 2M rows per run
+# - Regular int32: values 0-9,999,999
+
+# =============================================================================
+# EXPLAIN ANALYZE tests - Verify optimization is actually applied
+# =============================================================================
+# These tests use EXPLAIN ANALYZE to check that the TABLE_SCAN operator
+# reports the correct number of rows, proving that I/O optimization is working.
+# If optimization works: TABLE_SCAN shows fewer rows than total (1000)
+# If optimization fails: TABLE_SCAN shows all rows (1000)
+
+# Test: Optimized query should scan fewer rows than total
+# TABLE_SCAN should show 2,000,000 rows (optimized), not 1000 rows (unoptimized)
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30;
+
+# Test: Unoptimized query (!=) should scan all rows
+# TABLE_SCAN should show 10,000,000 rows (no optimization possible)
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values <> 30;
+
+# Test: BETWEEN optimization - should scan 6,000,000 rows, not 1000
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 40;
+
+# Test: Multi-column RSE optimization - intersection should scan 2,000,000 rows
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values = 30 AND float_rse_values = 3.5;
+
+# Test: Mixed RSE + regular filter - RSE should optimize I/O, regular post-filters
+# TABLE_SCAN should show 2,000,000 rows (RSE optimization), FILTER applies regular column filter
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30 AND regular > 450;
+
+# Test: OR expression - no optimization, should scan all 1000 rows
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 10 OR int_rse_values = 50;
+
+# Test: NOT expression - no optimization, should scan all 1000 rows
+statement ok
+EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values = 30);
+
+# =============================================================================
+# Basic comparison operators on sorted RSE columns
+# =============================================================================
+
+# Test: GREATER THAN (should skip rows 0-1,990,000 with value 10)
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 10;
+----
+8000000	2000000
+
+# Test: GREATER THAN OR EQUAL (should include rows 2,000,000-9,990,000 with values >= 20)
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 20;
+----
+8000000	2000000
+
+# Test: LESS THAN (should only include rows 0-1,990,000 with value 10)
+query II
+SELECT COUNT(*), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values < 20;
+----
+2000000	1999999
+
+# Test: LESS THAN OR EQUAL (should include rows 0-3,990,000 with values <= 20)
+query II
+SELECT COUNT(*), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values <= 20;
+----
+4000000	3999999
+
+# Test: EQUAL (should only include rows 4,000,000-5,990,000 with value 30)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30;
+----
+2000000	4000000	5999999
+
+# =============================================================================
+# BETWEEN operator
+# =============================================================================
+
+# Test: BETWEEN (should include rows 2,000,000-5,990,000 with values 20, 30)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 30;
+----
+4000000	2000000	5999999
+
+# Test: BETWEEN with range matching single value
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 40 AND 40;
+----
+2000000
+
+# =============================================================================
+# Edge cases
+# =============================================================================
+
+# Test: Filter matches no rows (value < minimum)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values < 10;
+----
+0
+
+# Test: Filter matches no rows (value > maximum)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 50;
+----
+0
+
+# Test: Filter matches all rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 10;
+----
+10000000
+
+# Test: Filter on first run only
+query II
+SELECT COUNT(*), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 10;
+----
+2000000	1999999
+
+# Test: Filter on last run only
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 50;
+----
+2000000	8000000
+
+# Test: Filter value between runs (not in dataset)
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 25 AND int_rse_values < 35;
+----
+2000000	4000000
+
+# =============================================================================
+# Multiple filters on same RSE column (range intersection)
+# =============================================================================
+
+# Test: Two filters creating a range
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 10 AND int_rse_values < 50;
+----
+6000000	2000000	7999999
+
+# =============================================================================
+# Type coverage - test different numeric types
+# =============================================================================
+
+# Test: Float RSE column
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE float_rse_values > 2.0;
+----
+8000000	2000000
+
+# Test: Int64 RSE column
+query II
+SELECT COUNT(*), MIN(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int64_rse_starts', '/int64_rse_values')
+) WHERE int64_rse_values >= 300;
+----
+6000000	4000000
+
+# =============================================================================
+# Unsorted RSE column - should still work correctly (post-scan filter)
+# =============================================================================
+
+# Test: Unsorted RSE column (no optimization but correct results)
+# Values are [50, 10, 30, 20, 40] for runs starting at [0, 200, 400, 600, 800]
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_unsorted_rse_starts', '/int_unsorted_rse_values')
+) WHERE int_unsorted_rse_values > 25;
+----
+6000000
+
+# Test: Unsorted - verify correct row mapping
+query I
+SELECT SUM(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_unsorted_rse_starts', '/int_unsorted_rse_values')
+) WHERE int_unsorted_rse_values = 10;
+----
+5999999000000
+
+# =============================================================================
+# Combined tests with regular columns
+# =============================================================================
+
+# Test: Filter reduces I/O on regular column
+query II
+SELECT COUNT(*), AVG(regular)::INTEGER FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30;
+----
+2000000	5000000
+
+# Test: Multiple columns with filter
+query III
+SELECT COUNT(*), MIN(regular), AVG(regular_float)::INTEGER FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    '/regular_float',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 40;
+----
+4000000	6000000	800000
+
+# =============================================================================
+# Verify no regression without filters
+# =============================================================================
+
+# Test: No filter - all rows returned
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+);
+----
+10000000
+
+# Test: RSE column values match expected pattern
+query IIII
+SELECT
+    SUM(CASE WHEN int_rse_values = 10 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN int_rse_values = 20 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN int_rse_values = 30 THEN 1 ELSE 0 END),
+    SUM(CASE WHEN int_rse_values = 40 THEN 1 ELSE 0 END)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+);
+----
+2000000	2000000	2000000	2000000
+
+# =============================================================================
+# BETWEEN operator tests (BOUND_BETWEEN expression type)
+# =============================================================================
+
+# Test: BETWEEN on RSE column - should optimize I/O
+# I/O: Read rows 2,000,000-7,990,000 (6,000,000 rows) instead of all 1000
+# Values in range [20,40] are in runs at positions 200-399, 400-599, 600-799
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 40;
+----
+6000000	2000000	7999999
+
+# Test: BETWEEN with single value (equivalent to =)
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 30 AND 30;
+----
+2000000
+
+# Test: BETWEEN with float RSE column
+# I/O: Read rows 0-5,990,000 (6,000,000 rows)
+query II
+SELECT COUNT(*), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE float_rse_values BETWEEN 1.5 AND 3.5;
+----
+6000000	5999999
+
+# Test: BETWEEN with no matching rows
+# I/O: Read 0 rows (empty range)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 5 AND 9;
+----
+0
+
+# Test: BETWEEN matching all rows
+# I/O: Read all 10,000,000 rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 10 AND 50;
+----
+10000000
+
+# =============================================================================
+# Multiple filters on same RSE column (range narrowing)
+# =============================================================================
+
+# Test: Two filters creating intersection
+# I/O: Read rows 2,000,000-7,990,000 (6,000,000 rows)
+# int_rse_values > 10 would be rows 2,000,000-9,990,000 (800 rows)
+# int_rse_values < 50 would be rows 0-7,990,000 (800 rows)
+# Intersection: rows 2,000,000-7,990,000 (600 rows)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 10 AND int_rse_values < 50;
+----
+6000000	2000000	7999999
+
+# Test: Three filters on same RSE column (all supported operators)
+# I/O: Read rows 4,000,000-7,990,000 (4,000,000 rows)
+# >= 30 → rows 400-999
+# <= 40 → rows 0-799
+# > 20 → rows 200-999
+# Intersection: rows 4,000,000-7,990,000 (400 rows, values 30 and 40)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 30 AND int_rse_values <= 40 AND int_rse_values > 20;
+----
+4000000
+
+# Test: Filters that create empty intersection
+# I/O: Read 0 rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 30 AND int_rse_values < 30;
+----
+0
+
+# =============================================================================
+# Multiple RSE columns with filters (range intersection)
+# =============================================================================
+
+# Test: Filters on two different RSE columns - intersection
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+# int_rse_values >= 30 → rows 4,000,000-9,990,000 (600 rows)
+# float_rse_values <= 3.5 → rows 0-5,990,000 (600 rows)
+# Intersection: rows 4,000,000-5,990,000 (200 rows)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values >= 30 AND float_rse_values <= 3.5;
+----
+2000000	4000000	5999999
+
+# Test: Two RSE columns with no overlap
+# I/O: Read 0 rows (empty intersection)
+# int_rse_values = 10 → rows 0-199
+# float_rse_values = 5.5 → rows 800-999
+# Intersection: empty
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values = 10 AND float_rse_values = 5.5;
+----
+0
+
+# Test: Two RSE columns - complete overlap
+# I/O: Read rows 2,000,000-3,990,000 (2,000,000 rows)
+# int_rse_values = 20 → rows 200-399
+# float_rse_values = 2.5 → rows 200-399
+# Intersection: rows 200-399
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values = 20 AND float_rse_values = 2.5;
+----
+2000000
+
+# Test: Three RSE columns with filters
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows) - all three match this range
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values'),
+    h5_rse('/int64_rse_starts', '/int64_rse_values')
+) WHERE int_rse_values = 30 AND float_rse_values = 3.5 AND int64_rse_values = 300;
+----
+2000000
+
+# =============================================================================
+# Mixed RSE and regular column filters (defensive filtering)
+# =============================================================================
+
+# Test: RSE filter optimizes I/O, regular filter applied post-scan
+# I/O: Read rows 4,000,000-5,999,999 (2,000,000 rows) due to RSE filter
+# Post-scan: DuckDB filters regular > 450, all 2M rows match (all > 450)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30 AND regular > 450;
+----
+2000000	4000000	5999999
+
+# Test: Multiple RSE filters + regular filter
+# I/O: Read rows 2,000,000-7,990,000 (6,000,000 rows) due to RSE BETWEEN
+# Post-scan: regular < 5000000, leaving 3M rows (runs 20,30 fully + partial run 30)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 40 AND regular < 5000000;
+----
+3000000	2000000	4999999
+
+# Test: RSE on different columns + regular filter
+# I/O: Read rows 4,000,000-5,999,999 (2,000,000 rows) due to RSE intersection
+# Post-scan: regular >= 500 matches all (all values >= 4M)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values >= 30 AND float_rse_values <= 3.5 AND regular >= 500;
+----
+2000000	4000000	5999999
+
+# Test: Only regular filter (no RSE optimization)
+# I/O: Read all 10,000,000 rows (no RSE filter to optimize)
+# Post-scan: regular < 100, leaving 100 rows
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE regular < 100;
+----
+100	0	99
+
+# Test: Complex mixed filter with BETWEEN
+# I/O: Read rows 2,000,000-3,999,999 (2,000,000 rows) due to RSE = 20
+# Post-scan: regular BETWEEN 2.5M AND 3.5M, leaving 1,000,001 rows
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 20 AND regular BETWEEN 2500000 AND 3500000;
+----
+1000001	2500000	3500000
+
+# =============================================================================
+# Defensive filtering verification (filters applied twice is correct)
+# =============================================================================
+
+# Test: Verify RSE filter is applied post-scan (defensive)
+# Even if our row range logic is buggy, DuckDB's post-scan filter ensures correctness
+# I/O: Optimized (2M rows from run 2)
+# Post-scan: DuckDB applies int_rse_values = 30 again, all rows have value 30
+query II
+SELECT COUNT(*), COUNT(DISTINCT int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30;
+----
+2000000	1
+
+# Test: Defensive filtering with BETWEEN
+# I/O: Optimized (6M rows from runs 1, 2, 3)
+# Post-scan: DuckDB ensures all rows are in range [20,40] - values 20, 30, 40
+query IIII
+SELECT
+    COUNT(*),
+    MIN(int_rse_values),
+    MAX(int_rse_values),
+    COUNT(DISTINCT int_rse_values)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 40;
+----
+6000000	20	40	3
+
+# Test: Verify multi-column range intersection is correct
+# Both RSE filters applied post-scan to ensure correctness
+# Intersection: run 2 only (int_rse=30, float_rse=3.5)
+query IIII
+SELECT
+    COUNT(*),
+    MIN(int_rse_values),
+    MAX(int_rse_values),
+    MAX(float_rse_values)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE int_rse_values >= 30 AND float_rse_values <= 3.5;
+----
+2000000	30	30	3.5
+
+# =============================================================================
+# NOT EQUAL (!=) operator tests
+# =============================================================================
+
+# Test: != on RSE column (not optimized but correct)
+# I/O: Read all 10,000,000 rows (we don't claim != filters)
+# Post-scan: DuckDB filters out int_rse_values = 20, leaving 800 rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values != 20;
+----
+8000000
+
+# Test: Verify != returns correct values (excludes value 30)
+# Values: 10, 20, 40, 50 (each 2M rows)
+query II
+SELECT int_rse_values, COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values != 30
+GROUP BY int_rse_values
+ORDER BY int_rse_values;
+----
+10	2000000
+20	2000000
+40	2000000
+50	2000000
+
+# Test: != with other filters (mixed optimization)
+# I/O: Read rows 4,000,000-9,999,999 (6,000,000 rows) due to >= 30
+# Post-scan: DuckDB applies != 30, removing run 2, leaving values 40 and 50 (4M rows)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 30 AND int_rse_values != 30;
+----
+4000000	40	50
+
+# Test: != with regular column filter
+# I/O: Read all 10,000,000 rows (no optimization from !=)
+# Post-scan: != 20 excludes run 1 (rows 2M-4M), regular < 300 selects rows 0-299
+# Intersection: rows 0-299 (all in run 0 with int_rse_values=10)
+query II
+SELECT COUNT(*), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values != 20 AND regular < 300;
+----
+300	299
+
+# =============================================================================
+# Complex nested filter expressions (AND/OR combinations)
+# =============================================================================
+
+# Test: Nested ANDs on same RSE column
+# I/O: Read rows 4,000,000-5,999,999 (2,000,000 rows optimized to runs 2,3)
+# (>= 20 AND <= 40) gives values 20, 30, 40
+# (>= 30 AND <= 40) gives values 30, 40
+# Combined: values 30 and 40 (4M rows total)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE (int_rse_values >= 20 AND int_rse_values <= 40) AND (int_rse_values >= 30 AND int_rse_values <= 40);
+----
+4000000	30	40
+
+# Test: Complex nested ANDs with multiple RSE columns
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+# int >= 30 AND int <= 30 → rows 400-599
+# float >= 3.5 AND float <= 3.5 → rows 400-599
+# Combined: rows 400-599
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE (int_rse_values >= 30 AND int_rse_values <= 30) AND (float_rse_values >= 3.5 AND float_rse_values <= 3.5);
+----
+2000000	4000000	5999999
+
+# Test: OR expression (not optimized but must be correct)
+# I/O: Read all 10,000,000 rows (OR prevents optimization)
+# Post-scan: value = 10 OR value = 50 → rows 0-199 + 800-999
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 10 OR int_rse_values = 50;
+----
+4000000
+
+# Test: OR with different values
+# I/O: Read all 10,000,000 rows (OR prevents optimization)
+# Post-scan: value = 20 OR value = 30 OR value = 40 gives 3 runs (6M rows)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 20 OR int_rse_values = 30 OR int_rse_values = 40;
+----
+6000000	20	40
+
+# Test: Complex (AND within OR) - must not optimize incorrectly
+# I/O: Read all 10,000,000 rows (OR at top level)
+# Post-scan: (value = 10 AND regular < 100) OR (value = 50 AND regular >= 900)
+query II
+SELECT COUNT(*), COUNT(DISTINCT int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE (int_rse_values = 10 AND regular < 100) OR (int_rse_values = 50 AND regular >= 900);
+----
+2000100	2
+
+# Test: Complex (OR within AND) - AND should optimize, OR post-filtered
+# I/O: Read rows 2,000,000-7,990,000 (6,000,000 rows) due to >= 20
+# Post-scan: >= 20 AND (value = 30 OR value = 40) AND <= 40
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 20 AND (int_rse_values = 30 OR int_rse_values = 40) AND int_rse_values <= 40;
+----
+4000000	30	40
+
+# Test: Triple nested with mixed operators
+# I/O: Read rows 4,000,000-9,990,000 (6,000,000 rows) due to >= 30
+# Post-scan: Complex filter applied correctly
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE ((int_rse_values >= 30 AND regular < 7000000) AND int_rse_values <= 50);
+----
+3000000	4000000	6999999
+
+# Test: Deep nesting - 4 levels of AND
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+# All ANDs narrow to value = 30
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE (((int_rse_values >= 30 AND int_rse_values <= 30) AND int_rse_values > 20) AND int_rse_values < 40);
+----
+2000000
+
+# Test: Complex regular + RSE filters with nesting
+# I/O: Read rows 2,000,000-7,990,000 (6,000,000 rows) due to BETWEEN
+# Post-scan: Complex regular column filters applied
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values BETWEEN 20 AND 40 AND (regular < 3000000 OR regular >= 7000000);
+----
+2000000	2000000	7999999
+
+# Test: OR at top level defeats all optimization
+# I/O: Read all 10,000,000 rows (OR at top level)
+# Post-scan: (int_rse = 10) OR (regular < 100)
+# int_rse = 10 matches rows 0-199, regular < 100 matches rows 0-99
+# Union: rows 0-1,990,000 (200 rows, all with int_rse=10)
+query II
+SELECT COUNT(*), COUNT(DISTINCT int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 10 OR regular < 100;
+----
+2000000	1
+
+# Test: Multiple ORs - no optimization
+# I/O: Read all 10,000,000 rows
+# Should return all rows except value=30
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 10 OR int_rse_values = 20 OR int_rse_values = 40 OR int_rse_values = 50;
+----
+8000000
+
+# Test: Extremely complex expression - correctness stress test
+# Mix of everything: AND, OR, >, <, =, >=, <=, BETWEEN, regular columns
+# int_rse: 20,30,40 → rows 200-799
+# float_rse: 2.5,3.5 (>2.0 AND <4.0) → rows 200-599
+# RSE intersection: rows 200-599
+# regular >= 300 AND < 700 → rows 300-699
+# Final intersection: rows 3,000,000-5,990,000 (300 rows)
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE
+    (int_rse_values >= 20 AND int_rse_values <= 40) AND
+    (float_rse_values > 2.0 AND float_rse_values < 4.0) AND
+    (regular >= 3000000 AND regular < 6000000);
+----
+3000000	3000000	5999999
+
+# Test: Multiple RSE columns with OR (no optimization)
+# I/O: Read all 10,000,000 rows (OR prevents optimization)
+# Post-scan: (int=10 AND float=1.5) OR (int=50 AND float=5.5)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE (int_rse_values = 10 AND float_rse_values = 1.5) OR (int_rse_values = 50 AND float_rse_values = 5.5);
+----
+4000000
+
+# Test: NOT with AND (we don't optimize !=, but must be correct)
+# I/O: Read all 10,000,000 rows (contains !=)
+# Post-scan: != 20 AND != 30 AND != 40 → only values 10 and 50
+query II
+SELECT COUNT(*), COUNT(DISTINCT int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values != 20 AND int_rse_values != 30 AND int_rse_values != 40;
+----
+4000000	2
+
+# Test: Mix optimizable and non-optimizable on same column
+# I/O: Read rows 2,000,000-9,990,000 (8,000,000 rows) due to > 10
+# Post-scan: != 20 filters out rows 200-399, leaving 600 rows
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values > 10 AND int_rse_values != 20;
+----
+6000000	30	50
+
+# Test: Pathological case - many redundant ANDs
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+# All conditions are redundant - should still work correctly
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values = 30 AND int_rse_values >= 30 AND int_rse_values <= 30 AND int_rse_values > 20 AND int_rse_values < 40;
+----
+2000000
+
+# =============================================================================
+# NOT operator comprehensive tests
+# =============================================================================
+
+# Test: NOT with OR (De Morgan's law: NOT(A OR B) = NOT A AND NOT B)
+# I/O: Read all 10,000,000 rows (contains !=)
+# Post-scan: NOT (value = 10 OR value = 50) → value != 10 AND value != 50
+# Should return rows with values 20, 30, 40 (600 rows)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values = 10 OR int_rse_values = 50);
+----
+6000000	20	40
+
+# Test: NOT with complex OR expression
+# I/O: Read all 10,000,000 rows (contains OR with !=)
+# Post-scan: NOT (value < 20 OR value > 40) → value >= 20 AND value <= 40
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values < 20 OR int_rse_values > 40);
+----
+6000000	20	40
+
+# Test: Double negation (NOT NOT should cancel out)
+# I/O: Read rows 4,000,000-5,990,000 (2,000,000 rows)
+# Post-scan: NOT NOT (value = 30) → value = 30
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (NOT (int_rse_values = 30));
+----
+2000000
+
+# Test: Triple negation
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT NOT NOT (value = 30) → NOT (value = 30) → value != 30
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (NOT (NOT (int_rse_values = 30)));
+----
+8000000	10	50
+
+# Test: NOT with BETWEEN
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (value BETWEEN 20 AND 40) → value < 20 OR value > 40
+# Should return rows with values 10 and 50 (400 rows)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values BETWEEN 20 AND 40);
+----
+4000000	10	50
+
+# Test: NOT BETWEEN with additional filter
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT BETWEEN AND regular filter
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values BETWEEN 20 AND 40) AND regular < 150;
+----
+150	0	149
+
+# Test: Complex NOT with AND/OR nesting
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT ((value = 10 AND regular < 100) OR (value = 50 AND regular >= 900))
+# De Morgan: (value != 10 OR regular >= 100) AND (value != 50 OR regular < 900)
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT ((int_rse_values = 10 AND regular < 100) OR (int_rse_values = 50 AND regular >= 900));
+----
+7999900
+
+# Test: NOT with multi-column RSE filters
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (int = 30 AND float = 3.5)
+# Should exclude rows 400-599 where both conditions match
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE NOT (int_rse_values = 30 AND float_rse_values = 3.5);
+----
+8000000
+
+# Test: NOT with comparison operators
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (value > 30) → value <= 30
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values > 30);
+----
+6000000	10	30
+
+# Test: NOT with >= operator
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (value >= 30) → value < 30
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values >= 30);
+----
+4000000	10	20
+
+# Test: NOT with <= operator
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (value <= 30) → value > 30
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values <= 30);
+----
+4000000	40	50
+
+# Test: Mix of NOT and regular comparisons with AND
+# I/O: Read rows 2,000,000-9,990,000 (8,000,000 rows) due to >= 20
+# Post-scan: >= 20 AND NOT (value = 30) AND <= 50
+# Result: values 20,40,50 (exclude 30) → rows 200-399 + 600-999 = 600 rows
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE int_rse_values >= 20 AND NOT (int_rse_values = 30) AND int_rse_values <= 50;
+----
+6000000	20	50
+
+# Test: Complex nested NOT expressions
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (NOT (value >= 20) OR NOT (value <= 40))
+# De Morgan: (value >= 20) AND (value <= 40)
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (NOT (int_rse_values >= 20) OR NOT (int_rse_values <= 40));
+----
+6000000	20	40
+
+# Test: NOT with regular column filters
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (RSE = 30 AND regular > 500)
+# int_rse=30 AND regular>500 → rows 5,010,000-5,990,000 (99 rows)
+# NOT of that → 1000 - 99 = 901 rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values = 30 AND regular > 500);
+----
+8000000
+
+# Test: Deeply nested NOT with multiple levels
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: Verify complex nested NOT expression is handled correctly
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (NOT (int_rse_values >= 20 AND int_rse_values <= 40) OR int_rse_values = 50);
+----
+6000000	20	40
+
+# Test: NOT with all comparison operators in complex expression
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (value > 10 AND value < 50) → value <= 10 OR value >= 50
+query III
+SELECT COUNT(*), MIN(int_rse_values), MAX(int_rse_values) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (int_rse_values > 10 AND int_rse_values < 50);
+----
+4000000	10	50
+
+# Test: NOT with multiple RSE columns
+# I/O: Read all 10,000,000 rows (contains NOT)
+# Post-scan: NOT (int > 20 AND float < 4.0)
+# int > 20 → rows 400-999, float < 4.0 → rows 0-599
+# Intersection: rows 4,000,000-5,990,000 (200 rows)
+# NOT: 1000 - 200 = 800 rows
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+) WHERE NOT (int_rse_values > 20 AND float_rse_values < 4.0);
+----
+8000000
+
+# Test: Combination of NOT, AND, OR with both RSE and regular columns
+# I/O: Read all 10,000,000 rows (contains NOT and OR)
+# Post-scan: Extremely complex filter with NOT, AND, OR, RSE, regular columns
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE (NOT (int_rse_values = 10 OR int_rse_values = 50) AND regular < 500) OR (int_rse_values = 30 AND regular >= 500);
+----
+2000000
+
+# Test: Quadruple negation (should cancel to original)
+# I/O: Read rows 2,000,000-3,990,000 (2,000,000 rows) due to = 20
+# Post-scan: NOT NOT NOT NOT (value = 20) → value = 20
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+) WHERE NOT (NOT (NOT (NOT (int_rse_values = 20))));
+----
+2000000

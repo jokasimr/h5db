@@ -1,0 +1,47 @@
+# name: test/sql/large/deadlock_test_q2_3times.test
+# description: Test query 2 (MIN/MAX aggregation) repeated 3 times
+# group: [large]
+
+require h5db
+
+# Query 2 - First time
+query II
+SELECT MIN(time_offset), MAX(event_id) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+100	3999999
+
+# Query 2 - Second time
+query II
+SELECT MIN(time_offset), MAX(event_id) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+100	3999999
+
+# Query 2 - Third time
+query II
+SELECT MIN(time_offset), MAX(event_id) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+100	3999999

@@ -23,6 +23,37 @@
 
 namespace duckdb {
 
+// =============================================================================
+// Type-safe index wrappers for projection pushdown
+// =============================================================================
+// These prevent accidentally mixing global and local column indices.
+// Similar to DuckDB's MultiFileLocalIndex / MultiFileGlobalIndex pattern.
+//
+// INDEXING STRATEGY (DENSE ARRAY):
+// - GlobalColumnIdx: Index into bind_data.columns (schema/bind-time indices)
+// - LocalColumnIdx: Index into column_states (scan-time dense array [0,1,2...])
+// - output.data[i]: Also indexed [0,1,2...] matching LocalColumnIdx
+//
+// Example with projection SELECT col2, col4 FROM table(col1, col2, col3, col4):
+//   columns_to_scan = [1, 3]          // Global indices
+//   column_states.size() = 2          // Dense: only 2 elements
+//   column_states[0] = state for col2 // Local idx 0 -> Global idx 1
+//   column_states[1] = state for col4 // Local idx 1 -> Global idx 3
+//   output.data[0] = col2 data
+//   output.data[1] = col4 data
+
+struct LocalColumnIdx {
+	idx_t index;  // Index into column_states [0, 1, 2, ...]
+	explicit LocalColumnIdx(idx_t i) : index(i) {}
+	operator idx_t() const { return index; }
+};
+
+struct GlobalColumnIdx {
+	idx_t index;  // Index into bind_data.columns
+	explicit GlobalColumnIdx(idx_t i) : index(i) {}
+	operator idx_t() const { return index; }
+};
+
 // ==================== h5_read Implementation ====================
 
 // Regular column specification
@@ -123,7 +154,11 @@ struct H5ReadBindData : public TableFunctionData {
 
 struct H5ReadGlobalState : public GlobalTableFunctionState {
 	H5FileHandle file;                 // RAII wrapper for file handle
-	vector<ColumnState> column_states; // Unified column states
+	vector<ColumnState> column_states; // DENSE array: indexed by LOCAL position [0, 1, 2, ...]
+
+	// Projection pushdown support
+	vector<column_t> columns_to_scan;             // Global column indices (into bind_data.columns)
+	unordered_map<idx_t, idx_t> global_to_local; // Maps global column idx -> local column_states idx
 
 	// Position tracking (atomic for lock-free reads in chunk loading)
 	std::atomic<idx_t> position;      // This index and forward has not been started yet
@@ -154,6 +189,34 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 
 	// No destructor needed - RAII wrappers handle all cleanup automatically
 };
+
+// =============================================================================
+// Helper functions for safe column index mapping
+// =============================================================================
+
+// Map global column index to local column_states index
+// Returns LocalColumnIdx if found, throws if not (indicates DuckDB bug or our bug)
+static LocalColumnIdx GlobalToLocal(const H5ReadGlobalState &gstate, GlobalColumnIdx global_idx) {
+	auto it = gstate.global_to_local.find(global_idx.index);
+	if (it == gstate.global_to_local.end()) {
+		throw InternalException("Column index %llu not in projection - this is a bug", global_idx.index);
+	}
+	return LocalColumnIdx(it->second);
+}
+
+// Get global column index from columns_to_scan by local position
+static GlobalColumnIdx GetGlobalIdx(const H5ReadGlobalState &gstate, LocalColumnIdx local_idx) {
+	if (local_idx.index >= gstate.columns_to_scan.size()) {
+		throw InternalException("Local index %llu out of range (size=%llu)",
+		                       local_idx.index, gstate.columns_to_scan.size());
+	}
+	return GlobalColumnIdx(gstate.columns_to_scan[local_idx.index]);
+}
+
+// Get number of columns being scanned (size of dense arrays)
+static idx_t GetNumScannedColumns(const H5ReadGlobalState &gstate) {
+	return gstate.columns_to_scan.size();
+}
 
 // Helper function to generate column name from dataset path
 static string GetColumnName(const string &dataset_path) {
@@ -461,6 +524,23 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
 
+	// Store which columns to scan (projection pushdown)
+	if (input.column_ids.empty()) {
+		// No projection pushdown - read all columns
+		for (idx_t i = 0; i < bind_data.columns.size(); i++) {
+			result->columns_to_scan.push_back(i);
+		}
+	} else {
+		result->columns_to_scan = input.column_ids;
+	}
+
+	// Build global-to-local index mapping for projection pushdown
+	// This allows O(1) lookup: global_column_idx -> local_column_states_idx
+	for (idx_t local_idx = 0; local_idx < result->columns_to_scan.size(); local_idx++) {
+		idx_t global_idx = result->columns_to_scan[local_idx];
+		result->global_to_local[global_idx] = local_idx;
+	}
+
 	// Lock for all HDF5 operations (not thread-safe)
 	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
 
@@ -474,8 +554,15 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 		throw IOException("Failed to open HDF5 file: " + bind_data.filename);
 	}
 
-	// Process each column to create its runtime state
-	for (const auto &col : bind_data.columns) {
+	// Allocate DENSE column_states array - only for scanned columns
+	// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
+	result->column_states.reserve(GetNumScannedColumns(*result));
+
+	// Process columns in scan order (builds dense array)
+	for (idx_t i = 0; i < GetNumScannedColumns(*result); i++) {
+		LocalColumnIdx local_idx(i);
+		GlobalColumnIdx global_idx = GetGlobalIdx(*result, local_idx);
+		const auto &col = bind_data.columns[global_idx];
 		std::visit(
 		    [&](auto &&spec) {
 			    using T = std::decay_t<decltype(spec)>;
@@ -543,6 +630,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    });
 				    }
 
+				    // Store in dense array with LOCAL indexing
 				    result->column_states.push_back(std::move(state));
 
 			    } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
@@ -638,6 +726,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    // Note: RSEColumnState is now stateless (thread-safe)
 				    // No runtime state initialization needed
 
+				    // Store in dense array with LOCAL indexing
 				    result->column_states.push_back(std::move(rse_col));
 			    }
 		    },
@@ -655,9 +744,13 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	if (!filters_by_column.empty()) {
 		vector<RowRange> ranges = {{0, bind_data.num_rows}};
 
-		for (const auto &[col_idx, col_filters] : filters_by_column) {
-			auto &rse_spec = std::get<RSEColumnSpec>(bind_data.columns[col_idx]);
-			auto &rse_state = std::get<RSEColumnState>(result->column_states[col_idx]);
+		for (const auto &[global_idx_raw, col_filters] : filters_by_column) {
+			// Map global column index to local column_states index
+			GlobalColumnIdx global_idx(global_idx_raw);
+			LocalColumnIdx local_idx = GlobalToLocal(*result, global_idx);
+
+			auto &rse_spec = std::get<RSEColumnSpec>(bind_data.columns[global_idx]);
+			auto &rse_state = std::get<RSEColumnState>(result->column_states[local_idx]);
 
 			// Compute ranges for this column
 			vector<RowRange> col_ranges =
@@ -1114,9 +1207,13 @@ static bool TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
 
-		for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
-			const auto &col_spec = bind_data.columns[col_idx];
-			auto &col_state = gstate.column_states[col_idx];
+		// Only refresh cache for columns being scanned (projection pushdown)
+		// Uses LOCAL indexing (dense array)
+		for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {
+			LocalColumnIdx local_idx(i);
+			GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
+			const auto &col_spec = bind_data.columns[global_idx];
+			auto &col_state = gstate.column_states[local_idx];
 
 			std::visit(
 			    [&](auto &&spec, auto &&state) {
@@ -1300,11 +1397,15 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	idx_t position = range_selection.position;
 	idx_t to_read = range_selection.to_read;
 
-	// Process each column (regular or RSE)
-	for (size_t col_idx = 0; col_idx < bind_data.columns.size(); col_idx++) {
-		auto &result_vector = output.data[col_idx];
-		const auto &col_spec = bind_data.columns[col_idx];
-		auto &col_state = gstate.column_states[col_idx];
+	// Process only scanned columns (projection pushdown)
+	// Uses LOCAL indexing - both output.data and column_states are indexed [0, 1, 2...]
+	for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {
+		LocalColumnIdx local_idx(i);
+		GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
+
+		auto &result_vector = output.data[i];                   // Sequential output
+		const auto &col_spec = bind_data.columns[global_idx];  // Global schema
+		auto &col_state = gstate.column_states[local_idx];     // Local (dense) state
 
 		// Use variant visiting to dispatch based on column type
 		std::visit(
@@ -1440,6 +1541,9 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	//   - Supports multiple filters on same column (AND conjunction)
 	//   - Handles mixed RSE and regular column filters correctly
 	// ===================================================================================
+
+	// Enable projection pushdown - only read columns that are actually needed
+	h5_read.projection_pushdown = true;
 
 	// Enable predicate pushdown for RSE columns
 	// We claim RSE filters for I/O optimization but keep them for post-scan verification

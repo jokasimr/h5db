@@ -1,0 +1,434 @@
+# name: test/sql/large/h5db.test
+# description: Large-scale h5db tests for parallel execution (10M rows)
+# group: [large]
+
+# This test suite mirrors test/sql/h5db.test but with ~10M rows per dataset
+# to trigger DuckDB parallelism (>128K rows/thread) and multiple chunk fetches (8MB/chunk).
+# We use aggregations to verify correctness since we can't check individual rows.
+
+require h5db
+
+# =============================================================================
+# h5_read() Tests - 1D Numeric Types (10M rows)
+# =============================================================================
+
+# Test reading int32 dataset - verify count
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/integers');
+----
+10000000
+
+# Test reading int32 dataset - verify sum
+# Sum of 0..9999999 = 9999999 * 10000000 / 2 = 49999995000000
+query I
+SELECT SUM(integers) FROM h5_read('test/data/large/large_simple.h5', '/integers');
+----
+49999995000000
+
+# Test min/max on integers
+query II
+SELECT MIN(integers), MAX(integers) FROM h5_read('test/data/large/large_simple.h5', '/integers');
+----
+0	9999999
+
+# Test int8 dataset
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/int8');
+----
+10000000
+
+# Verify int8 range (cycling -128 to 127)
+query II
+SELECT MIN(int8), MAX(int8) FROM h5_read('test/data/large/large_simple.h5', '/int8');
+----
+-128	127
+
+# Test int16 dataset
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/int16');
+----
+10000000
+
+# Test int64 dataset
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/int64');
+----
+10000000
+
+# Verify int64 sum matches integers sum
+query I
+SELECT SUM(int64) FROM h5_read('test/data/large/large_simple.h5', '/int64');
+----
+49999995000000
+
+# Test unsigned integers
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/uint8');
+----
+10000000
+
+# Verify uint8 range (0-255 cycling)
+query II
+SELECT MIN(uint8), MAX(uint8) FROM h5_read('test/data/large/large_simple.h5', '/uint8');
+----
+0	255
+
+# Test uint16
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/uint16');
+----
+10000000
+
+# Test uint32
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/uint32');
+----
+10000000
+
+# Test float types
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/floats');
+----
+10000000
+
+# Verify floats are in valid range [0, 1)
+query II
+SELECT
+    COUNT(*) FILTER (WHERE floats >= 0.0 AND floats < 1.0) as in_range,
+    COUNT(*) as total
+FROM h5_read('test/data/large/large_simple.h5', '/floats');
+----
+10000000	10000000
+
+# Test float32
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/float32');
+----
+10000000
+
+# Test float64
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/float64');
+----
+10000000
+
+# =============================================================================
+# h5_read() Tests - Nested Group Paths (10M rows)
+# =============================================================================
+
+# Test reading from nested group
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/group1/data1');
+----
+10000000
+
+# Verify data1 is float in [0, 1)
+query II
+SELECT
+    COUNT(*) FILTER (WHERE data1 >= 0.0 AND data1 < 1.0) as valid,
+    COUNT(*) as total
+FROM h5_read('test/data/large/large_simple.h5', '/group1/data1');
+----
+10000000	10000000
+
+# Test group1/data2
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/group1/data2');
+----
+10000000
+
+# Verify sum
+query I
+SELECT SUM(data2) FROM h5_read('test/data/large/large_simple.h5', '/group1/data2');
+----
+49999995000000
+
+# Test deeply nested data
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/group1/subgroup/nested_data');
+----
+10000000
+
+# Verify min/max
+query II
+SELECT MIN(nested_data), MAX(nested_data)
+FROM h5_read('test/data/large/large_simple.h5', '/group1/subgroup/nested_data');
+----
+0	9999999
+
+# =============================================================================
+# h5_read() Tests - 2D Arrays (10M rows)
+# =============================================================================
+
+# Test 2D array reading
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/matrix');
+----
+10000000
+
+# Test 2D array element access
+query II
+SELECT matrix[1], matrix[2] FROM h5_read('test/data/large/large_simple.h5', '/matrix') LIMIT 1;
+----
+0	1
+
+# Test sum of first element across all rows
+# Each row i has [4i, 4i+1, 4i+2, 4i+3], so matrix[1] = 4i
+# SUM(4i) for i=0..9999999 = 4 * 49999995000000 = 199999980000000
+query I
+SELECT SUM(matrix[1]) FROM h5_read('test/data/large/large_simple.h5', '/matrix');
+----
+199999980000000
+
+# Test sum of all elements (each row i has [4i, 4i+1, 4i+2, 4i+3])
+query I
+SELECT SUM(elem) FROM (
+    SELECT UNNEST(matrix) as elem FROM h5_read('test/data/large/large_simple.h5', '/matrix')
+);
+----
+799999980000000
+
+# Test array_2d
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/array_2d');
+----
+10000000
+
+# Verify array_2d structure
+query II
+SELECT array_2d[1], array_2d[4] FROM h5_read('test/data/large/large_simple.h5', '/array_2d') LIMIT 1;
+----
+0	3
+
+# =============================================================================
+# h5_read() Tests - 3D Arrays (1M rows for 3D)
+# =============================================================================
+
+# Test 3D array reading (limited to 1M rows to keep file size reasonable)
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/array_3d');
+----
+1000000
+
+# Test 3D array access
+# Shape is (rows, 3, 4), first row has elements 0..11 arranged as [[0,1,2,3], [4,5,6,7], [8,9,10,11]]
+# array_3d[1] = [0,1,2,3], array_3d[2] = [4,5,6,7]
+query III
+SELECT array_3d[1][1], array_3d[1][2], array_3d[2][1]
+FROM h5_read('test/data/large/large_simple.h5', '/array_3d')
+LIMIT 1;
+----
+0	1	4
+
+# Test that all rows have non-null arrays
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/array_3d')
+WHERE array_3d IS NOT NULL;
+----
+1000000
+
+# =============================================================================
+# h5_read() Tests - 4D Arrays (500K rows for 4D)
+# =============================================================================
+
+# Test 4D array reading
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/array_4d');
+----
+500000
+
+# Test 4D array access
+query II
+SELECT array_4d[1][1][1], array_4d[1][1][2]
+FROM h5_read('test/data/large/large_simple.h5', '/array_4d')
+LIMIT 1;
+----
+0	1
+
+# =============================================================================
+# h5_read() Tests - Type Detection
+# =============================================================================
+
+# Test that types are correctly detected
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/integers'));
+----
+INTEGER
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/floats'));
+----
+DOUBLE
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/int8'));
+----
+TINYINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/uint8'));
+----
+UTINYINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/float32'));
+----
+FLOAT
+
+# Test array types
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/matrix'));
+----
+INTEGER[4]
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/array_3d'));
+----
+BIGINT[4][3]
+
+# HDF5 shape (rows, 2, 3, 4) becomes DuckDB type BIGINT[4][3][2] (innermost to outermost)
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/array_4d'));
+----
+BIGINT[4][3][2]
+
+# =============================================================================
+# Multi-Dataset Reading Tests (10M rows)
+# =============================================================================
+
+# Test reading two 1D datasets - verify first row
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/integers', '/floats')
+WHERE integers = 0 AND floats >= 0.0 AND floats < 1.0
+LIMIT 1;
+----
+1
+
+# Verify count when reading multiple datasets
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/integers', '/floats');
+----
+10000000
+
+# Test aggregations on multiple datasets
+query II
+SELECT SUM(integers), COUNT(*) FILTER (WHERE floats >= 0.0 AND floats < 1.0)
+FROM h5_read('test/data/large/large_simple.h5', '/integers', '/floats');
+----
+49999995000000	10000000
+
+# Test reading from nested groups - verify first row has valid data
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/group1/data1', '/group1/data2')
+WHERE data1 >= 0.0 AND data1 < 1.0 AND data2 = 0
+LIMIT 1;
+----
+1
+
+# Test reading scalar and array datasets together
+query I
+SELECT matrix[1] FROM h5_read('test/data/large/large_simple.h5', '/integers', '/matrix')
+LIMIT 1;
+----
+0
+
+# Test reading multiple different integer types
+query III
+SELECT COUNT(*), MIN(int8), MAX(int16)
+FROM h5_read('test/data/large/large_simple.h5', '/int8', '/int16');
+----
+10000000	-128	9999
+
+# Test reading multiple multi-dimensional arrays
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/array_2d', '/array_3d');
+----
+1000000
+
+# =============================================================================
+# Performance Tests - Verify Parallelism with Large Aggregations
+# =============================================================================
+
+# Test large aggregation to force multiple chunk fetches
+# With 10M int32 values and 8MB chunks (2M int32s per chunk), this needs 5 chunks
+query III
+SELECT COUNT(*), MIN(integers), MAX(integers)
+FROM h5_read('test/data/large/large_simple.h5', '/integers');
+----
+10000000	0	9999999
+
+# Test complex aggregation requiring full scan
+# AVG(0..9999999) = 4999999.5, which rounds to 5000000 when cast to BIGINT
+query IIIII
+SELECT
+    COUNT(*) as cnt,
+    SUM(integers) as total,
+    AVG(integers)::BIGINT as avg,
+    MIN(integers) as min_val,
+    MAX(integers) as max_val
+FROM h5_read('test/data/large/large_simple.h5', '/integers');
+----
+10000000	49999995000000	5000000	0	9999999
+
+# Test GROUP BY to force parallel processing
+query II
+SELECT
+    (integers // 1000000) as bucket,
+    COUNT(*) as cnt
+FROM h5_read('test/data/large/large_simple.h5', '/integers')
+GROUP BY bucket
+ORDER BY bucket;
+----
+0	1000000
+1	1000000
+2	1000000
+3	1000000
+4	1000000
+5	1000000
+6	1000000
+7	1000000
+8	1000000
+9	1000000
+
+# Test filtering with large result set
+query I
+SELECT COUNT(*) FROM h5_read('test/data/large/large_simple.h5', '/integers')
+WHERE integers >= 5000000;
+----
+5000000
+
+# Test JOIN-like operation with multiple datasets
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/large/large_simple.h5', '/integers', '/group1/data2')
+WHERE integers = data2;
+----
+10000000
+
+# =============================================================================
+# Column Naming Tests
+# =============================================================================
+
+# Test that column names are derived from dataset name
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/integers'));
+----
+integers
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/group1/data1'));
+----
+data1
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/group1/subgroup/nested_data'));
+----
+nested_data
+
+# Test column naming with multiple datasets
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read('test/data/large/large_simple.h5', '/integers', '/floats'))
+ORDER BY column_name;
+----
+floats
+integers

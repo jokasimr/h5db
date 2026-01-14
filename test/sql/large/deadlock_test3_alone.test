@@ -1,0 +1,31 @@
+# name: test/sql/large/deadlock_test3_alone.test
+# description: Test ONLY query 3 (5 detectors) in isolation
+# group: [large]
+
+require h5db
+
+# Query 3 alone: 5 detectors
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_3/time_offset',
+      '/detector_3/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_4/time_offset',
+      '/detector_4/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_5/time_offset',
+      '/detector_5/event_id')
+);
+----
+10000000

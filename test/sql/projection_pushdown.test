@@ -1,0 +1,344 @@
+# name: test/sql/projection_pushdown.test
+# description: Test projection pushdown optimization in h5_read
+# group: [sql]
+
+# Require statement will ensure this test is run with this extension loaded
+require h5db
+
+# =============================================================================
+# Test 1: Basic projection (single column from multiple)
+# =============================================================================
+
+# Project only first column - should only read /integers
+query I
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY integers LIMIT 3;
+----
+0
+1
+2
+
+# Project only second column - should only read /floats
+query R
+SELECT floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY floats LIMIT 1;
+----
+-1.571785091239123
+
+# =============================================================================
+# Test 2: Test with three datasets including strings (limited to 3 rows)
+# =============================================================================
+
+# Project integers and strings (skip floats)
+query II
+SELECT integers, strings FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings')
+ORDER BY integers;
+----
+0	hello
+1	world
+2	test
+
+# Project all three columns - row count limited by shortest dataset
+query IRI
+SELECT integers, floats, strings FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings')
+ORDER BY integers;
+----
+0	0.16153323088505145	hello
+1	-0.18817915906046337	world
+2	0.02754565955353617	test
+
+# =============================================================================
+# Test 3: Project all columns (no optimization)
+# =============================================================================
+
+# SELECT * should read all columns
+query IR
+SELECT * FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY integers LIMIT 3;
+----
+0	0.16153323088505145
+1	-0.18817915906046337
+2	0.02754565955353617
+
+# Explicitly select all columns
+query IR
+SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY integers LIMIT 3;
+----
+0	0.16153323088505145
+1	-0.18817915906046337
+2	0.02754565955353617
+
+# =============================================================================
+# Test 4: Projection with WHERE filter on different column
+# =============================================================================
+
+# Project col1, filter on col2 - should read both columns
+query I
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+WHERE floats > 0.1
+ORDER BY integers LIMIT 3;
+----
+0
+4
+5
+
+# Project col1, filter on col3 - should read col1 and col3, skip col2
+query I
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings')
+WHERE strings = 'test'
+ORDER BY integers;
+----
+2
+
+# =============================================================================
+# Test 5: Projection with aggregation
+# =============================================================================
+
+# COUNT(*) with projection pushdown
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers', '/floats');
+----
+10
+
+# SUM on single column
+query I
+SELECT SUM(integers) FROM h5_read('test/data/simple.h5', '/integers', '/floats');
+----
+45
+
+# Aggregate on projected column
+query R
+SELECT AVG(floats) FROM h5_read('test/data/simple.h5', '/integers', '/floats');
+----
+0.121681012811742
+
+# =============================================================================
+# Test 6: Projection with column aliasing
+# =============================================================================
+
+# Use table alias with column names
+query I
+SELECT a FROM h5_read('test/data/simple.h5', '/integers', '/floats') AS t(a, b)
+WHERE b > 0.1
+ORDER BY a LIMIT 3;
+----
+0
+4
+5
+
+# Multiple aliased columns
+query IR
+SELECT x, y FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings') AS t(x, y, z)
+WHERE z = 'test';
+----
+2	0.02754565955353617
+
+# =============================================================================
+# Test 7: Projection with different data types
+# =============================================================================
+
+# Test with various integer types
+query I
+SELECT int8 FROM h5_read('test/data/types.h5', '/int8', '/int16', '/int32')
+ORDER BY int8 LIMIT 2;
+----
+1
+2
+
+query I
+SELECT int16 FROM h5_read('test/data/types.h5', '/int8', '/int16', '/int32')
+ORDER BY int16 LIMIT 2;
+----
+100
+200
+
+# Test with unsigned types (uint16 only has 1 row, so limit to 1)
+query I
+SELECT uint8 FROM h5_read('test/data/types.h5', '/uint8', '/uint16')
+ORDER BY uint8;
+----
+255
+
+# Test with float types (float64 only has 1 row)
+query R
+SELECT float32 FROM h5_read('test/data/types.h5', '/float32', '/float64')
+ORDER BY float32;
+----
+3.14
+
+# =============================================================================
+# Test 8: Projection with multi-dimensional arrays
+# =============================================================================
+
+# Project only the matrix column (multidimensional array)
+query I
+SELECT typeof(matrix) FROM h5_read('test/data/simple.h5', '/integers', '/matrix') LIMIT 1;
+----
+INTEGER[4]
+
+# Verify matrix can be read and has correct structure
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers', '/matrix');
+----
+5
+
+# =============================================================================
+# Test 9: Projection with nested group paths
+# =============================================================================
+
+# Project columns from nested groups
+query R
+SELECT data1 FROM h5_read('test/data/simple.h5', '/group1/data1', '/group1/data2')
+ORDER BY data1 LIMIT 3;
+----
+0.0
+1.0
+2.0
+
+query I
+SELECT data2 FROM h5_read('test/data/simple.h5', '/group1/data1', '/group1/data2')
+ORDER BY data2 LIMIT 3;
+----
+1
+1
+1
+
+# =============================================================================
+# Test 10: Projection with JOIN operations
+# =============================================================================
+
+# Self-join with projection
+query II
+SELECT t1.integers, t2.integers
+FROM h5_read('test/data/simple.h5', '/integers', '/floats') t1
+JOIN h5_read('test/data/simple.h5', '/integers', '/strings') t2
+ON t1.integers = t2.integers
+WHERE t1.integers <= 2
+ORDER BY t1.integers;
+----
+0	0
+1	1
+2	2
+
+# =============================================================================
+# Test 11: Projection with LIMIT clause
+# =============================================================================
+
+# LIMIT should still benefit from projection pushdown
+query I
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY integers
+LIMIT 5;
+----
+0
+1
+2
+3
+4
+
+# =============================================================================
+# Test 12: Projection with ORDER BY on non-projected column
+# =============================================================================
+
+# Order by column that's not in select list
+# Note: DuckDB optimizer will add floats to the scan
+query I
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+ORDER BY floats DESC
+LIMIT 3;
+----
+4
+5
+0
+
+# =============================================================================
+# Test 13: Projection in subqueries
+# =============================================================================
+
+# Subquery with projection
+query I
+SELECT integers FROM (
+  SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+)
+WHERE floats > 0.1
+ORDER BY integers
+LIMIT 3;
+----
+0
+4
+5
+
+# =============================================================================
+# Test 14: Projection with DESCRIBE
+# =============================================================================
+
+# DESCRIBE should show only projected columns
+query I
+SELECT COUNT(*) FROM (
+  DESCRIBE SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+);
+----
+2
+
+# Verify column names
+query I
+SELECT column_name FROM (
+  DESCRIBE SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+)
+ORDER BY column_name;
+----
+floats
+integers
+
+# =============================================================================
+# Test 15: Projection with string columns
+# =============================================================================
+
+# Project string column only (int32 has 2 rows, limiting result)
+query I
+SELECT fixed_strings FROM h5_read('test/data/types.h5', '/fixed_strings', '/var_strings', '/int32')
+ORDER BY fixed_strings;
+----
+fixed
+width
+
+# var_strings projected (only 2 rows due to int32)
+query I
+SELECT var_strings FROM h5_read('test/data/types.h5', '/fixed_strings', '/var_strings', '/int32')
+ORDER BY var_strings;
+----
+length
+variable
+
+# =============================================================================
+# Test 16: Correctness - verify same results with and without projection
+# =============================================================================
+
+# Baseline: read all columns
+statement ok
+CREATE TEMP TABLE baseline AS
+SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats');
+
+# Test: project each column individually and compare
+query I
+SELECT COUNT(*) FROM (
+  SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+  EXCEPT
+  SELECT integers FROM baseline
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
+  EXCEPT
+  SELECT floats FROM baseline
+);
+----
+0
+
+# Clean up
+statement ok
+DROP TABLE baseline;

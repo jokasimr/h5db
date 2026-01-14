@@ -1,0 +1,33 @@
+# name: test/sql/large/deadlock_test_2det_2times.test
+# description: Test 2-detector query repeated 2 times (same as Q1 x 2)
+# group: [large]
+
+require h5db
+
+# 2 detectors - First time
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+4000000
+
+# 2 detectors - Second time
+query I
+SELECT COUNT(*) FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/time_offset',
+      '/detector_1/event_id')
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/time_offset',
+      '/detector_2/event_id')
+);
+----
+4000000
