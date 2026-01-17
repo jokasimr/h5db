@@ -1209,7 +1209,7 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 	}
 }
 
-static bool TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
+static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
 
@@ -1240,9 +1240,7 @@ static bool TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 		// Done loading - release the flag so another thread can load next time
 		gstate.someone_is_fetching.store(false);
 		gstate.someone_is_fetching.notify_all();
-		return true;
 	}
-	return false;
 }
 
 // Helper function to scan a regular dataset column
@@ -1255,7 +1253,12 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		auto *chunk1 = &cache.chunks[0];
 		auto *chunk2 = &cache.chunks[1];
 
-		for (;;) {
+		for (idx_t i = 0;;i++) {
+
+			if (i > 0) {
+			    TryRefreshCache(gstate, bind_data);
+			}
+
 			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
 			idx_t end2 = chunk2->end_row.load(std::memory_order_acquire);
 
@@ -1268,7 +1271,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 				break;
 			}
 
-			if (!TryRefreshCache(gstate, bind_data)) {
+			if (gstate.someone_is_fetching.load(std::memory_order_acquire)) {
 				chunk1->end_row.wait(end1, std::memory_order_relaxed);
 			}
 		}
