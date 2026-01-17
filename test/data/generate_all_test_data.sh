@@ -1,0 +1,123 @@
+#!/bin/bash
+#
+# Generate all test data files for h5db test suite
+#
+# This script regenerates all .h5/.hdf data files used by the test suite.
+# It does NOT generate benchmark files (those are optional).
+#
+
+set -e  # Exit on error
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+echo "==================================================================="
+echo "Generating all test data files"
+echo "==================================================================="
+echo ""
+
+# Check for virtual environment
+if [ -z "$VIRTUAL_ENV" ]; then
+    if [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
+        echo -e "${YELLOW}Activating virtual environment...${NC}"
+        source "$PROJECT_ROOT/venv/bin/activate"
+    else
+        echo -e "${RED}Error: Virtual environment not found at $PROJECT_ROOT/venv${NC}"
+        echo "Run: ./scripts/setup-dev-env.sh"
+        exit 1
+    fi
+fi
+
+# Check for h5py
+if ! python3 -c "import h5py" 2>/dev/null; then
+    echo -e "${RED}Error: h5py not found${NC}"
+    echo "Install with: pip install h5py"
+    exit 1
+fi
+
+cd "$PROJECT_ROOT"
+
+# ====================================================================
+# Core test data files (test/data/)
+# ====================================================================
+echo -e "${GREEN}[1/9] Generating core test files (simple.h5, types.h5, multidim.h5)${NC}"
+(cd test/data && python3 create_simple_types_multidim.py)
+
+echo ""
+echo -e "${GREEN}[2/9] Generating run_encoded.h5${NC}"
+(cd test/data && python3 create_run_encoded_test.py)
+
+echo ""
+echo -e "${GREEN}[3/9] Generating with_attrs.h5${NC}"
+(cd test/data && python3 create_attrs_test.py)
+
+echo ""
+echo -e "${GREEN}[4/9] Generating multithreading_test.h5${NC}"
+(cd test/data && python3 create_multithreading_test.py)
+
+echo ""
+echo -e "${GREEN}[5/9] Generating pushdown_test.h5${NC}"
+(cd test/data && python3 create_pushdown_test.py)
+
+echo ""
+echo -e "${GREEN}[6/9] Generating rse_edge_cases.h5${NC}"
+(cd test/data && python3 create_rse_edge_cases.py)
+
+# ====================================================================
+# Large test data files (test/data/large/)
+# ====================================================================
+echo ""
+echo -e "${GREEN}[7/9] Generating large_rse_test.h5 (16 MB)${NC}"
+(cd test/data && python3 create_large_rse_test.py)
+
+echo ""
+echo -e "${GREEN}[8/9] Generating large_simple.h5 (1.3 GB)${NC}"
+(cd test/data/large && python3 create_large_simple.py)
+
+echo ""
+echo -e "${GREEN}[9/9] Generating large_multithreading.h5 (153 MB)${NC}"
+(cd test/data/large && python3 create_large_multithreading.py)
+
+echo ""
+echo -e "${GREEN}[10/11] Generating large_pushdown_test.h5 (115 MB)${NC}"
+(cd test/data/large && python3 create_large_pushdown.py)
+
+echo ""
+echo -e "${GREEN}[11/11] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
+(cd test/data/large && python3 create_large_rse_edge_cases.py)
+
+# ====================================================================
+# Summary
+# ====================================================================
+echo ""
+echo "==================================================================="
+echo -e "${GREEN}✅ All test data files generated successfully!${NC}"
+echo "==================================================================="
+echo ""
+echo "Generated files:"
+echo "  Core tests (test/data/):"
+echo "    - simple.h5               (basic datasets)"
+echo "    - types.h5                (type system tests)"
+echo "    - multidim.h5             (multi-dimensional arrays)"
+echo "    - run_encoded.h5          (RSE functionality)"
+echo "    - with_attrs.h5           (HDF5 attributes)"
+echo "    - multithreading_test.h5  (parallel execution)"
+echo "    - pushdown_test.h5        (predicate pushdown)"
+echo "    - rse_edge_cases.h5       (RSE edge cases)"
+echo ""
+echo "  Large tests (test/data/large/):"
+echo "    - large_rse_test.h5           (16 MB)"
+echo "    - large_simple.h5             (1.3 GB)"
+echo "    - large_multithreading.h5     (153 MB)"
+echo "    - large_pushdown_test.h5      (115 MB)"
+echo "    - large_rse_edge_cases.h5     (266 MB)"
+echo ""
+echo "  Total size: ~1.85 GB"
+echo ""
+echo "Run tests with: make test"
