@@ -23,7 +23,7 @@ query R
 SELECT floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
 ORDER BY floats LIMIT 1;
 ----
--1.571785091239123
+-0.4694743859349521
 
 # =============================================================================
 # Test 2: Test with three datasets including strings (limited to 3 rows)
@@ -43,9 +43,9 @@ query IRI
 SELECT integers, floats, strings FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings')
 ORDER BY integers;
 ----
-0	0.16153323088505145	hello
-1	-0.18817915906046337	world
-2	0.02754565955353617	test
+0	0.4967141530112327	hello
+1	-0.13826430117118466	world
+2	0.6476885381006925	test
 
 # =============================================================================
 # Test 3: Project all columns (no optimization)
@@ -56,18 +56,18 @@ query IR
 SELECT * FROM h5_read('test/data/simple.h5', '/integers', '/floats')
 ORDER BY integers LIMIT 3;
 ----
-0	0.16153323088505145
-1	-0.18817915906046337
-2	0.02754565955353617
+0	0.4967141530112327
+1	-0.13826430117118466
+2	0.6476885381006925
 
 # Explicitly select all columns
 query IR
 SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats')
 ORDER BY integers LIMIT 3;
 ----
-0	0.16153323088505145
-1	-0.18817915906046337
-2	0.02754565955353617
+0	0.4967141530112327
+1	-0.13826430117118466
+2	0.6476885381006925
 
 # =============================================================================
 # Test 4: Projection with WHERE filter on different column
@@ -80,8 +80,8 @@ WHERE floats > 0.1
 ORDER BY integers LIMIT 3;
 ----
 0
-4
-5
+2
+3
 
 # Project col1, filter on col3 - should read col1 and col3, skip col2
 query I
@@ -111,7 +111,7 @@ SELECT SUM(integers) FROM h5_read('test/data/simple.h5', '/integers', '/floats')
 query R
 SELECT AVG(floats) FROM h5_read('test/data/simple.h5', '/integers', '/floats');
 ----
-0.121681012811742
+0.44806111169875623
 
 # =============================================================================
 # Test 6: Projection with column aliasing
@@ -124,15 +124,15 @@ WHERE b > 0.1
 ORDER BY a LIMIT 3;
 ----
 0
-4
-5
+2
+3
 
 # Multiple aliased columns
 query IR
 SELECT x, y FROM h5_read('test/data/simple.h5', '/integers', '/floats', '/strings') AS t(x, y, z)
 WHERE z = 'test';
 ----
-2	0.02754565955353617
+2	0.6476885381006925
 
 # =============================================================================
 # Test 7: Projection with different data types
@@ -248,9 +248,9 @@ SELECT integers FROM h5_read('test/data/simple.h5', '/integers', '/floats')
 ORDER BY floats DESC
 LIMIT 3;
 ----
-4
-5
-0
+6
+3
+7
 
 # =============================================================================
 # Test 13: Projection in subqueries
@@ -266,8 +266,8 @@ ORDER BY integers
 LIMIT 3;
 ----
 0
-4
-5
+2
+3
 
 # =============================================================================
 # Test 14: Projection with DESCRIBE

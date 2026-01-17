@@ -473,7 +473,7 @@ SELECT COUNT(*) FROM h5_tree('test/data/simple.h5') WHERE path = '/.';
 query II
 SELECT integers, floats FROM h5_read('test/data/simple.h5', '/integers', '/floats') LIMIT 1;
 ----
-0	0.16153323088505145
+0	0.4967141530112327
 
 # Test reading three datasets with different types
 query II

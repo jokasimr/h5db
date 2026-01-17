@@ -1253,10 +1253,10 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		auto *chunk1 = &cache.chunks[0];
 		auto *chunk2 = &cache.chunks[1];
 
-		for (idx_t i = 0;;i++) {
+		for (idx_t i = 0;; i++) {
 
 			if (i > 0) {
-			    TryRefreshCache(gstate, bind_data);
+				TryRefreshCache(gstate, bind_data);
 			}
 
 			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
