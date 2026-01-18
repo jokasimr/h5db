@@ -71,7 +71,8 @@ struct RegularColumnSpec {
 	bool is_string;
 	int ndims;
 	std::vector<hsize_t> dims;
-	size_t element_size;
+	size_t element_size;     // Bytes per row (1D: size of element, ND: product of inner dims)
+	size_t elements_per_row; // Element count per row (1D: 1, ND: product of inner dims)
 };
 
 // Run-Start Encoded column specification
@@ -243,6 +244,9 @@ static string GetColumnName(const string &dataset_path) {
 	return col_name;
 }
 
+// Helper: get base (non-array) type from a possibly nested array type
+static LogicalType GetBaseType(LogicalType type);
+
 // Helper function to build nested array types for multi-dimensional datasets
 static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims) {
 	if (ndims == 1) {
@@ -280,7 +284,7 @@ static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file
 		throw IOException("Failed to get dataset type");
 	}
 
-	return {std::move(dataset), H5TypeHandle(type_id)};
+	return {std::move(dataset), H5TypeHandle::TakeOwnershipOf(type_id)};
 }
 
 // Helper function to read HDF5 strings (handles both variable-length and fixed-length)
@@ -465,8 +469,10 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 			// Calculate element size for multi-dimensional arrays (before move)
 			ds_info.element_size = H5Tget_size(type);
+			ds_info.elements_per_row = 1;
 			for (int j = 1; j < ds_info.ndims; j++) {
 				ds_info.element_size *= ds_info.dims[j];
+				ds_info.elements_per_row *= ds_info.dims[j];
 			}
 
 			// Transfer ownership to ds_info (must be after using type)
@@ -596,7 +602,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    state.file_space = std::move(file_space);
 
 				    // Detect if this column is cacheable (Phase 1: 1D numerical only)
-				    bool is_cacheable = (spec.ndims == 1 && !spec.is_string);
+				    bool is_cacheable = !spec.is_string;
 
 				    if (is_cacheable) {
 					    // Create cache structure (chunks array is already allocated)
@@ -608,8 +614,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    if (dcpl >= 0) {
 						    H5D_layout_t layout = H5Pget_layout(dcpl);
 						    if (layout == H5D_CHUNKED) {
-							    hsize_t chunk_dims[1];
-							    if (H5Pget_chunk(dcpl, 1, chunk_dims) >= 0) {
+							    std::vector<hsize_t> chunk_dims(spec.ndims);
+							    if (H5Pget_chunk(dcpl, spec.ndims, chunk_dims.data()) >= 0) {
 								    chunk_size = chunk_dims[0];
 							    }
 						    }
@@ -620,17 +626,19 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    if (chunk_size == 0) {
 						    constexpr idx_t DEFAULT_CHUNK_BYTES = 1 * 1024 * 1024; // 4MB
 						    chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
-						    // Ensure at least some minimum chunk size
-						    if (chunk_size < 2048) {
-							    chunk_size = 2048;
-						    }
+					    }
+					    // Ensure at least one full scan chunk to avoid cache stall
+					    if (chunk_size < STANDARD_VECTOR_SIZE) {
+						    chunk_size = STANDARD_VECTOR_SIZE;
 					    }
 
 					    // Allocate typed cache buffer (chunk_size elements)
-					    DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
+					    auto base_type = GetBaseType(spec.column_type);
+					    DispatchOnDuckDBType(base_type, [&](auto type_tag) {
 						    using T = typename decltype(type_tag)::type;
 						    for (auto &chunk : state.chunk_cache->chunks) {
-							    chunk.cache = std::vector<T>(chunk_size);
+							    idx_t buffer_elements = chunk_size * spec.elements_per_row;
+							    chunk.cache = std::vector<T>(buffer_elements);
 							    chunk.chunk_size = chunk_size;
 						    }
 					    });
@@ -1113,23 +1121,43 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 // ==================== Chunk Caching Helpers ====================
 
 // Helper: Read data from HDF5 into typed cache buffer
-static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset, hid_t dataset_id, hid_t file_space_id,
-                               idx_t dataset_row_start, idx_t rows_to_read, LogicalType column_type) {
-	DispatchOnDuckDBType(column_type, [&](auto type_tag) {
+static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_rows, hid_t dataset_id,
+                               hid_t file_space_id, idx_t dataset_row_start, idx_t rows_to_read,
+                               const RegularColumnSpec &spec) {
+	auto base_type = GetBaseType(spec.column_type);
+	DispatchOnDuckDBType(base_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
 		auto &typed_cache = std::get<std::vector<T>>(cache);
 
 		// Lock for all HDF5 operations (not thread-safe)
 		std::lock_guard<std::mutex> lock(hdf5_global_mutex);
 
-		// Select hyperslab in file
-		hsize_t start[1] = {dataset_row_start};
-		hsize_t count[1] = {rows_to_read};
-		H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start, nullptr, count, nullptr);
+		// Select hyperslab in file and create memory dataspace
+		H5DataspaceHandle mem_space;
+		if (spec.ndims == 1) {
+			hsize_t start[1] = {dataset_row_start};
+			hsize_t count[1] = {rows_to_read};
+			H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start, nullptr, count, nullptr);
 
-		// Create memory dataspace
-		hsize_t mem_dims[1] = {rows_to_read};
-		H5DataspaceHandle mem_space(1, mem_dims);
+			hsize_t mem_dims[1] = {rows_to_read};
+			mem_space = H5DataspaceHandle(1, mem_dims);
+		} else {
+			std::vector<hsize_t> start(spec.ndims, 0);
+			std::vector<hsize_t> count(spec.ndims);
+			start[0] = dataset_row_start;
+			count[0] = rows_to_read;
+			for (int i = 1; i < spec.ndims; i++) {
+				count[i] = spec.dims[i];
+			}
+			H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr);
+
+			std::vector<hsize_t> mem_dims(spec.ndims);
+			mem_dims[0] = rows_to_read;
+			for (int i = 1; i < spec.ndims; i++) {
+				mem_dims[i] = spec.dims[i];
+			}
+			mem_space = H5DataspaceHandle(spec.ndims, mem_dims.data());
+		}
 
 		// Determine H5 type
 		hid_t h5_type;
@@ -1156,6 +1184,7 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset, 
 		}
 
 		// Read into cache buffer at specified offset
+		idx_t buffer_offset = buffer_offset_rows * spec.elements_per_row;
 		herr_t status =
 		    H5Dread(dataset_id, h5_type, mem_space, file_space_id, H5P_DEFAULT, typed_cache.data() + buffer_offset);
 		if (status < 0) {
@@ -1165,8 +1194,9 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset, 
 }
 
 // Helper: Copy data from typed cache to result vector
-static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_offset, idx_t rows_to_copy,
-                               Vector &result_vector, idx_t result_offset, LogicalType column_type) {
+static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_offset_rows, idx_t rows_to_copy,
+                               Vector &result_vector, idx_t result_offset_rows, LogicalType column_type,
+                               idx_t elements_per_row) {
 	DispatchOnDuckDBType(column_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
 		const auto &typed_cache = std::get<std::vector<T>>(cache);
@@ -1175,13 +1205,16 @@ static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_of
 		auto result_data = FlatVector::GetData<T>(result_vector);
 
 		// Copy from cache to result
-		std::memcpy(result_data + result_offset, typed_cache.data() + buffer_offset, rows_to_copy * sizeof(T));
+		idx_t buffer_offset = buffer_offset_rows * elements_per_row;
+		idx_t result_offset = result_offset_rows * elements_per_row;
+		idx_t elements_to_copy = rows_to_copy * elements_per_row;
+		std::memcpy(result_data + result_offset, typed_cache.data() + buffer_offset, elements_to_copy * sizeof(T));
 	});
 }
 
 static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
                           const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
-                          idx_t total_rows, LogicalType column_type) {
+                          idx_t total_rows, const RegularColumnSpec &spec) {
 
 	idx_t max_end_row = 0;
 	for (Chunk &chunk : cache.chunks) {
@@ -1196,8 +1229,7 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 			if (next_range.has_data) {
 
 				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
-				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load,
-				                   column_type);
+				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec);
 
 				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
@@ -1230,8 +1262,7 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 				                  std::is_same_v<StateT, RegularColumnState>) {
 					    if (state.chunk_cache) {
 						    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-						                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows,
-						                  spec.column_type);
+						                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec);
 					    }
 				    }
 			    },
@@ -1243,6 +1274,26 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 	}
 }
 
+// Helper: get base (non-array) type from a possibly nested array type
+static LogicalType GetBaseType(LogicalType type) {
+	while (type.id() == LogicalTypeId::ARRAY) {
+		type = ArrayType::GetChildType(type);
+	}
+	return type;
+}
+
+// Helper: get innermost vector and base type for array columns
+static Vector &GetInnermostVector(Vector &vector, const LogicalType &type, LogicalType &base_type) {
+	Vector *current_vector = &vector;
+	LogicalType current_type = type;
+	while (current_type.id() == LogicalTypeId::ARRAY) {
+		current_vector = &ArrayVector::GetEntry(*current_vector);
+		current_type = ArrayType::GetChildType(current_type);
+	}
+	base_type = current_type;
+	return *current_vector;
+}
+
 // Helper function to scan a regular dataset column
 static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState &state, Vector &result_vector,
                               idx_t position, idx_t to_read, const H5ReadBindData &bind_data,
@@ -1252,6 +1303,8 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		auto &cache = *state.chunk_cache;
 		auto *chunk1 = &cache.chunks[0];
 		auto *chunk2 = &cache.chunks[1];
+		LogicalType base_type;
+		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
 
 		for (;;) {
 
@@ -1288,8 +1341,8 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 				idx_t chunk_offset = overlap_start - chunk_start;
 				idx_t result_offset = overlap_start - position;
 
-				CopyFromTypedCache(chunk->cache, chunk_offset, overlap_size, result_vector, result_offset,
-				                   spec.column_type);
+				CopyFromTypedCache(chunk->cache, chunk_offset, overlap_size, target_vector, result_offset, base_type,
+				                   spec.elements_per_row);
 			}
 		}
 
@@ -1397,6 +1450,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
 	if (!range_selection.has_data) {
+		TryRefreshCache(gstate, bind_data);
 		output.SetCardinality(0);
 		return;
 	}

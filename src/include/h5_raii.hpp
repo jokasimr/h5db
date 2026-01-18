@@ -38,6 +38,11 @@ public:
 class H5TypeHandle {
 	hid_t id;
 
+	// Private constructor for taking ownership of existing handle
+	struct TakeOwnership {};
+	H5TypeHandle(hid_t type_id, TakeOwnership) : id(type_id) {
+	}
+
 public:
 	H5TypeHandle() : id(-1) {
 	}
@@ -46,6 +51,12 @@ public:
 		if (id < 0) {
 			throw IOException("Failed to copy HDF5 type");
 		}
+	}
+
+	// Factory method to take ownership of an existing type handle
+	// Use this for handles returned by H5Dget_type, H5Aget_type, H5Tget_super, etc.
+	static H5TypeHandle TakeOwnershipOf(hid_t type_id) {
+		return H5TypeHandle(type_id, TakeOwnership {});
 	}
 
 	~H5TypeHandle() {

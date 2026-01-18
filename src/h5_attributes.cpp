@@ -22,7 +22,7 @@ static LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
 		if (base_type_id < 0) {
 			throw IOException("Failed to get array base type");
 		}
-		H5TypeHandle base_type(base_type_id);
+		H5TypeHandle base_type = H5TypeHandle::TakeOwnershipOf(base_type_id);
 
 		// Get array dimensions
 		int ndims = H5Tget_array_ndims(type_id);
@@ -81,7 +81,7 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 	if (type_id < 0) {
 		throw IOException("Failed to get type for attribute: " + std::string(attr_name));
 	}
-	H5TypeHandle type(type_id);
+	H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 
 	// Get the dataspace to check if it's scalar or simple - RAII handles cleanup
 	hid_t space_id = H5Aget_space(attr);

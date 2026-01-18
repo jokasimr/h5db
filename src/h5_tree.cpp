@@ -48,7 +48,7 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 			// Get datatype - RAII handles cleanup
 			hid_t type_id = H5Dget_type(dataset);
 			if (type_id >= 0) {
-				H5TypeHandle type(type_id);
+				H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 				obj_info.dtype = H5TypeToString(type);
 			}
 

@@ -1,0 +1,88 @@
+# name: test/sql/large/nd_cache.test
+# description: N-D chunk cache coverage with varied HDF5 chunking
+# group: [large]
+
+require h5db
+
+# =============================================================================
+# N-D cache datasets (1,000,000 rows)
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_contig');
+----
+1000000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small');
+----
+1000000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_large');
+----
+1000000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_partial');
+----
+1000000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/tensor_3d_chunked_large');
+----
+1000000
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/nd_cache_test.h5', '/tensor_4d_chunked_small');
+----
+1000000
+
+# =============================================================================
+# Spot checks for different chunk layouts
+# =============================================================================
+
+query I
+SELECT array_2d_contig[1] FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_contig') LIMIT 1;
+----
+0
+
+query I
+SELECT array_2d_contig[6] FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_contig') LIMIT 1;
+----
+0
+
+query I
+SELECT array_2d_chunked_small[1]
+FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+LIMIT 1 OFFSET 123456;
+----
+123456
+
+query I
+SELECT array_2d_chunked_large[6]
+FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_large')
+LIMIT 1 OFFSET 654321;
+----
+654321
+
+query I
+SELECT array_2d_chunked_partial[5]
+FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_partial')
+LIMIT 1 OFFSET 424242;
+----
+424242
+
+query I
+SELECT tensor_3d_chunked_large[1][1]
+FROM h5_read('test/data/nd_cache_test.h5', '/tensor_3d_chunked_large')
+LIMIT 1 OFFSET 777777;
+----
+777777
+
+query I
+SELECT tensor_4d_chunked_small[1][1][1]
+FROM h5_read('test/data/nd_cache_test.h5', '/tensor_4d_chunked_small')
+LIMIT 1 OFFSET 999999;
+----
+999999
