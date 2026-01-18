@@ -566,6 +566,28 @@ state_alias
 timestamp
 
 # =============================================================================
+# h5_index() Tests - Virtual Index Column
+# =============================================================================
+
+query III
+SELECT MIN(index), MAX(index), COUNT(*) FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+);
+----
+0	9	10
+
+query II
+SELECT MIN(idx_alias), MAX(idx_alias) FROM h5_read(
+    'test/data/simple.h5',
+    h5_alias('idx_alias', h5_index()),
+    '/integers'
+);
+----
+0	9
+
+# =============================================================================
 # RSE Expansion Tests - Basic Functionality
 # =============================================================================
 

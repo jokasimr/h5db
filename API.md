@@ -30,7 +30,9 @@ Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
 - `filename` (VARCHAR): Path to the HDF5 file
-- `dataset_path` (VARCHAR or RSE STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
+- `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
+- `h5_index()` can be provided to add a virtual index column named `index`
+- `h5_alias(name, definition)` can be used to rename a column definition
 - Additional dataset paths can be provided (variadic arguments)
 
 **Returns:** Table with one column per dataset
@@ -59,6 +61,12 @@ SELECT * FROM h5_read(
     '/timestamp',
     h5_rse('/status_run_starts', '/status_values')
 );
+
+-- Add a virtual index column
+SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
+
+-- Rename a column definition
+SELECT * FROM h5_read('data.h5', h5_alias('idx', h5_index()), '/measurements');
 ```
 
 ---
@@ -122,6 +130,44 @@ SELECT * FROM h5_read(
 ```
 
 For detailed information on run-start encoding, see [RSE_USAGE.md](RSE_USAGE.md).
+
+---
+
+### `h5_index()`
+
+Adds a virtual index column for the outermost dimension when used with `h5_read()`.
+
+**Parameters:** none
+
+**Returns:** STRUCT tag used by `h5_read()`
+
+**Default column name:** `index`
+
+**Example:**
+```sql
+SELECT index, measurements FROM h5_read('data.h5', h5_index(), '/measurements');
+```
+
+---
+
+### `h5_alias(name, definition)`
+
+Renames a column definition when used with `h5_read()`.
+
+**Parameters:**
+- `name` (VARCHAR): Column name to use in the output
+- `definition` (VARCHAR or STRUCT): A dataset path or a column definition like `h5_rse()` or `h5_index()`
+
+**Returns:** STRUCT wrapper used by `h5_read()`
+
+**Example:**
+```sql
+SELECT * FROM h5_read(
+    'data.h5',
+    h5_alias('idx', h5_index()),
+    h5_alias('temp_c', '/temperature')
+);
+```
 
 ---
 

@@ -29,6 +29,9 @@ void RegisterH5RseFunction(ExtensionLoader &loader);
 // Scalar function for aliasing column specs with custom names
 void RegisterH5AliasFunction(ExtensionLoader &loader);
 
+// Scalar function for adding a virtual index column
+void RegisterH5IndexFunction(ExtensionLoader &loader);
+
 // Table function for reading HDF5 attributes
 void RegisterH5AttributesFunction(ExtensionLoader &loader);
 

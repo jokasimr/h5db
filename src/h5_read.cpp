@@ -73,8 +73,14 @@ struct RSEColumnSpec {
 	H5TypeHandle values_h5_type;     // HDF5 type for values (determined in Bind)
 };
 
-// A column can be either regular or RSE
-using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec>;
+// Virtual index column specification
+struct IndexColumnSpec {
+	std::string column_name;
+	LogicalType column_type;
+};
+
+// A column can be regular, RSE, or virtual index
+using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec, IndexColumnSpec>;
 
 // Chunk cache data (separate struct to allow unique_ptr due to non-movable atomics)
 struct Chunk {
@@ -123,8 +129,10 @@ struct RSEColumnState {
 	// Note: No mutable state needed - ScanRSEColumn is now stateless (thread-safe)
 };
 
-// Runtime state for a column (either regular or RSE)
-using ColumnState = std::variant<RegularColumnState, RSEColumnState>;
+struct IndexColumnState {};
+
+// Runtime state for a column (regular, RSE, or index)
+using ColumnState = std::variant<RegularColumnState, RSEColumnState, IndexColumnState>;
 
 // Row range for filtering (defined here for use in bind data and global state)
 struct RowRange {
@@ -487,6 +495,17 @@ static bool IsAliasStructType(const LogicalType &type) {
 	return children[0].second == LogicalType::VARCHAR;
 }
 
+static bool IsIndexStructType(const LogicalType &type) {
+	if (type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+	auto &children = StructType::GetChildTypes(type);
+	if (children.size() != 1) {
+		return false;
+	}
+	return children[0].second == LogicalType::VARCHAR;
+}
+
 static Value UnwrapAliasSpec(const Value &input, std::optional<std::string> &alias_name) {
 	Value current = input;
 	while (IsAliasStructType(current.type())) {
@@ -517,7 +536,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	// Get parameters - first is filename, rest are dataset paths or RSE structs
 	if (input.inputs.size() < 2) {
 		throw IOException(
-		    "h5_read requires at least 2 arguments: filename and dataset path(s), h5_rse(), or h5_alias()");
+		    "h5_read requires at least 2 arguments: filename and dataset path(s), h5_rse(), h5_index(), or h5_alias()");
 	}
 
 	result->filename = input.inputs[0].GetValue<string>();
@@ -547,10 +566,24 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		std::optional<std::string> alias_name;
 		Value column_val = UnwrapAliasSpec(input_val, alias_name);
 
-		// Check if this is an RSE column (STRUCT type)
+		// Check for virtual index or RSE column (STRUCT type)
 		if (column_val.type().id() == LogicalTypeId::STRUCT) {
-			// RSE column - extract struct fields
 			auto &children = StructValue::GetChildren(column_val);
+
+			if (IsIndexStructType(column_val.type())) {
+				if (children[0].GetValue<string>() != "__index__") {
+					throw InvalidInputException("Unknown struct argument for h5_read");
+				}
+
+				IndexColumnSpec index_spec;
+				index_spec.column_name = alias_name ? *alias_name : "index";
+				index_spec.column_type = LogicalType::BIGINT;
+
+				result->columns.push_back(std::move(index_spec));
+				continue;
+			}
+
+			// RSE column - extract struct fields
 			if (children.size() != 3) {
 				throw InvalidInputException("Expected h5_rse() to return a struct with 3 fields");
 			}
@@ -821,6 +854,9 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 				    // Store in dense array with LOCAL indexing
 				    result->column_states.push_back(std::move(rse_col));
+			    } else if constexpr (std::is_same_v<T, IndexColumnSpec>) {
+				    // Virtual index column - no HDF5 state required
+				    result->column_states.push_back(IndexColumnState {});
 			    }
 		    },
 		    col);
@@ -1438,6 +1474,10 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 			                         std::is_same_v<StateT, RegularColumnState>) {
 				    // Regular dataset - call helper function
 				    ScanRegularColumn(spec, state, result_vector, position, to_read, bind_data, gstate);
+			    } else if constexpr (std::is_same_v<SpecT, IndexColumnSpec> &&
+			                         std::is_same_v<StateT, IndexColumnState>) {
+				    // Virtual index column - sequence vector
+				    result_vector.Sequence(static_cast<int64_t>(position), 1, to_read);
 			    }
 		    },
 		    col_spec, col_state);
@@ -1562,6 +1602,26 @@ void RegisterH5AliasFunction(ExtensionLoader &loader) {
 	h5_alias.serialize = VariableReturnBindData::Serialize;
 	h5_alias.deserialize = VariableReturnBindData::Deserialize;
 	loader.RegisterFunction(h5_alias);
+}
+
+// ==================== h5_index Scalar Function ====================
+
+static void H5IndexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &children = StructVector::GetEntries(result);
+	D_ASSERT(children.size() == 1);
+
+	for (idx_t i = 0; i < args.size(); i++) {
+		FlatVector::GetData<string_t>(*children[0])[i] = StringVector::AddString(*children[0], "__index__");
+	}
+
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	result.Verify(args.size());
+}
+
+void RegisterH5IndexFunction(ExtensionLoader &loader) {
+	child_list_t<LogicalType> struct_children = {{"tag", LogicalType::VARCHAR}};
+	auto h5_index = ScalarFunction("h5_index", {}, LogicalType::STRUCT(struct_children), H5IndexFunction);
+	loader.RegisterFunction(h5_index);
 }
 
 // Cardinality function - informs DuckDB's optimizer of exact row count
