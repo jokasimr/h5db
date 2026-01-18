@@ -542,6 +542,30 @@ SELECT h5_rse('/experiment1/state_run_starts', '/experiment1/state_values')::VAR
 {'encoding': rse, 'run_starts': /experiment1/state_run_starts, 'values': /experiment1/state_values}
 
 # =============================================================================
+# h5_alias() Tests - Column Renaming
+# =============================================================================
+
+# Test h5_alias() for regular datasets
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/simple.h5',
+    h5_alias('ints_alias', '/integers')
+)) ORDER BY column_name;
+----
+ints_alias
+
+# Test h5_alias() for RSE columns
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/run_encoded.h5',
+    '/experiment1/timestamp',
+    h5_alias('state_alias', h5_rse('/experiment1/state_run_starts', '/experiment1/state_values'))
+)) ORDER BY column_name;
+----
+state_alias
+timestamp
+
+# =============================================================================
 # RSE Expansion Tests - Basic Functionality
 # =============================================================================
 
@@ -816,4 +840,3 @@ statement error
 SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/nonexistent_path');
 ----
 IO Error: Failed to open object: /nonexistent_path
-

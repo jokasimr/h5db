@@ -2,6 +2,7 @@
 
 #include "hdf5.h"
 #include "duckdb.hpp"
+#include "h5_internal.hpp"
 
 using namespace duckdb;
 
@@ -17,11 +18,13 @@ class H5ErrorSuppressor {
 
 public:
 	H5ErrorSuppressor() {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
 		H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 	}
 
 	~H5ErrorSuppressor() {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
 	}
 
@@ -47,7 +50,9 @@ public:
 	H5TypeHandle() : id(-1) {
 	}
 
-	explicit H5TypeHandle(hid_t type_id) : id(H5Tcopy(type_id)) {
+	explicit H5TypeHandle(hid_t type_id) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+		id = H5Tcopy(type_id);
 		if (id < 0) {
 			throw IOException("Failed to copy HDF5 type");
 		}
@@ -61,6 +66,7 @@ public:
 
 	~H5TypeHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Tclose(id);
 		}
 	}
@@ -104,11 +110,23 @@ public:
 	}
 
 	H5FileHandle(const char *filename, unsigned flags) {
-		id = H5Fopen(filename, flags, H5P_DEFAULT);
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+		hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+		if (fapl >= 0) {
+			H5Pset_fclose_degree(fapl, H5F_CLOSE_WEAK);
+			// Disable file locking for concurrent read-only access across processes.
+			// Ignore errors in case the HDF5 build does not support this API.
+			H5Pset_file_locking(fapl, 0, 0);
+		}
+		id = H5Fopen(filename, flags, fapl >= 0 ? fapl : H5P_DEFAULT);
+		if (fapl >= 0) {
+			H5Pclose(fapl);
+		}
 	}
 
 	~H5FileHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Fclose(id);
 		}
 	}
@@ -156,11 +174,13 @@ public:
 	}
 
 	H5DatasetHandle(hid_t file_or_group_id, const char *path) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Dopen2(file_or_group_id, path, H5P_DEFAULT);
 	}
 
 	~H5DatasetHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Dclose(id);
 		}
 	}
@@ -214,11 +234,13 @@ public:
 
 	// Constructor from dataset (calls H5Dget_space)
 	explicit H5DataspaceHandle(hid_t dataset_id) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Dget_space(dataset_id);
 	}
 
 	// Constructor from dimensions (calls H5Screate_simple)
 	H5DataspaceHandle(int rank, const hsize_t *dims) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Screate_simple(rank, dims, nullptr);
 	}
 
@@ -230,6 +252,7 @@ public:
 
 	~H5DataspaceHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Sclose(id);
 		}
 	}
@@ -277,11 +300,13 @@ public:
 	}
 
 	H5AttributeHandle(hid_t obj_id, const char *attr_name) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Aopen(obj_id, attr_name, H5P_DEFAULT);
 	}
 
 	~H5AttributeHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Aclose(id);
 		}
 	}
@@ -329,11 +354,13 @@ public:
 	}
 
 	H5ObjectHandle(hid_t loc_id, const char *path) {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Oopen(loc_id, path, H5P_DEFAULT);
 	}
 
 	~H5ObjectHandle() {
 		if (id >= 0) {
+			std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 			H5Oclose(id);
 		}
 	}

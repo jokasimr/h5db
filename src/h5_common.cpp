@@ -9,7 +9,7 @@
 namespace duckdb {
 
 // Global mutex for all HDF5 operations (definition)
-std::mutex hdf5_global_mutex;
+std::recursive_mutex hdf5_global_mutex;
 
 // Convert HDF5 type to string representation
 std::string H5TypeToString(hid_t type_id) {
@@ -151,6 +151,37 @@ LogicalType H5TypeToDuckDBType(hid_t type_id) {
 	default:
 		throw IOException("Unsupported HDF5 type class: " + std::to_string(type_class));
 	}
+}
+
+// Convert HDF5 attribute type (including arrays) to DuckDB type
+LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
+	H5T_class_t type_class = H5Tget_class(type_id);
+
+	if (type_class == H5T_ARRAY) {
+		hid_t base_type_id = H5Tget_super(type_id);
+		if (base_type_id < 0) {
+			throw IOException("Failed to get array base type");
+		}
+		H5TypeHandle base_type = H5TypeHandle::TakeOwnershipOf(base_type_id);
+
+		int ndims = H5Tget_array_ndims(type_id);
+		if (ndims < 0) {
+			throw IOException("Failed to get array dimensions");
+		}
+		if (ndims != 1) {
+			throw IOException("Only 1D array attributes are supported, found " + std::to_string(ndims) + "D array");
+		}
+
+		hsize_t dims[1];
+		if (H5Tget_array_dims2(type_id, dims) < 0) {
+			throw IOException("Failed to get array dimensions");
+		}
+
+		LogicalType element_type = H5TypeToDuckDBType(base_type);
+		return LogicalType::ARRAY(element_type, dims[0]);
+	}
+
+	return H5TypeToDuckDBType(type_id);
 }
 
 } // namespace duckdb

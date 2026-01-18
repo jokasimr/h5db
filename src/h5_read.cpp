@@ -3,6 +3,7 @@
 #include "h5_raii.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -16,31 +17,18 @@
 #include <string>
 #include <limits>
 #include <variant>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
-#include <iostream>
 
 namespace duckdb {
 
 // =============================================================================
 // Type-safe index wrappers for projection pushdown
 // =============================================================================
-// These prevent accidentally mixing global and local column indices.
-// Similar to DuckDB's MultiFileLocalIndex / MultiFileGlobalIndex pattern.
-//
-// INDEXING STRATEGY (DENSE ARRAY):
-// - GlobalColumnIdx: Index into bind_data.columns (schema/bind-time indices)
-// - LocalColumnIdx: Index into column_states (scan-time dense array [0,1,2...])
-// - output.data[i]: Also indexed [0,1,2...] matching LocalColumnIdx
-//
-// Example with projection SELECT col2, col4 FROM table(col1, col2, col3, col4):
-//   columns_to_scan = [1, 3]          // Global indices
-//   column_states.size() = 2          // Dense: only 2 elements
-//   column_states[0] = state for col2 // Local idx 0 -> Global idx 1
-//   column_states[1] = state for col4 // Local idx 1 -> Global idx 3
-//   output.data[0] = col2 data
-//   output.data[1] = col4 data
+// These prevent mixing global schema indices and local scan indices.
+// GlobalColumnIdx indexes bind_data.columns; LocalColumnIdx indexes dense scan arrays.
 
 struct LocalColumnIdx {
 	idx_t index; // Index into column_states [0, 1, 2, ...]
@@ -88,11 +76,11 @@ struct RSEColumnSpec {
 // A column can be either regular or RSE
 using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec>;
 
-// Chunk cache data (separate struct to allow unique_ptr due to non-movable mutex/cv)
+// Chunk cache data (separate struct to allow unique_ptr due to non-movable atomics)
 struct Chunk {
 	idx_t chunk_size = 0; // Rows per chunk
 
-	// Typed storage - buffer with chunk_size capacity
+	// Typed storage - buffer with chunk_size * elements_per_row capacity
 	using CacheStorage =
 	    std::variant<std::monostate, // No cache (for non-cacheable columns)
 	                 std::vector<int8_t>, std::vector<int16_t>, std::vector<int32_t>, std::vector<int64_t>,
@@ -100,7 +88,7 @@ struct Chunk {
 	                 std::vector<float>, std::vector<double>,
 	                 std::vector<string> // Included for template instantiation (but not actually used for caching)
 	                 >;
-	CacheStorage cache; // Size: chunk_size elements
+	CacheStorage cache; // Size: chunk_size * elements_per_row elements
 
 	// Chunk state tracking
 	// end_row: One past the last row in this chunk. Chunk covers [end_row - chunk_size, end_row)
@@ -225,6 +213,26 @@ static idx_t GetNumScannedColumns(const H5ReadGlobalState &gstate) {
 	return gstate.columns_to_scan.size();
 }
 
+// Helper: get base (non-array) type from a possibly nested array type
+static LogicalType GetBaseType(LogicalType type) {
+	while (type.id() == LogicalTypeId::ARRAY) {
+		type = ArrayType::GetChildType(type);
+	}
+	return type;
+}
+
+// Helper: get innermost vector and base type for array columns
+static Vector &GetInnermostVector(Vector &vector, const LogicalType &type, LogicalType &base_type) {
+	Vector *current_vector = &vector;
+	LogicalType current_type = type;
+	while (current_type.id() == LogicalTypeId::ARRAY) {
+		current_vector = &ArrayVector::GetEntry(*current_vector);
+		current_type = ArrayType::GetChildType(current_type);
+	}
+	base_type = current_type;
+	return *current_vector;
+}
+
 // Helper function to generate column name from dataset path
 static string GetColumnName(const string &dataset_path) {
 	// Extract just the dataset name (last component of path)
@@ -244,9 +252,6 @@ static string GetColumnName(const string &dataset_path) {
 	return col_name;
 }
 
-// Helper: get base (non-array) type from a possibly nested array type
-static LogicalType GetBaseType(LogicalType type);
-
 // Helper function to build nested array types for multi-dimensional datasets
 static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims) {
 	if (ndims == 1) {
@@ -263,6 +268,63 @@ static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize
 		result = LogicalType::ARRAY(result, dims[i]);
 	}
 	return result;
+}
+
+// Helper: select hyperslab and create matching memory dataspace
+static H5DataspaceHandle CreateMemspaceAndSelect(hid_t file_space_id, const RegularColumnSpec &spec, idx_t position,
+                                                 idx_t to_read) {
+	H5DataspaceHandle mem_space;
+	if (spec.ndims == 1) {
+		hsize_t start[1] = {position};
+		hsize_t count[1] = {to_read};
+		H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start, nullptr, count, nullptr);
+
+		hsize_t mem_dims[1] = {to_read};
+		mem_space = H5DataspaceHandle(1, mem_dims);
+	} else {
+		std::vector<hsize_t> start(spec.ndims, 0);
+		std::vector<hsize_t> count(spec.ndims);
+		start[0] = position;
+		count[0] = to_read;
+		for (int i = 1; i < spec.ndims; i++) {
+			count[i] = spec.dims[i];
+		}
+		H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr);
+
+		std::vector<hsize_t> mem_dims(spec.ndims);
+		mem_dims[0] = to_read;
+		for (int i = 1; i < spec.ndims; i++) {
+			mem_dims[i] = spec.dims[i];
+		}
+		mem_space = H5DataspaceHandle(spec.ndims, mem_dims.data());
+	}
+	return mem_space;
+}
+
+static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id) {
+	idx_t chunk_size = 0;
+	hid_t dcpl = H5Dget_create_plist(dataset_id);
+	if (dcpl >= 0) {
+		H5D_layout_t layout = H5Pget_layout(dcpl);
+		if (layout == H5D_CHUNKED) {
+			std::vector<hsize_t> chunk_dims(spec.ndims);
+			if (H5Pget_chunk(dcpl, spec.ndims, chunk_dims.data()) >= 0) {
+				chunk_size = chunk_dims[0];
+			}
+		}
+		H5Pclose(dcpl);
+	}
+
+	if (chunk_size == 0) {
+		constexpr idx_t DEFAULT_CHUNK_BYTES = 1 * 1024 * 1024;
+		// Note: for very wide rows this can still pick a large row count.
+		// We accept this to preserve scan chunk sizing requirements.
+		chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
+	}
+	if (chunk_size < STANDARD_VECTOR_SIZE) {
+		chunk_size = STANDARD_VECTOR_SIZE;
+	}
+	return chunk_size;
 }
 
 // Helper function to open a dataset and get its type in one operation
@@ -361,6 +423,89 @@ static bool EvaluateComparison(const T &value, ExpressionType comparison, const 
 }
 
 //===--------------------------------------------------------------------===//
+// RSE Helpers
+//===--------------------------------------------------------------------===//
+
+static vector<idx_t> LoadRunStarts(const RSEColumnSpec &spec, hid_t starts_ds, size_t num_runs, hsize_t num_rows) {
+	H5T_class_t starts_class = H5Tget_class(spec.run_starts_h5_type);
+	if (starts_class != H5T_INTEGER) {
+		throw IOException("RSE run_starts must be integer type");
+	}
+
+	vector<idx_t> run_starts(num_runs);
+	herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, run_starts.data());
+	if (status < 0) {
+		throw IOException("Failed to read run_starts from: " + spec.run_starts_path);
+	}
+
+	if (num_runs > 0 && run_starts[0] != 0) {
+		throw IOException("RSE run_starts must begin with 0, got " + std::to_string(run_starts[0]));
+	}
+	for (size_t i = 1; i < num_runs; i++) {
+		if (run_starts[i] <= run_starts[i - 1]) {
+			throw IOException("RSE run_starts must be strictly increasing");
+		}
+	}
+	if (num_runs > 0 && run_starts.back() >= num_rows) {
+		throw IOException("RSE run_starts contains index " + std::to_string(run_starts.back()) +
+		                  " which exceeds dataset length " + std::to_string(num_rows));
+	}
+
+	return run_starts;
+}
+
+static RSEColumnState::RSEValueStorage LoadRSEValues(const RSEColumnSpec &spec, hid_t values_ds, size_t num_values) {
+	return DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) -> RSEColumnState::RSEValueStorage {
+		using T = typename decltype(type_tag)::type;
+
+		if constexpr (std::is_same_v<T, string>) {
+			std::vector<string> string_values;
+			string_values.reserve(num_values);
+			ReadHDF5Strings(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, num_values,
+			                [&](idx_t i, const std::string &str) { string_values.push_back(str); });
+			return string_values;
+		} else {
+			std::vector<T> typed_values(num_values);
+			herr_t status =
+			    H5Dread(values_ds, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, typed_values.data());
+			if (status < 0) {
+				throw IOException("Failed to read values from: " + spec.values_path);
+			}
+			return typed_values;
+		}
+	});
+}
+
+static bool IsAliasStructType(const LogicalType &type) {
+	if (type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+	auto &children = StructType::GetChildTypes(type);
+	if (children.size() != 3) {
+		return false;
+	}
+	return children[0].second == LogicalType::VARCHAR;
+}
+
+static Value UnwrapAliasSpec(const Value &input, std::optional<std::string> &alias_name) {
+	Value current = input;
+	while (IsAliasStructType(current.type())) {
+		auto &children = StructValue::GetChildren(current);
+		if (children.size() != 3) {
+			throw InvalidInputException("h5_alias() must return a struct with 3 fields");
+		}
+		if (children[0].GetValue<string>() != "__alias__") {
+			break;
+		}
+		if (!alias_name) {
+			alias_name = children[1].GetValue<string>();
+		}
+		current = children[2];
+	}
+	return current;
+}
+
+//===--------------------------------------------------------------------===//
 // h5_read - Read datasets from HDF5 files
 //===--------------------------------------------------------------------===//
 
@@ -371,14 +516,15 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 	// Get parameters - first is filename, rest are dataset paths or RSE structs
 	if (input.inputs.size() < 2) {
-		throw IOException("h5_read requires at least 2 arguments: filename and dataset path(s) or h5_rse() calls");
+		throw IOException(
+		    "h5_read requires at least 2 arguments: filename and dataset path(s), h5_rse(), or h5_alias()");
 	}
 
 	result->filename = input.inputs[0].GetValue<string>();
 	size_t num_columns = input.inputs.size() - 1;
 
 	// Lock for all HDF5 operations (not thread-safe)
-	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	// Open file once (with error suppression) - RAII wrapper handles cleanup
 	H5FileHandle file;
@@ -398,13 +544,15 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	// Process each column (regular dataset or RSE)
 	for (size_t i = 0; i < num_columns; i++) {
 		const auto &input_val = input.inputs[i + 1];
+		std::optional<std::string> alias_name;
+		Value column_val = UnwrapAliasSpec(input_val, alias_name);
 
 		// Check if this is an RSE column (STRUCT type)
-		if (input_val.type().id() == LogicalTypeId::STRUCT) {
+		if (column_val.type().id() == LogicalTypeId::STRUCT) {
 			// RSE column - extract struct fields
-			auto &children = StructValue::GetChildren(input_val);
+			auto &children = StructValue::GetChildren(column_val);
 			if (children.size() != 3) {
-				throw InvalidInputException("h5_rse() must return a struct with 3 fields");
+				throw InvalidInputException("Expected h5_rse() to return a struct with 3 fields");
 			}
 
 			string encoding = children[0].GetValue<string>();
@@ -418,7 +566,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			RSEColumnSpec rse_spec;
 			rse_spec.run_starts_path = run_starts;
 			rse_spec.values_path = values;
-			rse_spec.column_name = GetColumnName(values);
+			rse_spec.column_name = alias_name ? *alias_name : GetColumnName(values);
 
 			// Open run_starts dataset and get type
 			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, run_starts);
@@ -435,8 +583,8 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		} else {
 			// Regular dataset
 			RegularColumnSpec ds_info;
-			ds_info.path = input_val.GetValue<string>();
-			ds_info.column_name = GetColumnName(ds_info.path);
+			ds_info.path = column_val.GetValue<string>();
+			ds_info.column_name = alias_name ? *alias_name : GetColumnName(ds_info.path);
 			num_regular_datasets++;
 
 			// Open dataset and get type
@@ -554,7 +702,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	}
 
 	// Lock for all HDF5 operations (not thread-safe)
-	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	// Open file (with error suppression) - RAII wrapper handles cleanup
 	{
@@ -601,38 +749,16 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    state.dataset = std::move(dataset);
 				    state.file_space = std::move(file_space);
 
-				    // Detect if this column is cacheable (Phase 1: 1D numerical only)
+				    // Cache numeric columns (strings are read directly)
 				    bool is_cacheable = !spec.is_string;
 
 				    if (is_cacheable) {
 					    // Create cache structure (chunks array is already allocated)
 					    state.chunk_cache = std::make_unique<ChunkCache>();
 
-					    // Query HDF5 chunk size or use default
-					    idx_t chunk_size = 0;
-					    hid_t dcpl = H5Dget_create_plist(state.dataset);
-					    if (dcpl >= 0) {
-						    H5D_layout_t layout = H5Pget_layout(dcpl);
-						    if (layout == H5D_CHUNKED) {
-							    std::vector<hsize_t> chunk_dims(spec.ndims);
-							    if (H5Pget_chunk(dcpl, spec.ndims, chunk_dims.data()) >= 0) {
-								    chunk_size = chunk_dims[0];
-							    }
-						    }
-						    H5Pclose(dcpl);
-					    }
+					    idx_t chunk_size = ComputeChunkSize(spec, state.dataset.get());
 
-					    // If not chunked or error, use default of 1MB / element_size
-					    if (chunk_size == 0) {
-						    constexpr idx_t DEFAULT_CHUNK_BYTES = 1 * 1024 * 1024; // 4MB
-						    chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
-					    }
-					    // Ensure at least one full scan chunk to avoid cache stall
-					    if (chunk_size < STANDARD_VECTOR_SIZE) {
-						    chunk_size = STANDARD_VECTOR_SIZE;
-					    }
-
-					    // Allocate typed cache buffer (chunk_size elements)
+					    // Allocate typed cache buffer (chunk_size * elements_per_row elements)
 					    auto base_type = GetBaseType(spec.column_type);
 					    DispatchOnDuckDBType(base_type, [&](auto type_tag) {
 						    using T = typename decltype(type_tag)::type;
@@ -687,55 +813,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					                      std::to_string(num_runs) + " and " + std::to_string(num_values));
 				    }
 
-				    // Read run_starts - validate it's an integer type, then let HDF5 convert to idx_t (uint64_t)
-				    H5T_class_t starts_class = H5Tget_class(spec.run_starts_h5_type);
-				    if (starts_class != H5T_INTEGER) {
-					    throw IOException("RSE run_starts must be integer type");
-				    }
-
-				    // Read directly into run_starts - HDF5 automatically converts from file type to uint64_t
-				    rse_col.run_starts.resize(num_runs);
-				    herr_t status =
-				        H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, rse_col.run_starts.data());
-
-				    if (status < 0) {
-					    throw IOException("Failed to read run_starts from: " + spec.run_starts_path);
-				    }
-
-				    // Validate run_starts
-				    if (num_runs > 0 && rse_col.run_starts[0] != 0) {
-					    throw IOException("RSE run_starts must begin with 0, got " +
-					                      std::to_string(rse_col.run_starts[0]));
-				    }
-				    for (size_t i = 1; i < num_runs; i++) {
-					    if (rse_col.run_starts[i] <= rse_col.run_starts[i - 1]) {
-						    throw IOException("RSE run_starts must be strictly increasing");
-					    }
-				    }
-				    if (num_runs > 0 && rse_col.run_starts.back() >= bind_data.num_rows) {
-					    throw IOException("RSE run_starts contains index " + std::to_string(rse_col.run_starts.back()) +
-					                      " which exceeds dataset length " + std::to_string(bind_data.num_rows));
-				    }
-
-				    // Read values using stored type and type dispatcher
-				    // Directly populate typed vector (no Value object overhead)
-				    DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
-					    using T = typename decltype(type_tag)::type;
-
-					    if constexpr (std::is_same_v<T, string>) {
-						    // String handling
-						    std::vector<string> string_values;
-						    string_values.reserve(num_values);
-						    ReadHDF5Strings(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, num_values,
-						                    [&](idx_t i, const std::string &str) { string_values.push_back(str); });
-						    rse_col.values = std::move(string_values);
-					    } else {
-						    // Numeric types: read directly into typed vector
-						    std::vector<T> typed_values(num_values);
-						    H5Dread(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, typed_values.data());
-						    rse_col.values = std::move(typed_values);
-					    }
-				    });
+				    rse_col.run_starts = LoadRunStarts(spec, starts_ds, num_runs, bind_data.num_rows);
+				    rse_col.values = LoadRSEValues(spec, values_ds, num_values);
 
 				    // Note: RSEColumnState is now stateless (thread-safe)
 				    // No runtime state initialization needed
@@ -1125,68 +1204,19 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_r
                                hid_t file_space_id, idx_t dataset_row_start, idx_t rows_to_read,
                                const RegularColumnSpec &spec) {
 	auto base_type = GetBaseType(spec.column_type);
-	DispatchOnDuckDBType(base_type, [&](auto type_tag) {
+	DispatchOnNumericType(base_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
 		auto &typed_cache = std::get<std::vector<T>>(cache);
 
 		// Lock for all HDF5 operations (not thread-safe)
-		std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
-		// Select hyperslab in file and create memory dataspace
-		H5DataspaceHandle mem_space;
-		if (spec.ndims == 1) {
-			hsize_t start[1] = {dataset_row_start};
-			hsize_t count[1] = {rows_to_read};
-			H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start, nullptr, count, nullptr);
-
-			hsize_t mem_dims[1] = {rows_to_read};
-			mem_space = H5DataspaceHandle(1, mem_dims);
-		} else {
-			std::vector<hsize_t> start(spec.ndims, 0);
-			std::vector<hsize_t> count(spec.ndims);
-			start[0] = dataset_row_start;
-			count[0] = rows_to_read;
-			for (int i = 1; i < spec.ndims; i++) {
-				count[i] = spec.dims[i];
-			}
-			H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr);
-
-			std::vector<hsize_t> mem_dims(spec.ndims);
-			mem_dims[0] = rows_to_read;
-			for (int i = 1; i < spec.ndims; i++) {
-				mem_dims[i] = spec.dims[i];
-			}
-			mem_space = H5DataspaceHandle(spec.ndims, mem_dims.data());
-		}
-
-		// Determine H5 type
-		hid_t h5_type;
-		if constexpr (std::is_same_v<T, int8_t>) {
-			h5_type = H5T_NATIVE_INT8;
-		} else if constexpr (std::is_same_v<T, int16_t>) {
-			h5_type = H5T_NATIVE_INT16;
-		} else if constexpr (std::is_same_v<T, int32_t>) {
-			h5_type = H5T_NATIVE_INT32;
-		} else if constexpr (std::is_same_v<T, int64_t>) {
-			h5_type = H5T_NATIVE_INT64;
-		} else if constexpr (std::is_same_v<T, uint8_t>) {
-			h5_type = H5T_NATIVE_UINT8;
-		} else if constexpr (std::is_same_v<T, uint16_t>) {
-			h5_type = H5T_NATIVE_UINT16;
-		} else if constexpr (std::is_same_v<T, uint32_t>) {
-			h5_type = H5T_NATIVE_UINT32;
-		} else if constexpr (std::is_same_v<T, uint64_t>) {
-			h5_type = H5T_NATIVE_UINT64;
-		} else if constexpr (std::is_same_v<T, float>) {
-			h5_type = H5T_NATIVE_FLOAT;
-		} else if constexpr (std::is_same_v<T, double>) {
-			h5_type = H5T_NATIVE_DOUBLE;
-		}
+		H5DataspaceHandle mem_space = CreateMemspaceAndSelect(file_space_id, spec, dataset_row_start, rows_to_read);
 
 		// Read into cache buffer at specified offset
 		idx_t buffer_offset = buffer_offset_rows * spec.elements_per_row;
-		herr_t status =
-		    H5Dread(dataset_id, h5_type, mem_space, file_space_id, H5P_DEFAULT, typed_cache.data() + buffer_offset);
+		herr_t status = H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space_id, H5P_DEFAULT,
+		                        typed_cache.data() + buffer_offset);
 		if (status < 0) {
 			throw IOException("Failed to read chunk from HDF5 dataset");
 		}
@@ -1274,26 +1304,6 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 	}
 }
 
-// Helper: get base (non-array) type from a possibly nested array type
-static LogicalType GetBaseType(LogicalType type) {
-	while (type.id() == LogicalTypeId::ARRAY) {
-		type = ArrayType::GetChildType(type);
-	}
-	return type;
-}
-
-// Helper: get innermost vector and base type for array columns
-static Vector &GetInnermostVector(Vector &vector, const LogicalType &type, LogicalType &base_type) {
-	Vector *current_vector = &vector;
-	LogicalType current_type = type;
-	while (current_type.id() == LogicalTypeId::ARRAY) {
-		current_vector = &ArrayVector::GetEntry(*current_vector);
-		current_type = ArrayType::GetChildType(current_type);
-	}
-	base_type = current_type;
-	return *current_vector;
-}
-
 // Helper function to scan a regular dataset column
 static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState &state, Vector &result_vector,
                               idx_t position, idx_t to_read, const H5ReadBindData &bind_data,
@@ -1349,7 +1359,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		return; // Done with cached read
 	}
 
-	std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	// Non-cached path: fall back to direct HDF5 read
 	// Access RAII-wrapped handles from state
@@ -1357,36 +1367,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 	hid_t file_space = state.file_space.get();
 
 	// Create memory dataspace for reading
-	H5DataspaceHandle mem_space; // RAII wrapper - automatic cleanup
-
-	if (spec.ndims == 1) {
-		// 1D dataset
-		hsize_t mem_dims[1] = {to_read};
-		mem_space = H5DataspaceHandle(1, mem_dims);
-
-		hsize_t start[1] = {position};
-		hsize_t count[1] = {to_read};
-		H5Sselect_hyperslab(file_space, H5S_SELECT_SET, start, nullptr, count, nullptr);
-	} else {
-		// Multi-dimensional dataset
-		// Create memory space with same dimensionality as file
-		std::vector<hsize_t> mem_dims(spec.ndims);
-		mem_dims[0] = to_read;
-		for (int i = 1; i < spec.ndims; i++) {
-			mem_dims[i] = spec.dims[i];
-		}
-		mem_space = H5DataspaceHandle(spec.ndims, mem_dims.data());
-
-		// Select hyperslab from file
-		std::vector<hsize_t> start(spec.ndims, 0);
-		std::vector<hsize_t> count(spec.ndims);
-		start[0] = position;
-		count[0] = to_read;
-		for (int i = 1; i < spec.ndims; i++) {
-			count[i] = spec.dims[i];
-		}
-		H5Sselect_hyperslab(file_space, H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr);
-	}
+	H5DataspaceHandle mem_space = CreateMemspaceAndSelect(file_space, spec, position, to_read);
 
 	// Read data based on type
 	if (spec.is_string) {
@@ -1402,41 +1383,16 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 
 	} else {
 		// Handle numeric data
-		if (spec.ndims == 1) {
-			// 1D dataset: read directly into DuckDB vector
-			// Use type dispatcher to get typed pointer and read data
-			herr_t status = DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
-				using T = typename decltype(type_tag)::type;
-				void *data_ptr = FlatVector::GetData<T>(result_vector);
-				return H5Dread(dataset_id, spec.h5_type_id, mem_space, file_space, H5P_DEFAULT, data_ptr);
-			});
+		LogicalType base_type;
+		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
+		herr_t status = DispatchOnNumericType(base_type, [&](auto type_tag) {
+			using T = typename decltype(type_tag)::type;
+			void *child_data = FlatVector::GetData<T>(target_vector);
+			return H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space, H5P_DEFAULT, child_data);
+		});
 
-			if (status < 0) {
-				throw IOException("Failed to read data from dataset: " + spec.path);
-			}
-
-		} else {
-			// Multi-dimensional dataset: read into buffer, then populate arrays
-			// For arrays in DuckDB, data is stored contiguously in the innermost child vector
-			Vector *current_vector = &result_vector;
-			LogicalType current_type = spec.column_type;
-
-			// Navigate through nested array levels to get to the innermost vector
-			while (current_type.id() == LogicalTypeId::ARRAY) {
-				current_vector = &ArrayVector::GetEntry(*current_vector);
-				current_type = ArrayType::GetChildType(current_type);
-			}
-
-			// Get pointer to the innermost child data and read using type dispatcher
-			herr_t status = DispatchOnDuckDBType(current_type, [&](auto type_tag) {
-				using T = typename decltype(type_tag)::type;
-				void *child_data = FlatVector::GetData<T>(*current_vector);
-				return H5Dread(dataset_id, spec.h5_type_id, mem_space, file_space, H5P_DEFAULT, child_data);
-			});
-
-			if (status < 0) {
-				throw IOException("Failed to read data from dataset: " + spec.path);
-			}
+		if (status < 0) {
+			throw IOException("Failed to read data from dataset: " + spec.path);
 		}
 	}
 
@@ -1561,6 +1517,53 @@ void RegisterH5RseFunction(ExtensionLoader &loader) {
 	loader.RegisterFunction(h5_rse);
 }
 
+// ==================== h5_alias Scalar Function ====================
+
+static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &name_vec = args.data[0];
+	auto &definition_vec = args.data[1];
+
+	auto &children = StructVector::GetEntries(result);
+	D_ASSERT(children.size() == 3);
+	children[1]->Reference(name_vec);
+	children[2]->Reference(definition_vec);
+
+	UnifiedVectorFormat name_data;
+	name_vec.ToUnifiedFormat(args.size(), name_data);
+	auto name_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
+
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto name_idx = name_data.sel->get_index(i);
+		FlatVector::GetData<string_t>(*children[0])[i] = StringVector::AddString(*children[0], "__alias__");
+		FlatVector::GetData<string_t>(*children[1])[i] = StringVector::AddString(*children[1], name_ptr[name_idx]);
+	}
+
+	bool all_const = definition_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
+	                 name_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	result.SetVectorType(all_const ? VectorType::CONSTANT_VECTOR : VectorType::FLAT_VECTOR);
+	result.Verify(args.size());
+}
+
+static unique_ptr<FunctionData> H5AliasBind(ClientContext &context, ScalarFunction &bound_function,
+                                            vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() != 2) {
+		throw InvalidInputException("h5_alias() requires two arguments: column name and column definition");
+	}
+	child_list_t<LogicalType> struct_children = {{"tag", LogicalType::VARCHAR},
+	                                             {"column_name", arguments[0]->return_type},
+	                                             {"definition", arguments[1]->return_type}};
+	bound_function.return_type = LogicalType::STRUCT(struct_children);
+	return make_uniq<VariableReturnBindData>(bound_function.return_type);
+}
+
+void RegisterH5AliasFunction(ExtensionLoader &loader) {
+	ScalarFunction h5_alias("h5_alias", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalTypeId::STRUCT,
+	                        H5AliasFunction, H5AliasBind);
+	h5_alias.serialize = VariableReturnBindData::Serialize;
+	h5_alias.deserialize = VariableReturnBindData::Deserialize;
+	loader.RegisterFunction(h5_alias);
+}
+
 // Cardinality function - informs DuckDB's optimizer of exact row count
 static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
@@ -1574,34 +1577,8 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse())
 	h5_read.varargs = LogicalType::ANY;
 
-	// ===================================================================================
-	// PREDICATE PUSHDOWN: Enabled for RSE columns
-	// ===================================================================================
-	// Implementation approach:
-	//   1. Bind time (pushdown_complex_filter callback):
-	//      - Parse Expression objects to identify filters on RSE columns
-	//      - Claim filters on RSE columns (store in bind_data) for I/O optimization
-	//      - Keep all filters in filter list for DuckDB to apply post-scan (defensive)
-	//      - Principle: filtering is cheap, reading data is expensive
-	//
-	//   2. Init time (H5ReadInit):
-	//      - Load RSE data for all RSE columns
-	//      - For each RSE column with filters:
-	//        * Loop through runs checking if value satisfies ALL filters on that column
-	//        * Build sorted, non-overlapping row ranges using state machine
-	//        * Works for both sorted and unsorted RSE columns!
-	//      - Store final row ranges in global state
-	//
-	//   3. Scan time (H5ReadScan):
-	//      - Iterate through row ranges, reading only matching rows
-	//      - Achieves I/O reduction even for unsorted RSE columns
-	//
-	// Benefits:
-	//   - Works for both sorted and unsorted RSE columns (linear scan approach)
-	//   - Row ranges automatically non-overlapping and sorted by construction
-	//   - Supports multiple filters on same column (AND conjunction)
-	//   - Handles mixed RSE and regular column filters correctly
-	// ===================================================================================
+	// Predicate pushdown (RSE only): claim filters in bind, build row ranges in init,
+	// and scan only matching ranges while keeping DuckDB's post-scan verification.
 
 	// Enable projection pushdown - only read columns that are actually needed
 	h5_read.projection_pushdown = true;

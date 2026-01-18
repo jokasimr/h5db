@@ -8,8 +8,6 @@
 
 namespace duckdb {
 
-// ==================== h5_tree Implementation ====================
-
 struct H5ObjectInfo {
 	std::string path;
 	std::string type;  // "group" or "dataset"
@@ -17,7 +15,6 @@ struct H5ObjectInfo {
 	std::string shape; // shape (for datasets)
 };
 
-// Data for the h5_tree table function
 struct H5TreeBindData : public TableFunctionData {
 	std::string filename;
 	mutable std::vector<H5ObjectInfo> objects;
@@ -28,7 +25,6 @@ struct H5TreeGlobalState : public GlobalTableFunctionState {
 	idx_t position = 0;
 };
 
-// Callback function for H5Ovisit
 static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *info, void *op_data) {
 	auto &objects = *reinterpret_cast<std::vector<H5ObjectInfo> *>(op_data);
 
@@ -42,17 +38,14 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 	} else if (info->type == H5O_TYPE_DATASET) {
 		obj_info.type = "dataset";
 
-		// Open the dataset to get its properties - RAII handles cleanup
 		H5DatasetHandle dataset(obj_id, name);
 		if (dataset.is_valid()) {
-			// Get datatype - RAII handles cleanup
 			hid_t type_id = H5Dget_type(dataset);
 			if (type_id >= 0) {
 				H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 				obj_info.dtype = H5TypeToString(type);
 			}
 
-			// Get shape
 			obj_info.shape = H5GetShapeString(dataset);
 		}
 	}
@@ -61,31 +54,25 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 	return 0; // Continue iteration
 }
 
-// Bind function - opens the file and scans it
 static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<H5TreeBindData>();
 
-	// Get filename parameter
 	result->filename = input.inputs[0].GetValue<string>();
 
-	// Define output schema
 	names = {"path", "type", "dtype", "shape"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
 
 	return std::move(result);
 }
 
-// Init function - scan the file if not already scanned
 static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<H5TreeBindData>();
 	auto result = make_uniq<H5TreeGlobalState>();
 
 	if (!bind_data.scanned) {
-		// Lock for all HDF5 operations (not thread-safe)
-		std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
-		// Open the HDF5 file (with error suppression) - RAII wrapper handles cleanup
 		H5FileHandle file;
 		{
 			H5ErrorSuppressor suppress;
@@ -96,10 +83,8 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 			throw IOException("Failed to open HDF5 file: " + bind_data.filename);
 		}
 
-		// Visit all objects in the file
 		H5O_info_t obj_info;
 		if (H5Oget_info(file, &obj_info, H5O_INFO_BASIC) >= 0) {
-			// Visit all objects recursively
 			H5Ovisit(file, H5_INDEX_NAME, H5_ITER_NATIVE, visit_callback, &bind_data.objects, H5O_INFO_BASIC);
 		}
 
@@ -109,7 +94,6 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 	return std::move(result);
 }
 
-// Scan function - return rows
 static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind_data = data.bind_data->Cast<H5TreeBindData>();
 	auto &gstate = data.global_state->Cast<H5TreeGlobalState>();
@@ -123,7 +107,6 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 		return;
 	}
 
-	// Fill the output chunk
 	auto &path_vector = output.data[0];
 	auto &type_vector = output.data[1];
 	auto &dtype_vector = output.data[2];
