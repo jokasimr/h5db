@@ -17,7 +17,7 @@ H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scient
 - **Read attributes**: Access dataset and group attributes with `h5_attributes()`
 - **Hierarchical navigation**: Full support for nested groups
 - **Multiple datasets**: Read and combine multiple datasets in a single query
-- **Run-start encoding**: Efficient reading of run-length encoded data with automatic expansion
+- **Run-start encoding (RSE)**: Efficient reading of run-length encoded data with automatic expansion
 - **Projection pushdown**: Only read columns actually needed by your query for better performance
 - **Predicate pushdown**: Range filters with static constants on RSE and `h5_index()` columns reduce I/O (e.g., `col > 10`, `col BETWEEN 5 AND 20`)
 - **Type mapping**: Automatic conversion between HDF5 and DuckDB data types
@@ -71,7 +71,6 @@ SELECT * FROM h5_attributes('data.h5', '/dataset_name');
 - **[API.md](API.md)** - Complete API reference for all functions
 - **[RSE_USAGE.md](RSE_USAGE.md)** - Complete guide to run-start encoding support
 - **[docs/DEVELOPER.md](docs/DEVELOPER.md)** - Developer guide (building, testing, development)
-- **[CLAUDE.md](CLAUDE.md)** - Instructions for AI agents working on this project
 
 
 ## Building

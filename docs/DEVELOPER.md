@@ -669,6 +669,5 @@ make clean        # Clean build artifacts
 - **API Reference**: `API.md` - Complete function reference
 - **RSE Documentation**: `RSE_USAGE.md` - Run-Start Encoding guide
 - **Project Status**: `STATUS.md` - Current implementation status
-- **CLAUDE.md**: `CLAUDE.md` - Instructions for AI agents working on this project
 
 For questions or issues, please check existing documentation or open an issue on GitHub.
