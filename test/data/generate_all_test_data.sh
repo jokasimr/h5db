@@ -81,6 +81,7 @@ echo -e "${GREEN}[7/12] Generating nd_cache_test.h5${NC}"
 # ====================================================================
 # Large test data files (test/data/large/)
 # ====================================================================
+mkdir -p "$LARGE_DATA_DIR"
 echo ""
 echo -e "${GREEN}[8/12] Generating large_rse_test.h5 (16 MB)${NC}"
 (cd test/data && python3 create_large_rse_test.py)
