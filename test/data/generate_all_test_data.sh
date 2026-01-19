@@ -38,10 +38,14 @@ if ! python3 -c "import h5py" 2>/dev/null; then
     fi
     if python3 -m pip --version >/dev/null 2>&1; then
         python3 -m pip install --user h5py >/dev/null
+    elif command -v apk >/dev/null 2>&1; then
+        echo -e "${YELLOW}pip still unavailable, installing via apk...${NC}"
+        apk add --no-cache py3-pip py3-h5py >/dev/null
     fi
     if ! python3 -c "import h5py" 2>/dev/null; then
         echo -e "${RED}Error: h5py not found${NC}"
         echo "Install with: python3 -m pip install --user h5py"
+        echo "Or on Alpine: apk add --no-cache py3-pip py3-h5py"
         exit 1
     fi
 fi
