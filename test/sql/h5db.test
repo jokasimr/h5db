@@ -587,6 +587,26 @@ SELECT MIN(idx_alias), MAX(idx_alias) FROM h5_read(
 ----
 0	9
 
+query II
+SELECT idx_alias, integers FROM h5_read(
+    'test/data/simple.h5',
+    h5_alias('idx_alias', h5_index()),
+    '/integers'
+)
+WHERE idx_alias = 5;
+----
+5	5
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE index < 1.2;
+----
+2
+
 # =============================================================================
 # RSE Expansion Tests - Basic Functionality
 # =============================================================================
@@ -609,6 +629,16 @@ SELECT * FROM h5_read(
 7	300
 8	300
 9	300
+
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/run_encoded.h5',
+    '/experiment1/timestamp',
+    h5_alias('state', h5_rse('/experiment1/state_run_starts', '/experiment1/state_values'))
+)
+WHERE state < 200.5;
+----
+7
 
 # Test RSE expansion count
 query I
