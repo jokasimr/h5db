@@ -385,6 +385,7 @@ make tidy-check
 - Automatically runs `make format-check` before each commit
 - Blocks commits with formatting issues
 - To bypass temporarily: `git commit --no-verify`
+- If the hook fails due to missing tools, run `./scripts/setup-dev-env.sh`
 
 ### Thread Safety Considerations
 
