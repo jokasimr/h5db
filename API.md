@@ -148,6 +148,9 @@ Adds a virtual index column for the outermost dimension when used with `h5_read(
 SELECT index, measurements FROM h5_read('data.h5', h5_index(), '/measurements');
 ```
 
+**Predicate pushdown:** range filters on the index column (e.g., `index >= 100`, `index BETWEEN 10 AND 20`) are used to
+reduce I/O when the bounds are static constants.
+
 ---
 
 ### `h5_alias(name, definition)`
@@ -233,7 +236,9 @@ All functions provide clear error messages for common issues:
 ## Performance Notes
 
 - **Projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely for significant performance gains
-- **Predicate pushdown**: For RSE columns, filters are applied during scan to reduce I/O by computing valid row ranges
+- **Predicate pushdown**: Range-like filters with static constants are applied during scan for RSE and `h5_index()` columns
+  to reduce I/O (supported: `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`; not supported: `!=`, `IS DISTINCT FROM`, or expressions
+  like `index + 1 > 10`)
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row
