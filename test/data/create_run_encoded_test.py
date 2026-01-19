@@ -39,6 +39,8 @@ def create_run_encoded_test_file(filename='run_encoded.h5'):
         # Example 2: High compression ratio (realistic scenario)
         grp2 = f.create_group('experiment2')
 
+        np.random.seed(42)
+
         # Regular "long" datasets - 1000 rows
         grp2.create_dataset('measurement', data=np.random.randn(1000))
         grp2.create_dataset('sensor_id', data=np.random.randint(0, 10, size=1000))
