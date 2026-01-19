@@ -1532,7 +1532,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 			}
 
 			if (gstate.someone_is_fetching.load(std::memory_order_acquire)) {
-				chunk1->end_row.wait(end1, std::memory_order_relaxed);
+				gstate.someone_is_fetching.wait(true, std::memory_order_relaxed);
 			}
 		}
 
@@ -1605,7 +1605,6 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
 	if (!range_selection.has_data) {
-		TryRefreshCache(gstate, bind_data);
 		output.SetCardinality(0);
 		return;
 	}
