@@ -43,7 +43,7 @@ def create_large_rse_test(filename='large_rse_test.h5'):
         f.create_dataset('category_run_starts', data=category_run_starts)
         f.create_dataset('category_values', data=category_values)
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
     print(f"  Rows: {n_rows:,}")
     print(f"  status runs: {len(status_run_starts)} (distribution: 100k, 300k, 200k, 400k)")
     print(f"  category runs: {len(category_run_starts)} (alternating 10/20, 50k each)")
@@ -52,4 +52,4 @@ def create_large_rse_test(filename='large_rse_test.h5'):
 
 if __name__ == '__main__':
     create_large_rse_test()
-    print("\n✅ Large RSE test file created successfully!")
+    print("\nOK Large RSE test file created successfully!")

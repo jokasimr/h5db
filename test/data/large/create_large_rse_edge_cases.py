@@ -220,6 +220,6 @@ with h5py.File('large_rse_edge_cases.h5', 'w') as f:
         'single_row, single_entry_runs, chunk_aligned, large_single_run, alternating_runs, mid_chunk_boundaries, many_small_runs, type_variants'
     )
 
-print(f"\n✓ File created successfully!")
+print(f"\nOK File created successfully!")
 print(f"Filename: large_rse_edge_cases.h5")
 print(f"\nTotal test scenarios: 11 groups (1 + 2 + 3 + 3 + 2)")

@@ -83,7 +83,7 @@ def create_run_encoded_test_file(filename='run_encoded.h5'):
         grp5.create_dataset('bad_rle_starts', data=np.arange(5, dtype=np.int64))
         grp5.create_dataset('bad_rle_values', data=np.array([1, 2, 3, 4, 5], dtype=np.int32))
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
     print_file_structure(filename)
 
 
@@ -144,7 +144,7 @@ def demonstrate_expansion():
         else:
             print(f"  expanded (first 10): {expanded[:10]}")
             print(f"  expanded (last 10): {expanded[-10:]}")
-        print(f"  Compression: {length} elements → {compressed_size} values ({ratio:.1f}x)")
+        print(f"  Compression: {length} elements -> {compressed_size} values ({ratio:.1f}x)")
 
 
 if __name__ == '__main__':
@@ -155,4 +155,4 @@ if __name__ == '__main__':
     print("\n" + "=" * 70)
     create_run_encoded_test_file()
 
-    print("\n✅ Run-encoded test file created successfully!")
+    print("\nOK Run-encoded test file created successfully!")

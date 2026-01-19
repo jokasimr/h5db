@@ -43,7 +43,7 @@ def create_nd_cache_test_file(filename="nd_cache_test.h5"):
         _fill_dataset(f["tensor_3d_chunked_large"], (4, 4))
         _fill_dataset(f["tensor_4d_chunked_small"], (2, 2, 2))
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
 
 
 if __name__ == "__main__":

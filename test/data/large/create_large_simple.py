@@ -140,5 +140,5 @@ with h5py.File('large_simple.h5', 'w') as f:
     f.attrs['created_by'] = 'create_large_simple.py'
     f.attrs['purpose'] = 'Trigger DuckDB parallelism (>128K rows/thread) and multiple chunk fetches (8MB/chunk)'
 
-print(f"\n✓ File created successfully!")
+print(f"\nOK File created successfully!")
 print(f"Filename: large_simple.h5")

@@ -107,7 +107,7 @@ with h5py.File('large_pushdown_test.h5', 'w') as f:
     f.attrs['created_by'] = 'create_large_pushdown.py'
     f.attrs['purpose'] = 'Test RSE predicate pushdown with parallel execution'
 
-print(f"\n✓ File created successfully!")
+print(f"\nOK File created successfully!")
 print(f"Filename: large_pushdown_test.h5")
 print(f"\nExpected query behaviors:")
 print(f"  - SELECT WHERE int_rse_values = 30: Should scan {ROWS_PER_RUN:,} rows (1/5 of total)")

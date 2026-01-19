@@ -37,7 +37,7 @@ def create_simple_test_file(filename='simple.h5'):
         f.attrs['version'] = '1.0'
         grp1.attrs['description'] = 'First group'
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
     print_file_structure(filename)
 
 
@@ -66,7 +66,7 @@ def create_types_test_file(filename='types.h5'):
         dt = h5py.string_dtype(encoding='utf-8')
         f.create_dataset('var_strings', data=['variable', 'length', 'strings'], dtype=dt)
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
     print_file_structure(filename)
 
 
@@ -87,7 +87,7 @@ def create_multidim_test_file(filename='multidim.h5'):
         # 4D
         f.create_dataset('array_4d', data=np.arange(120).reshape(5, 4, 3, 2))
 
-    print(f"✓ Created {filename}")
+    print(f"OK Created {filename}")
     print_file_structure(filename)
 
 
@@ -112,7 +112,7 @@ if __name__ == '__main__':
     create_types_test_file()
     create_multidim_test_file()
 
-    print("\n✅ All test files created successfully!")
+    print("\nOK All test files created successfully!")
     print("\nTest files:")
     print("  - simple.h5    (basic datasets and groups)")
     print("  - types.h5     (various data types)")

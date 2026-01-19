@@ -50,7 +50,7 @@ def create_detector_data(f, detector_id):
     )
     grp.create_dataset('event_time_zero', data=event_time_zero)
 
-    print(f"  ✓ detector_{detector_id}: {ROWS_PER_DETECTOR:,} rows, {NUM_RUNS} RSE runs")
+    print(f"  OK detector_{detector_id}: {ROWS_PER_DETECTOR:,} rows, {NUM_RUNS} RSE runs")
 
 
 with h5py.File('large_multithreading.h5', 'w') as f:
@@ -65,6 +65,6 @@ with h5py.File('large_multithreading.h5', 'w') as f:
     f.attrs['created_by'] = 'create_large_multithreading.py'
     f.attrs['total_rows'] = NUM_DETECTORS * ROWS_PER_DETECTOR
 
-print(f"\n✓ File created successfully!")
+print(f"\nOK File created successfully!")
 print(f"Filename: large_multithreading.h5")
 print(f"Total size: Each detector ~{ROWS_PER_DETECTOR * 8 / 1024 / 1024:.0f}MB for uint32 columns")
