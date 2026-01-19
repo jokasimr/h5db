@@ -211,20 +211,31 @@ test/
 └── data/
     ├── *.h5                   # HDF5 test files
     └── *.py                   # Scripts to generate test data
+
+test/sql/large/                # Large SQLLogicTest files (slow)
 ```
 
 ### Running All Tests
 
 ```bash
-# Activate environment and run all tests
-source venv/bin/activate && ./build/release/test/unittest "test/*"
+# Run all tests
+./build/release/test/unittest "test/sql/*"
+
+# Optional: skip slow tests
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+```
+
+If you run tests directly, ensure test data exists first:
+
+```bash
+./test/data/ensure_test_data.sh
 ```
 
 ### Running Specific Tests
 
 ```bash
 # Run a specific test file
-source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test"
+./build/release/test/unittest "test/sql/<testfile>.test"
 ```
 
 ### Running Individual Test Cases
@@ -233,7 +244,7 @@ You can filter tests by pattern:
 
 ```bash
 # Run tests matching a pattern
-source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test" -testcase="*pattern*"
+./build/release/test/unittest "test/sql/<testfile>.test" -testcase="*pattern*"
 ```
 
 ### Using the Makefile Test Target
@@ -241,9 +252,12 @@ source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.t
 The Makefile provides a convenient test target:
 
 ```bash
-# This internally runs: ./build/release/test/unittest "test/*"
+# This internally runs: ./build/release/test/unittest "test/sql/*"
 make test
 ```
+
+`make test` also ensures all HDF5 test data is present by running
+`test/data/ensure_test_data.sh` before executing the tests.
 
 ---
 
@@ -326,7 +340,11 @@ deactivate
    ```
 3. **Run tests** to verify:
    ```bash
-   source venv/bin/activate && ./build/release/test/unittest "test/*"
+   ./build/release/test/unittest "test/sql/*"
+   ```
+   ```bash
+   # Optional: skip slow tests
+   ./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
    ```
 4. **Interactive testing** with DuckDB CLI:
    ```bash
@@ -421,7 +439,7 @@ make tidy-check
 
 3. **Run the new tests**:
    ```bash
-   source venv/bin/activate && ./build/release/test/unittest "test/sql/mytest.test"
+   ./build/release/test/unittest "test/sql/mytest.test"
    ```
 
 ### Debugging
@@ -446,7 +464,7 @@ D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 source venv/bin/activate && make debug
 
 # Run under GDB
-gdb --args ./build/debug/test/unittest "test/*"
+gdb --args ./build/debug/test/unittest "test/sql/*"
 ```
 
 **Viewing test file contents**:
@@ -499,7 +517,8 @@ h5db/
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
 - **`src/h5_functions.cpp`**: Core HDF5 reading logic, RSE scanner
-- **`test/sql/*.test`**: SQLLogicTest test files
+- **`test/sql/*.test`**: SQLLogicTest test files (regular)
+- **`test/sql/large/*.test`**: large SQLLogicTests (slow)
 - **`vcpkg.json`**: Dependencies (HDF5, etc.)
 
 ---
@@ -533,9 +552,10 @@ Solution: HDF5 libraries may not be linked. Check CMakeLists.txt includes:
 
 **Problem**: Tests fail with "File not found"
 ```
-Solution: Tests expect to be run from project root:
+Solution: Ensure test data exists, then run tests from project root:
   cd /path/to/h5db
-  source venv/bin/activate && ./build/release/test/unittest "test/*"
+  ./test/data/ensure_test_data.sh
+  ./build/release/test/unittest "test/sql/*"
 ```
 
 **Problem**: Python script fails with "ModuleNotFoundError"
@@ -547,10 +567,8 @@ Solution: Use the venv Python:
 
 **Problem**: HDF5 test file is outdated
 ```
-Solution: Regenerate test data:
-  cd test/data
-  ../../venv/bin/python create_rse_edge_cases.py
-  cd ../..
+Solution: Regenerate all test data:
+  ./test/data/generate_all_test_data.sh
 ```
 
 ### Environment Issues
@@ -585,11 +603,17 @@ Solution: Ensure vcpkg is bootstrapped and path is set:
 # Build
 source venv/bin/activate && make -j8
 
-# Test everything
-source venv/bin/activate && ./build/release/test/unittest "test/*"
+# Test all suites
+./build/release/test/unittest "test/sql/*"
+
+# Optional: skip slow tests
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+
+# Ensure test data exists (generate if missing)
+./test/data/ensure_test_data.sh
 
 # Test specific file
-source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.test"
+./build/release/test/unittest "test/sql/<testfile>.test"
 
 # Run DuckDB CLI
 ./build/release/duckdb
@@ -600,10 +624,8 @@ source venv/bin/activate && ./build/release/test/unittest "test/sql/<testfile>.t
 # Clean build
 make clean
 
-# Regenerate test data (example)
-cd test/data
-../../venv/bin/python <create_script>.py
-cd ../..
+# Regenerate test data
+./test/data/generate_all_test_data.sh
 ```
 
 ### Environment Variables
@@ -634,7 +656,7 @@ export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
 ```bash
 make              # Release build
 make debug        # Debug build
-make test         # Run tests
+make test         # Run tests (generates data if missing)
 make clean        # Clean build artifacts
 ```
 

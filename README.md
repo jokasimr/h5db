@@ -140,10 +140,10 @@ For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE
 ## Running the Tests
 
 ```bash
-# Run all tests
-source venv/bin/activate && ./build/release/test/unittest "test/*"
+# Run all tests (generates test data if missing)
+./build/release/test/unittest "test/sql/*"
 
-# Or use the makefile target
+# Or use the makefile target (also generates test data if missing)
 make test
 ```
 

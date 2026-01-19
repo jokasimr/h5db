@@ -16,29 +16,28 @@ NC='\033[0m' # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LARGE_DATA_DIR="$PROJECT_ROOT/test/data/large"
 
 echo "==================================================================="
 echo "Generating all test data files"
 echo "==================================================================="
 echo ""
 
-# Check for virtual environment
-if [ -z "$VIRTUAL_ENV" ]; then
-    if [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
-        echo -e "${YELLOW}Activating virtual environment...${NC}"
-        source "$PROJECT_ROOT/venv/bin/activate"
-    else
-        echo -e "${RED}Error: Virtual environment not found at $PROJECT_ROOT/venv${NC}"
-        echo "Run: ./scripts/setup-dev-env.sh"
-        exit 1
-    fi
+# Check for virtual environment (optional)
+if [ -z "$VIRTUAL_ENV" ] && [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
+    echo -e "${YELLOW}Activating virtual environment...${NC}"
+    source "$PROJECT_ROOT/venv/bin/activate"
 fi
 
 # Check for h5py
 if ! python3 -c "import h5py" 2>/dev/null; then
-    echo -e "${RED}Error: h5py not found${NC}"
-    echo "Install with: pip install h5py"
-    exit 1
+    echo -e "${YELLOW}h5py not found, attempting to install...${NC}"
+    python3 -m pip install --user h5py >/dev/null
+    if ! python3 -c "import h5py" 2>/dev/null; then
+        echo -e "${RED}Error: h5py not found${NC}"
+        echo "Install with: pip install h5py"
+        exit 1
+    fi
 fi
 
 cd "$PROJECT_ROOT"
@@ -82,19 +81,19 @@ echo -e "${GREEN}[8/12] Generating large_rse_test.h5 (16 MB)${NC}"
 
 echo ""
 echo -e "${GREEN}[9/12] Generating large_simple.h5 (1.3 GB)${NC}"
-(cd test/data/large && python3 create_large_simple.py)
+(cd "$LARGE_DATA_DIR" && python3 "$PROJECT_ROOT/test/data/large/create_large_simple.py")
 
 echo ""
 echo -e "${GREEN}[10/12] Generating large_multithreading.h5 (153 MB)${NC}"
-(cd test/data/large && python3 create_large_multithreading.py)
+(cd "$LARGE_DATA_DIR" && python3 "$PROJECT_ROOT/test/data/large/create_large_multithreading.py")
 
 echo ""
 echo -e "${GREEN}[11/12] Generating large_pushdown_test.h5 (115 MB)${NC}"
-(cd test/data/large && python3 create_large_pushdown.py)
+(cd "$LARGE_DATA_DIR" && python3 "$PROJECT_ROOT/test/data/large/create_large_pushdown.py")
 
 echo ""
 echo -e "${GREEN}[12/12] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
-(cd test/data/large && python3 create_large_rse_edge_cases.py)
+(cd "$LARGE_DATA_DIR" && python3 "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
 # ====================================================================
 # Summary
@@ -115,9 +114,9 @@ echo "    - multithreading_test.h5  (parallel execution)"
 echo "    - pushdown_test.h5        (predicate pushdown)"
 echo "    - rse_edge_cases.h5       (RSE edge cases)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"
+echo "    - large_rse_test.h5       (RSE multithreading regression)"
 echo ""
 echo "  Large tests (test/data/large/):"
-echo "    - large_rse_test.h5           (16 MB)"
 echo "    - large_simple.h5             (1.3 GB)"
 echo "    - large_multithreading.h5     (153 MB)"
 echo "    - large_pushdown_test.h5      (115 MB)"

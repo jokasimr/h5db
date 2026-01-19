@@ -134,6 +134,38 @@ FROM (
 240	6000000
 
 # =============================================================================
+# Test 3b: RSE Across 5 Detectors (10M rows with RSE expansion)
+# =============================================================================
+
+query II
+SELECT
+  COUNT(DISTINCT event_time_zero) as unique_time_zeros,
+  COUNT(*) as total_rows
+FROM (
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_1/event_id',
+      h5_rse('/detector_1/event_index', '/detector_1/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_2/event_id',
+      h5_rse('/detector_2/event_index', '/detector_2/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_3/event_id',
+      h5_rse('/detector_3/event_index', '/detector_3/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_4/event_id',
+      h5_rse('/detector_4/event_index', '/detector_4/event_time_zero'))
+  UNION ALL
+  SELECT * FROM h5_read('test/data/large/large_multithreading.h5',
+      '/detector_5/event_id',
+      h5_rse('/detector_5/event_index', '/detector_5/event_time_zero'))
+);
+----
+280	10000000
+
+# =============================================================================
 # Test 4: UNION ALL with All 10 Detectors (20M rows total) - Maximum Stress
 # =============================================================================
 

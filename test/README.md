@@ -10,3 +10,18 @@ or
 ```bash
 make test_debug
 ```
+
+`make test` will generate any missing HDF5 test data before running tests.
+
+## Large Tests
+
+Large tests live in `test/sql/large/` as `*.test` and are included in `make test`. To skip them:
+```bash
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+```
+
+## Run Everything
+
+```bash
+make test
+```
