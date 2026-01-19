@@ -78,24 +78,21 @@ SELECT * FROM h5_attributes('data.h5', '/dataset_name');
 ### Quick Start
 
 ```bash
-# 1. Set up VCPKG (one-time setup)
-# (Not in this directory!)
+# 1. Install vcpkg (one-time setup, outside this repo)
 git clone https://github.com/Microsoft/vcpkg.git
 cd vcpkg
 ./bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
+export VCPKG_TOOLCHAIN_PATH="$(pwd)/scripts/buildsystems/vcpkg.cmake"
 cd ..
-# If VCPKG is already installed VCPKG_TOOLCHAIN_PATH should exist.
-# If it does not exist it might be stored in an `.env` file.
-# If it isn't then the path might be `../vcpkg/scripts/buildsystems/vcpkg.cmake`. But you need to verify if that is the case.
 
 # 2. Clone and build h5db
 git clone <repository-url>
 cd h5db
 git submodule update --init --recursive
 
-# 3. Configure environment (update .env with your vcpkg path)
-source venv/bin/activate
+# 3. Make VCPKG_TOOLCHAIN_PATH available for builds
+# Option A: export it in your shell (as above)
+# Option B: put it in a .env file at repo root (see docs/DEVELOPER.md)
 
 # 4. Build
 make -j8
@@ -134,7 +131,7 @@ D SELECT * FROM h5_read(
 D SELECT * FROM h5_attributes('example.h5', '/dataset_name');
 ```
 
-For detailed documentation on run-start encoding, see **[RSE_USAGE.md](RSE_USAGE.md)**.
+See **[API.md](API.md)** for the complete function reference. For run-start encoding details, see **[RSE_USAGE.md](RSE_USAGE.md)**.
 
 ## Running the Tests
 
