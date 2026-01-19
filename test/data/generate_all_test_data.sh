@@ -32,10 +32,16 @@ fi
 # Check for h5py
 if ! python3 -c "import h5py" 2>/dev/null; then
     echo -e "${YELLOW}h5py not found, attempting to install...${NC}"
-    python3 -m pip install --user h5py >/dev/null
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        echo -e "${YELLOW}pip not found, bootstrapping with ensurepip...${NC}"
+        python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+    fi
+    if python3 -m pip --version >/dev/null 2>&1; then
+        python3 -m pip install --user h5py >/dev/null
+    fi
     if ! python3 -c "import h5py" 2>/dev/null; then
         echo -e "${RED}Error: h5py not found${NC}"
-        echo "Install with: pip install h5py"
+        echo "Install with: python3 -m pip install --user h5py"
         exit 1
     fi
 fi
