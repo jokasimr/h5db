@@ -20,6 +20,7 @@
 #include <variant>
 #include <optional>
 #include <algorithm>
+#include <condition_variable>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
@@ -184,6 +185,9 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	// Chunk loading coordination: only one thread loads chunks at a time
 	// Other threads proceed with scanning cached data (enables parallel processing)
 	std::atomic<bool> someone_is_fetching {false};
+	// Fallback for platforms without std::atomic::wait/notify.
+	std::mutex fetch_mutex;
+	std::condition_variable fetch_cv;
 
 	H5ReadGlobalState() : position(0), position_done(0) {
 	}
@@ -1462,12 +1466,28 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 
 				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
-				chunk.end_row.notify_all();
 
 				max_end_row = new_end;
 			}
 		}
 	}
+}
+
+static void NotifyFetchComplete(H5ReadGlobalState &gstate) {
+#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+	gstate.someone_is_fetching.notify_all();
+#else
+	gstate.fetch_cv.notify_all();
+#endif
+}
+
+static void WaitForFetchComplete(H5ReadGlobalState &gstate) {
+#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+	gstate.someone_is_fetching.wait(true, std::memory_order_relaxed);
+#else
+	std::unique_lock<std::mutex> lock(gstate.fetch_mutex);
+	gstate.fetch_cv.wait(lock, [&]() { return !gstate.someone_is_fetching.load(std::memory_order_acquire); });
+#endif
 }
 
 static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
@@ -1499,7 +1519,7 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 		}
 		// Done loading - release the flag so another thread can load next time
 		gstate.someone_is_fetching.store(false);
-		gstate.someone_is_fetching.notify_all();
+		NotifyFetchComplete(gstate);
 	}
 }
 
@@ -1532,7 +1552,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 			}
 
 			if (gstate.someone_is_fetching.load(std::memory_order_acquire)) {
-				gstate.someone_is_fetching.wait(true, std::memory_order_relaxed);
+				WaitForFetchComplete(gstate);
 			}
 		}
 
