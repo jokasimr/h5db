@@ -70,31 +70,55 @@ cd "$PROJECT_ROOT"
 # ====================================================================
 # Core test data files (test/data/)
 # ====================================================================
-echo -e "${GREEN}[1/12] Generating core test files (simple.h5, types.h5, multidim.h5)${NC}"
+echo -e "${GREEN}[1/13] Generating core test files (simple.h5, types.h5, multidim.h5)${NC}"
 (cd test/data && "$PYTHON_BIN" create_simple_types_multidim.py)
 
 echo ""
-echo -e "${GREEN}[2/12] Generating run_encoded.h5${NC}"
+echo -e "${GREEN}[2/13] Generating run_encoded.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_run_encoded_test.py)
 
 echo ""
-echo -e "${GREEN}[3/12] Generating with_attrs.h5${NC}"
+echo -e "${GREEN}[3/13] Generating with_attrs.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_attrs_test.py)
 
 echo ""
-echo -e "${GREEN}[4/12] Generating multithreading_test.h5${NC}"
+echo -e "${GREEN}[4/13] Generating multithreading_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_multithreading_test.py)
 
 echo ""
-echo -e "${GREEN}[5/12] Generating pushdown_test.h5${NC}"
+echo -e "${GREEN}[5/13] Generating pushdown_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_pushdown_test.py)
 
 echo ""
-echo -e "${GREEN}[6/12] Generating rse_edge_cases.h5${NC}"
+echo -e "${GREEN}[6/18] Generating rse_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_rse_edge_cases.py)
 
 echo ""
-echo -e "${GREEN}[7/12] Generating nd_cache_test.h5${NC}"
+echo -e "${GREEN}[7/18] Generating rse_invalid.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_rse_invalid_test.py)
+
+echo ""
+echo -e "${GREEN}[8/18] Generating unsupported_types.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_unsupported_types_test.py)
+
+echo ""
+echo -e "${GREEN}[9/18] Generating attrs_edge_cases.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_attrs_edge_cases.py)
+
+echo ""
+echo -e "${GREEN}[10/18] Generating empty_scalar.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_empty_scalar_test.py)
+
+echo ""
+echo -e "${GREEN}[11/18] Generating names_edge_cases.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_names_edge_cases.py)
+
+echo ""
+echo -e "${GREEN}[12/18] Generating multidim_mismatch.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_multidim_mismatch_test.py)
+
+echo ""
+echo -e "${GREEN}[13/18] Generating nd_cache_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_nd_cache_test.py)
 
 # ====================================================================
@@ -102,23 +126,23 @@ echo -e "${GREEN}[7/12] Generating nd_cache_test.h5${NC}"
 # ====================================================================
 mkdir -p "$LARGE_DATA_DIR"
 echo ""
-echo -e "${GREEN}[8/12] Generating large_rse_test.h5 (16 MB)${NC}"
+echo -e "${GREEN}[14/18] Generating large_rse_test.h5 (16 MB)${NC}"
 (cd test/data && "$PYTHON_BIN" create_large_rse_test.py)
 
 echo ""
-echo -e "${GREEN}[9/12] Generating large_simple.h5 (1.3 GB)${NC}"
+echo -e "${GREEN}[15/18] Generating large_simple.h5 (1.3 GB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_simple.py")
 
 echo ""
-echo -e "${GREEN}[10/12] Generating large_multithreading.h5 (153 MB)${NC}"
+echo -e "${GREEN}[16/18] Generating large_multithreading.h5 (153 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_multithreading.py")
 
 echo ""
-echo -e "${GREEN}[11/12] Generating large_pushdown_test.h5 (115 MB)${NC}"
+echo -e "${GREEN}[17/18] Generating large_pushdown_test.h5 (115 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_pushdown.py")
 
 echo ""
-echo -e "${GREEN}[12/12] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
+echo -e "${GREEN}[18/18] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
 # ====================================================================
@@ -139,6 +163,12 @@ echo "    - with_attrs.h5           (HDF5 attributes)"
 echo "    - multithreading_test.h5  (parallel execution)"
 echo "    - pushdown_test.h5        (predicate pushdown)"
 echo "    - rse_edge_cases.h5       (RSE edge cases)"
+echo "    - rse_invalid.h5          (RSE validation errors)"
+echo "    - unsupported_types.h5    (unsupported HDF5 types)"
+echo "    - attrs_edge_cases.h5     (attribute edge cases)"
+echo "    - empty_scalar.h5         (empty + scalar datasets)"
+echo "    - names_edge_cases.h5     (dataset name edge cases)"
+echo "    - multidim_mismatch.h5    (multidim row-count mismatch)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"
 echo "    - large_rse_test.h5       (RSE multithreading regression)"
 echo ""

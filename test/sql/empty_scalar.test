@@ -1,0 +1,67 @@
+# name: test/sql/empty_scalar.test
+# description: Empty and scalar dataset edge cases
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# h5_tree reporting
+# =============================================================================
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE path = '/scalar_int' AND dtype = 'int32' AND shape = '()'),
+    COUNT(*) FILTER (WHERE path = '/empty_1d' AND dtype = 'int32' AND shape = '(0)')
+FROM h5_tree('test/data/empty_scalar.h5');
+----
+1	1
+
+# =============================================================================
+# Scalar dataset should be rejected by h5_read
+# =============================================================================
+
+statement error
+SELECT * FROM h5_read('test/data/empty_scalar.h5', '/scalar_int');
+----
+IO Error: Dataset has no dimensions
+
+# =============================================================================
+# Empty datasets should yield zero rows
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/empty_scalar.h5', '/empty_1d');
+----
+0
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/empty_scalar.h5', '/empty_2d');
+----
+0
+
+# =============================================================================
+# Row count uses minimum across datasets
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/empty_scalar.h5', '/short', '/long');
+----
+2
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/empty_scalar.h5', '/empty_1d', '/long');
+----
+0
+
+# =============================================================================
+# h5_index is not a regular dataset for row count
+# =============================================================================
+
+statement error
+SELECT * FROM h5_read(
+    'test/data/run_encoded.h5',
+    h5_index(),
+    h5_rse('/experiment1/state_run_starts', '/experiment1/state_values')
+);
+----
+IO Error: h5_read requires at least one regular (non-RSE) dataset to determine row count

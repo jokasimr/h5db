@@ -1,0 +1,34 @@
+# name: test/sql/multidim_mismatch.test
+# description: Mixed multidim row-count mismatch
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# h5_tree shapes
+# =============================================================================
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = '(4, 3)'),
+    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = '(6, 2, 2)')
+FROM h5_tree('test/data/multidim_mismatch.h5');
+----
+1	1
+
+# =============================================================================
+# Row count is min across datasets
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/multidim_mismatch.h5', '/array_2d', '/array_3d');
+----
+4
+
+# Spot-check first row values from both arrays
+query II
+SELECT array_2d[1], array_3d[1][1]
+FROM h5_read('test/data/multidim_mismatch.h5', '/array_2d', '/array_3d')
+LIMIT 1;
+----
+0	0

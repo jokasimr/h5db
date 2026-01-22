@@ -1,0 +1,59 @@
+# name: test/sql/rse_validation_errors.test
+# description: RSE validation errors (invalid run_starts/values)
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# RSE validation errors
+# =============================================================================
+
+# run_starts must begin at 0
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/nonzero_start/run_starts', '/nonzero_start/values')
+);
+----
+IO Error: RSE run_starts must begin with 0, got 1
+
+# run_starts must be strictly increasing
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/not_increasing/run_starts', '/not_increasing/values')
+);
+----
+IO Error: RSE run_starts must be strictly increasing
+
+# run_starts entries must be < num_rows
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/exceeds_length/run_starts', '/exceeds_length/values')
+);
+----
+IO Error: RSE run_starts contains index 11 which exceeds dataset length 10
+
+# run_starts and values sizes must match
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/size_mismatch/run_starts', '/size_mismatch/values')
+);
+----
+IO Error: RSE run_starts and values must have same size. Got 2 and 1
+
+# run_starts must be integer type
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/non_integer_starts/run_starts', '/non_integer_starts/values')
+);
+----
+IO Error: RSE run_starts must be integer type

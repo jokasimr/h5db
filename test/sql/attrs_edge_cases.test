@@ -1,0 +1,57 @@
+# name: test/sql/attrs_edge_cases.test
+# description: Attribute edge cases (empty attrs, vlen strings, multidim)
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# Empty attributes
+# =============================================================================
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/empty_dataset');
+----
+IO Error: Object has no attributes: /empty_dataset
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/empty_group');
+----
+IO Error: Object has no attributes: /empty_group
+
+# =============================================================================
+# String attribute handling (vlen + fixed)
+# =============================================================================
+
+query TT
+SELECT vlen_str_attr, fixed_str_attr
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/string_attrs');
+----
+variable	fixed
+
+# =============================================================================
+# Unsupported multidimensional attribute
+# =============================================================================
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset');
+----
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+
+# =============================================================================
+# Unsupported attribute types
+# =============================================================================
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/enum_attr_dataset');
+----
+IO Error: Attribute 'enum_attr' has unsupported type: Unsupported HDF5 type class: 8
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/compound_attr_dataset');
+----
+IO Error: Attribute 'compound_attr' has unsupported type: Unsupported HDF5 type class: 6
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset');
+----
+IO Error: Attribute 'float16_attr' has unsupported type: Unsupported float size: 2

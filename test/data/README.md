@@ -32,6 +32,12 @@ To ensure test data exists (generate only if missing):
 | `multithreading_test.h5` | `create_multithreading_test.py` | 112 KB | Parallel execution with 10 detectors |
 | `pushdown_test.h5` | `create_pushdown_test.py` | 24 KB | Predicate pushdown optimization |
 | `rse_edge_cases.h5` | `create_rse_edge_cases.py` | 168 KB | RSE edge cases (chunk boundaries, constants, etc.) |
+| `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
+| `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported HDF5 types (enum, compound, float16) |
+| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Attribute edge cases (empty, vlen, multidim) |
+| `empty_scalar.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets (row-count edge cases) |
+| `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
+| `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
 | `nd_cache_test.h5` | `create_nd_cache_test.py` | 310 MB | N-D cache coverage with varied chunking |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
 
@@ -62,6 +68,12 @@ test/data/
 ├── create_multithreading_test.py      # Creates: multithreading_test.h5
 ├── create_pushdown_test.py            # Creates: pushdown_test.h5
 ├── create_rse_edge_cases.py           # Creates: rse_edge_cases.h5
+├── create_rse_invalid_test.py         # Creates: rse_invalid.h5
+├── create_unsupported_types_test.py   # Creates: unsupported_types.h5
+├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
+├── create_empty_scalar_test.py        # Creates: empty_scalar.h5
+├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
+├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
 ├── create_nd_cache_test.py            # Creates: nd_cache_test.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │

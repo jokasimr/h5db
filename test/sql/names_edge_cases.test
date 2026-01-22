@@ -1,0 +1,50 @@
+# name: test/sql/names_edge_cases.test
+# description: Dataset names with spaces/unicode + alias collisions
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# h5_tree name reporting
+# =============================================================================
+
+query III
+SELECT
+    COUNT(*) FILTER (WHERE path = '/with space' AND dtype = 'int32'),
+    COUNT(*) FILTER (WHERE path = '/group with space/data' AND dtype = 'int32'),
+    COUNT(*) FILTER (WHERE path = '/unicode_µ' AND dtype = 'int32')
+FROM h5_tree('test/data/names_edge_cases.h5');
+----
+1	1	1
+
+# =============================================================================
+# h5_read with spaces/unicode in paths
+# =============================================================================
+
+query I
+SELECT SUM("with space") FROM h5_read('test/data/names_edge_cases.h5', '/with space');
+----
+3
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/names_edge_cases.h5', '/group with space/data');
+----
+1
+
+query I
+SELECT SUM("unicode_µ") FROM h5_read('test/data/names_edge_cases.h5', '/unicode_µ');
+----
+6
+
+# =============================================================================
+# Alias collisions
+# =============================================================================
+
+statement error
+DESCRIBE SELECT * FROM h5_read(
+  'test/data/simple.h5',
+  h5_alias('dup', '/integers'),
+  h5_alias('dup', '/floats')
+);
+----
+Binder Error: table "h5_read" has duplicate column name "dup"
