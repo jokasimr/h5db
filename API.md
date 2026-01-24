@@ -178,14 +178,8 @@ SELECT * FROM h5_read(
 
 These functions are provided for testing and verification purposes:
 
-### `h5db(name)`
-Returns a test string. Used for verifying basic extension loading.
-
 ### `h5db_version(name)`
 Returns the HDF5 library version being used.
-
-### `h5db_openssl_version(name)`
-Returns the OpenSSL version (if linked).
 
 ---
 

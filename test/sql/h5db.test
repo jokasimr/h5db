@@ -7,16 +7,6 @@ require h5db
 
 # Test basic extension loading
 query I
-SELECT h5db('Sam');
-----
-H5db Sam 🐥
-
-query I
-SELECT h5db_openssl_version('Michael') ILIKE 'H5db Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
-
-query I
 SELECT h5db_version('test') ILIKE 'H5db test, HDF5 version 1.%';
 ----
 true

@@ -6,9 +6,6 @@
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
-// OpenSSL linked through vcpkg
-#include <openssl/opensslv.h>
-
 // HDF5 linked through vcpkg
 #include <hdf5.h>
 
@@ -16,21 +13,6 @@
 #include "h5_functions.hpp"
 
 namespace duckdb {
-
-inline void H5dbScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "H5db " + name.GetString() + " 🐥");
-	});
-}
-
-inline void H5dbOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "H5db " + name.GetString() + ", my linked OpenSSL version is " +
-		                                           OPENSSL_VERSION_TEXT);
-	});
-}
 
 inline void H5dbVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &name_vector = args.data[0];
@@ -45,15 +27,6 @@ inline void H5dbVersionScalarFun(DataChunk &args, ExpressionState &state, Vector
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register a scalar function
-	auto h5db_scalar_function = ScalarFunction("h5db", {LogicalType::VARCHAR}, LogicalType::VARCHAR, H5dbScalarFun);
-	loader.RegisterFunction(h5db_scalar_function);
-
-	// Register another scalar function
-	auto h5db_openssl_version_scalar_function = ScalarFunction("h5db_openssl_version", {LogicalType::VARCHAR},
-	                                                           LogicalType::VARCHAR, H5dbOpenSSLVersionScalarFun);
-	loader.RegisterFunction(h5db_openssl_version_scalar_function);
-
 	// Register HDF5 version check function
 	auto h5db_version_scalar_function =
 	    ScalarFunction("h5db_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, H5dbVersionScalarFun);

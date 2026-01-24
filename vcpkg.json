@@ -1,6 +1,5 @@
 {
         "dependencies": [
-                "openssl",
                 "hdf5"
         ],
         "vcpkg-configuration": {

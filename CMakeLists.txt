@@ -6,8 +6,6 @@ set(TARGET_NAME h5db)
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
-
 # For clang-tidy builds, HDF5 is optional (only needs headers for static analysis)
 if(CLANG_TIDY)
     find_package(HDF5 COMPONENTS C)
@@ -39,9 +37,7 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# Link OpenSSL and HDF5 in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+# Link HDF5 in both the static library as the loadable extension
 if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME} ${HDF5_C_LIBRARIES})
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${HDF5_C_LIBRARIES})
