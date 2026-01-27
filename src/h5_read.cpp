@@ -368,6 +368,9 @@ static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file
 // The callback is called for each string: callback(index, string_value)
 static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hid_t file_space, idx_t count,
                             std::function<void(idx_t, const std::string &)> callback) {
+	if (count == 0) {
+		return;
+	}
 	htri_t is_variable = H5Tis_variable_str(h5_type);
 
 	if (is_variable > 0) {
@@ -1333,9 +1336,13 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 
 		// Access typed vector directly (no Value overhead)
 		const auto &typed_values = std::get<std::vector<T>>(state.values);
+		if (state.run_starts.empty() && typed_values.empty()) {
+			// Empty RSE encoding: emit NULLs for the requested rows
+			result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(result_vector, true);
+			return;
+		}
 
-		// THREAD-SAFE: Find which run contains this position (binary search)
-		// Don't modify state - multiple threads may call this simultaneously!
 		auto it = std::upper_bound(state.run_starts.begin(), state.run_starts.end(), position);
 		idx_t current_run = (it - state.run_starts.begin()) - 1;
 		idx_t next_run_start =

@@ -244,5 +244,28 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
         values=np.array([10, 20], dtype=np.int32),
     )
 
+    # ==========================================================================
+    # Test 19: Empty run_starts and values (should produce NULLs)
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'empty_runs',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([], dtype=np.uint64),
+        values=np.array([], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 20: Empty run_starts and values (string type, should produce NULLs)
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'empty_runs_string',
+        index_data=np.arange(4, dtype=np.int32),
+        run_starts=np.array([], dtype=np.uint64),
+        values=np.array([], dtype=h5py.string_dtype()),
+        dtype=h5py.string_dtype(),
+    )
+
 print("Created rse_edge_cases.h5 successfully!")
 print(f"Chunk size used: {CHUNK_SIZE}")
