@@ -492,7 +492,10 @@ h5db/
 │
 ├── src/                     # Source code
 │   ├── h5db_extension.cpp   # Extension entry point
-│   └── h5_functions.cpp     # Main implementation
+│   ├── h5_read.cpp          # h5_read implementation
+│   ├── h5_tree.cpp          # h5_tree implementation
+│   ├── h5_attributes.cpp    # h5_attributes implementation
+│   └── h5_common.cpp        # Shared HDF5 helpers
 │
 ├── test/                    # Test suite
 │   ├── sql/                 # SQLLogicTest files
@@ -504,11 +507,6 @@ h5db/
 │   ├── DEVELOPER.md         # This file
 │   └── UPDATING.md
 │
-├── benchmark/               # Performance benchmarks
-│   ├── generate_benchmark_data.py
-│   ├── run_benchmark_final.sql
-│   └── run_multiple.sh
-│
 ├── duckdb/                  # DuckDB submodule
 ├── extension-ci-tools/      # CI/CD tooling
 └── venv/                    # Python virtual environment
@@ -517,7 +515,10 @@ h5db/
 ### Key Files
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
-- **`src/h5_functions.cpp`**: Core HDF5 reading logic, RSE scanner
+- **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner
+- **`src/h5_tree.cpp`**: Tree/metadata listing
+- **`src/h5_attributes.cpp`**: Attribute reader
+- **`src/h5_common.cpp`**: Shared HDF5 helpers
 - **`test/sql/*.test`**: SQLLogicTest test files (regular)
 - **`test/sql/large/*.test`**: large SQLLogicTests (slow)
 - **`vcpkg.json`**: Dependencies (HDF5, etc.)
@@ -668,6 +669,5 @@ make clean        # Clean build artifacts
 - **Main README**: `README.md` - Project overview and usage
 - **API Reference**: `API.md` - Complete function reference
 - **RSE Documentation**: `RSE_USAGE.md` - Run-Start Encoding guide
-- **Project Status**: `STATUS.md` - Current implementation status
 
 For questions or issues, please check existing documentation or open an issue on GitHub.
