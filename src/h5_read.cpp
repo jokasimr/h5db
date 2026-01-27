@@ -575,6 +575,11 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 		idx_t current_start = 0;
 		bool in_range = false;
 
+		// Leading NULL segment (if any) never satisfies comparison filters.
+		if (!rse_state.run_starts.empty()) {
+			current_start = rse_state.run_starts[0];
+		}
+
 		for (size_t i = 0; i < typed_values.size(); i++) {
 			const T &value = typed_values[i];
 			Value run_value = Value::CreateValue(value);
@@ -625,9 +630,6 @@ static vector<idx_t> LoadRunStarts(const RSEColumnSpec &spec, hid_t starts_ds, s
 		throw IOException("Failed to read run_starts from: " + spec.run_starts_path);
 	}
 
-	if (num_runs > 0 && run_starts[0] != 0) {
-		throw IOException("RSE run_starts must begin with 0, got " + std::to_string(run_starts[0]));
-	}
 	for (size_t i = 1; i < num_runs; i++) {
 		if (run_starts[i] <= run_starts[i - 1]) {
 			throw IOException("RSE run_starts must be strictly increasing");
@@ -1343,6 +1345,20 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 			return;
 		}
 
+		idx_t result_offset = 0;
+
+		// Leading NULL segment if first run starts after 0
+		if (!state.run_starts.empty() && position < state.run_starts[0]) {
+			result_offset = std::min<idx_t>(to_read, state.run_starts[0] - position);
+			if (result_offset == to_read) {
+				result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+				ConstantVector::SetNull(result_vector, true);
+				return;
+			}
+			position += result_offset;
+			to_read -= result_offset;
+		}
+
 		auto it = std::upper_bound(state.run_starts.begin(), state.run_starts.end(), position);
 		idx_t current_run = (it - state.run_starts.begin()) - 1;
 		idx_t next_run_start =
@@ -1351,7 +1367,7 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 		// OPTIMIZATION: Check if entire chunk belongs to single run
 		// With avg run length ~10k and chunk size 2048, this is true ~83% of the time!
 		idx_t rows_in_current_run = next_run_start - position;
-		if (rows_in_current_run >= to_read) {
+		if (result_offset == 0 && rows_in_current_run >= to_read) {
 			// Entire chunk is one value - emit CONSTANT_VECTOR (no fill loop needed!)
 			result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 			const T &run_value = typed_values[current_run];
@@ -1368,6 +1384,11 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 
 		// Fall back to batched fill when chunk spans multiple runs
 		result_vector.SetVectorType(VectorType::FLAT_VECTOR);
+		if (result_offset > 0) {
+			for (idx_t i = 0; i < result_offset; i++) {
+				FlatVector::SetNull(result_vector, i, true);
+			}
+		}
 		idx_t i = 0;
 		while (i < to_read) {
 			// Calculate current row position
@@ -1385,13 +1406,13 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 				// VARCHAR: need to call StringVector::AddString for each
 				auto result_data = FlatVector::GetData<string_t>(result_vector);
 				for (idx_t j = 0; j < rows_to_fill; j++) {
-					result_data[i + j] = StringVector::AddString(result_vector, run_value);
+					result_data[result_offset + i + j] = StringVector::AddString(result_vector, run_value);
 				}
 			} else {
 				// Numeric types: direct assignment - compiler can vectorize this!
 				auto result_data = FlatVector::GetData<T>(result_vector);
 				for (idx_t j = 0; j < rows_to_fill; j++) {
-					result_data[i + j] = run_value;
+					result_data[result_offset + i + j] = run_value;
 				}
 			}
 

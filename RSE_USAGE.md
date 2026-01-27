@@ -207,8 +207,8 @@ with h5py.File('experiment.h5', 'w') as f:
 
 ### Indexing Rules
 
-- **Zero-indexed**: `run_starts[0]` must equal 0
 - **Strictly increasing**: Each value must be greater than the previous
+- **Leading NULLs**: If `run_starts[0] > 0`, rows before the first run start are returned as NULLs
 - **Implicit end**: The last run extends to the end of the dataset
 
 ### Example
@@ -272,10 +272,9 @@ For remote files (S3, HTTP):
 ### Automatic Validation
 
 h5db automatically validates:
-1. ✅ `run_starts[0] == 0`
-2. ✅ `run_starts` is strictly increasing
-3. ✅ `run_starts.size() == values.size()`
-4. ✅ At least one regular column exists
+1. ✅ `run_starts` is strictly increasing
+2. ✅ `run_starts.size() == values.size()`
+3. ✅ At least one regular column exists
 
 ### Error Messages
 
@@ -287,9 +286,9 @@ IO Error: h5_read requires at least one regular (non-RSE) dataset to determine r
 
 **Error: Invalid run_starts**
 ```
-IO Error: RSE run_starts must begin with 0, got 1
+IO Error: RSE run_starts must be strictly increasing
 ```
-**Solution**: Ensure `run_starts[0] == 0`
+**Solution**: Ensure `run_starts` is strictly increasing
 
 **Error: Size mismatch**
 ```
@@ -357,11 +356,10 @@ f['state_run_starts'].attrs['values_dataset'] = 'state_values'
 
 **Symptom**: Wrong values in output
 
-**Cause**: run_starts doesn't start at 0 or isn't sorted
+**Cause**: run_starts isn't strictly increasing
 
 **Solution**: Validate run_starts array:
 ```python
-assert run_starts[0] == 0
 assert all(run_starts[i] < run_starts[i+1] for i in range(len(run_starts)-1))
 ```
 

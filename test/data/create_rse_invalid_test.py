@@ -14,10 +14,6 @@ with h5py.File("rse_invalid.h5", "w") as f:
     # Regular dataset for row count (10 rows).
     f.create_dataset("regular", data=np.arange(10, dtype=np.int32))
 
-    # run_starts does not begin at 0.
-    grp = f.create_group("nonzero_start")
-    create_case(grp, [1, 5], [100, 200], np.uint64, np.int32)
-
     # run_starts not strictly increasing (duplicate).
     grp = f.create_group("not_increasing")
     create_case(grp, [0, 5, 5], [100, 200, 300], np.uint64, np.int32)

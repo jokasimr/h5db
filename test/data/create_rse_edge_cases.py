@@ -267,5 +267,43 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
         dtype=h5py.string_dtype(),
     )
 
+    # ==========================================================================
+    # Test 21: Leading NULLs (first run does not start at 0)
+    # Rows 0-1 -> NULL, 2-3 -> 10, 4-5 -> 20
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'leading_nulls',
+        index_data=np.arange(6, dtype=np.int32),
+        run_starts=np.array([2, 4], dtype=np.uint64),
+        values=np.array([10, 20], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 22: Leading NULLs with string values
+    # Rows 0-2 -> NULL, 3-4 -> "alpha", 5-6 -> "beta"
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'leading_nulls_string',
+        index_data=np.arange(7, dtype=np.int32),
+        run_starts=np.array([3, 5], dtype=np.uint64),
+        values=np.array(['alpha', 'beta'], dtype=h5py.string_dtype()),
+        dtype=h5py.string_dtype(),
+    )
+
+    # ==========================================================================
+    # Test 23: Leading NULLs with mid-chunk boundary transition
+    # Rows 0-99 -> NULL, 100-2199 -> 1, 2200-2999 -> 2
+    # First run starts mid-chunk, second run crosses chunk boundary (2048)
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'leading_nulls_mid_chunk',
+        index_data=np.arange(3000, dtype=np.int32),
+        run_starts=np.array([100, 2200], dtype=np.uint64),
+        values=np.array([1, 2], dtype=np.int32),
+    )
+
 print("Created rse_edge_cases.h5 successfully!")
 print(f"Chunk size used: {CHUNK_SIZE}")

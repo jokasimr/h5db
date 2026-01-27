@@ -41,6 +41,13 @@ def main():
         f.create_dataset('/string_rse_starts', data=run_starts)
         f.create_dataset('/string_rse_values', data=values_string)
 
+        # RSE with leading NULLs (first run starts after 0)
+        # Rows 0-99: NULL, 100-299: 10, 300-699: 20, 700-999: 30
+        leading_null_starts = np.array([100, 300, 700], dtype=np.uint64)
+        leading_null_values = np.array([10, 20, 30], dtype=np.int32)
+        f.create_dataset('/leading_null_rse_starts', data=leading_null_starts)
+        f.create_dataset('/leading_null_rse_values', data=leading_null_values)
+
         # Regular column for comparison (0-999)
         regular = np.arange(1000, dtype=np.int32)
         f.create_dataset('/regular', data=regular)
@@ -55,6 +62,7 @@ def main():
     print("  - Sorted float32 RSE column (values: 1.5, 2.5, 3.5, 4.5, 5.5)")
     print("  - Sorted int64 RSE column (values: 100, 200, 300, 400, 500)")
     print("  - String RSE column (not optimized)")
+    print("  - Leading NULL int32 RSE column (rows 0-99 NULL, 100-299:10, 300-699:20, 700-999:30)")
     print("  - Regular int32 column (0-999)")
     print("  - Regular float64 column (0.0-99.9)")
     print("  - Each RSE run spans 200 rows")

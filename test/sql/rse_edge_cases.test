@@ -639,6 +639,131 @@ SELECT COUNT(*) FILTER (WHERE values IS NOT NULL) FROM h5_read(
 0
 
 # =============================================================================
+# Test: Leading NULLs when first run starts after 0
+# =============================================================================
+
+query I
+SELECT COUNT(*) FILTER (WHERE values IS NULL) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls/index',
+    h5_rse('/leading_nulls/run_starts', '/leading_nulls/values')
+);
+----
+2
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls/index',
+    h5_rse('/leading_nulls/run_starts', '/leading_nulls/values')
+)
+WHERE values IS NULL;
+----
+0	1
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls/index',
+    h5_rse('/leading_nulls/run_starts', '/leading_nulls/values')
+)
+WHERE values = 10;
+----
+2	3
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls/index',
+    h5_rse('/leading_nulls/run_starts', '/leading_nulls/values')
+)
+WHERE values = 20;
+----
+4	5
+
+# IS NULL / IS NOT NULL on leading NULLs
+query II
+SELECT COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values IS NOT NULL)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls/index',
+    h5_rse('/leading_nulls/run_starts', '/leading_nulls/values')
+);
+----
+2	4
+
+# =============================================================================
+# Test: Leading NULLs with string values
+# =============================================================================
+
+query II
+SELECT COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values IS NOT NULL)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_string/index',
+    h5_rse('/leading_nulls_string/run_starts', '/leading_nulls_string/values')
+);
+----
+3	4
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_string/index',
+    h5_rse('/leading_nulls_string/run_starts', '/leading_nulls_string/values')
+)
+WHERE values = 'alpha';
+----
+3	4
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_string/index',
+    h5_rse('/leading_nulls_string/run_starts', '/leading_nulls_string/values')
+)
+WHERE values = 'beta';
+----
+5	6
+
+# =============================================================================
+# Test: Leading NULLs with mid-chunk boundary transition
+# =============================================================================
+
+query II
+SELECT COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values IS NOT NULL)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_mid_chunk/index',
+    h5_rse('/leading_nulls_mid_chunk/run_starts', '/leading_nulls_mid_chunk/values')
+);
+----
+100	2900
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_mid_chunk/index',
+    h5_rse('/leading_nulls_mid_chunk/run_starts', '/leading_nulls_mid_chunk/values')
+)
+WHERE values = 1;
+----
+100	2199
+
+query II
+SELECT MIN(index), MAX(index) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/leading_nulls_mid_chunk/index',
+    h5_rse('/leading_nulls_mid_chunk/run_starts', '/leading_nulls_mid_chunk/values')
+)
+WHERE values = 2;
+----
+2200	2999
+
+# =============================================================================
 # Type Detection Tests
 # =============================================================================
 

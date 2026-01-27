@@ -123,6 +123,67 @@ SELECT COUNT(*), MAX(regular) FROM h5_read(
 ----
 400	399
 
+# =============================================================================
+# Leading NULLs in RSE columns (pushdown should ignore NULL prefix)
+# =============================================================================
+
+# Rows 0-99 are NULL, 100-299=10, 300-699=20, 700-999=30
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+) WHERE leading_null_rse_values IS NULL;
+----
+100
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+) WHERE leading_null_rse_values = 10;
+----
+200	100	299
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+) WHERE leading_null_rse_values < 15;
+----
+200	100	299
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+) WHERE leading_null_rse_values <= 20;
+----
+600	100	699
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+) WHERE leading_null_rse_values > 10;
+----
+700	300	999
+
+query II
+SELECT COUNT(*) FILTER (WHERE leading_null_rse_values IS NULL),
+       COUNT(*) FILTER (WHERE leading_null_rse_values IS NOT NULL)
+FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/leading_null_rse_starts', '/leading_null_rse_values')
+);
+----
+100	900
+
 # Test: EQUAL (should only include rows 400-599 with value 30)
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular) FROM h5_read(

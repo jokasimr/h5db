@@ -8,16 +8,6 @@ require h5db
 # RSE validation errors
 # =============================================================================
 
-# run_starts must begin at 0
-statement error
-SELECT * FROM h5_read(
-    'test/data/rse_invalid.h5',
-    '/regular',
-    h5_rse('/nonzero_start/run_starts', '/nonzero_start/values')
-);
-----
-IO Error: RSE run_starts must begin with 0, got 1
-
 # run_starts must be strictly increasing
 statement error
 SELECT * FROM h5_read(

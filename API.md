@@ -116,9 +116,12 @@ Creates a run-start encoded (RSE) column specification for use with `h5_read()`.
 **Returns:** STRUCT with fields `{encoding, run_starts, values}`
 
 **Requirements:**
-- `run_starts` must be an integer dataset starting at 0 and strictly increasing
+- `run_starts` must be an integer dataset, strictly increasing
 - `run_starts` and `values` must have the same length
 - At least one regular (non-RSE) column must be present in the `h5_read()` call to determine total row count
+
+**Notes:**
+- If `run_starts[0] > 0`, rows before the first run start are returned as NULLs.
 
 **Example:**
 ```sql
@@ -223,7 +226,7 @@ All functions provide clear error messages for common issues:
 - **File not found**: "IO Error: Failed to open HDF5 file"
 - **Invalid path**: "IO Error: Dataset or group not found"
 - **Unsupported type**: "IO Error: Unsupported HDF5 type"
-- **Invalid RSE data**: "IO Error: run_starts must begin at 0 and be strictly increasing"
+- **Invalid RSE data**: "IO Error: RSE run_starts must be strictly increasing"
 
 ---
 
