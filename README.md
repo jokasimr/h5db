@@ -22,6 +22,7 @@ H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scient
 - **Predicate pushdown**: Range filters with static constants on RSE and `h5_index()` columns reduce I/O (e.g., `col > 10`, `col BETWEEN 5 AND 20`)
 - **Type mapping**: Automatic conversion between HDF5 and DuckDB data types
 - **Multi-dimensional arrays**: Support for 1D-4D datasets using DuckDB's array types
+- **Scalar datasets**: Read rank-0 datasets as constant columns
 - **Virtual index column**: Add a row index column with `h5_index()`
 - **Column aliasing**: Rename columns with `h5_alias()`
 
@@ -39,6 +40,9 @@ SELECT * FROM h5_read('data.h5', '/group1/subgroup/dataset');
 
 -- Read multiple datasets (horizontal stacking)
 SELECT * FROM h5_read('data.h5', '/dataset1', '/dataset2');
+
+-- Read scalar datasets (returned as constants)
+SELECT * FROM h5_read('data.h5', '/scalar_value');
 
 -- Add a virtual index column
 SELECT * FROM h5_read('data.h5', h5_index(), '/dataset1');

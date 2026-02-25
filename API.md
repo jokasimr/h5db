@@ -12,10 +12,13 @@ Lists all groups and datasets in an HDF5 file.
 - `filename` (VARCHAR): Path to the HDF5 file
 
 **Returns:** Table with columns:
-- `name` (VARCHAR): Object name/path
-- `type` (VARCHAR): Object type (e.g., "int32", "float64", "string", "GROUP")
-- `ndims` (INTEGER): Number of dimensions (0 for scalars, 1+ for arrays)
-- `shape` (VARCHAR): Shape of the dataset (e.g., "[100, 4, 3]")
+- `path` (VARCHAR): Object name/path
+- `type` (VARCHAR): Object type (`group` or `dataset`)
+- `dtype` (VARCHAR): Data type for datasets (e.g., `int32`, `float64`, `string`)
+- `shape` (LIST<UBIGINT>): Dataset dimensions
+  - `NULL` for groups
+  - `[]` for scalar datasets
+  - `[d0, d1, ...]` for array datasets
 
 **Example:**
 ```sql
@@ -38,6 +41,11 @@ Reads data from one or more datasets in an HDF5 file.
 **Returns:** Table with one column per dataset
 
 **Column Naming:** Column names are extracted from the last component of the dataset path (e.g., `/group/data` → column `data`)
+
+**Scalar Datasets:**
+- Scalar (rank-0) datasets are returned as constant columns.
+- If all selected datasets are scalar, `h5_read()` returns a single row.
+- If any non-scalar dataset is present, scalar columns are broadcast to the row count of the non-scalar datasets.
 
 **Type Support:**
 - Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64
@@ -216,6 +224,7 @@ HDF5 arrays are mapped to DuckDB ARRAY types:
 | [N, M, P, Q] | N rows of TYPE[Q][P][M] |
 
 Note: Arrays with more than 4 dimensions are not currently supported.
+Note: Multi-dimensional string datasets are not currently supported.
 
 ---
 
@@ -248,8 +257,9 @@ All functions provide clear error messages for common issues:
 1. **Compound types** (HDF5 structs) are not currently supported
 2. **Enum types** are not currently supported
 3. **Datasets with >4 dimensions** are not supported
-4. **Reference types** (links to other datasets) are not supported
-5. **Variable-length array types** are not supported (fixed-size arrays only)
+4. **Multi-dimensional string datasets** are not supported
+5. **Reference types** (links to other datasets) are not supported
+6. **Variable-length array types** are not supported (fixed-size arrays only)
 
 ---
 

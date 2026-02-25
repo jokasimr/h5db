@@ -47,7 +47,7 @@ SELECT * FROM h5_read(
 );
 ```
 
-**Important**: At least one regular (non-RSE) column is required to determine the total row count.
+**Important**: At least one non-scalar regular (non-RSE) column is required to determine the total row count.
 
 ## Complete Examples
 
