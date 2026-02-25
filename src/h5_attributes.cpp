@@ -24,6 +24,7 @@ struct H5AttributesBindData : public TableFunctionData {
 	std::string filename;
 	std::string object_path;
 	std::vector<AttributeInfo> attributes;
+	bool swmr = false;
 };
 
 struct H5AttributesGlobalState : public GlobalTableFunctionState {
@@ -138,11 +139,12 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 
 	result->filename = input.inputs[0].GetValue<string>();
 	result->object_path = input.inputs[1].GetValue<string>();
+	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	H5ErrorSuppressor suppress_errors;
-	H5FileHandle file(result->filename.c_str(), H5F_ACC_RDONLY);
+	H5FileHandle file(result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
 	if (!file.is_valid()) {
 		throw IOException("Failed to open HDF5 file: " + result->filename);
 	}
@@ -192,7 +194,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	H5ErrorSuppressor suppress_errors;
-	H5FileHandle file(bind_data.filename.c_str(), H5F_ACC_RDONLY);
+	H5FileHandle file(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 	if (!file.is_valid()) {
 		throw IOException("Failed to open HDF5 file: " + bind_data.filename);
 	}
@@ -278,6 +280,7 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	TableFunction h5_attributes("h5_attributes", {LogicalType::VARCHAR, LogicalType::VARCHAR}, H5AttributesScan,
 	                            H5AttributesBind, H5AttributesInit);
 	h5_attributes.name = "h5_attributes";
+	h5_attributes.named_parameters["swmr"] = LogicalType::BOOLEAN;
 
 	loader.RegisterFunction(h5_attributes);
 }

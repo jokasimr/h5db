@@ -10,6 +10,7 @@ Lists all groups and datasets in an HDF5 file.
 
 **Parameters:**
 - `filename` (VARCHAR): Path to the HDF5 file
+- `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
 - `path` (VARCHAR): Object name/path
@@ -23,6 +24,7 @@ Lists all groups and datasets in an HDF5 file.
 **Example:**
 ```sql
 SELECT * FROM h5_tree('data.h5');
+SELECT * FROM h5_tree('data.h5', swmr := true);
 ```
 
 ---
@@ -37,6 +39,7 @@ Reads data from one or more datasets in an HDF5 file.
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
 - Additional dataset paths can be provided (variadic arguments)
+- `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with one column per dataset
 
@@ -75,6 +78,9 @@ SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
 
 -- Rename a column definition
 SELECT * FROM h5_read('data.h5', h5_alias('idx', h5_index()), '/measurements');
+
+-- Enable SWMR read mode
+SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 ```
 
 ---
@@ -86,6 +92,7 @@ Reads attributes from a dataset or group.
 **Parameters:**
 - `filename` (VARCHAR): Path to the HDF5 file
 - `object_path` (VARCHAR): Path to the dataset or group (use empty string or '/' for root)
+- `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Single-row table where each column represents one attribute
 - Column names are the attribute names
@@ -107,6 +114,9 @@ SELECT * FROM h5_attributes('data.h5', '/experiment1');
 
 -- Read file-level (root) attributes
 SELECT * FROM h5_attributes('data.h5', '/');
+
+-- Enable SWMR read mode
+SELECT * FROM h5_attributes('data.h5', '/measurements', swmr := true);
 ```
 
 ---
@@ -191,6 +201,18 @@ These functions are provided for testing and verification purposes:
 
 ### `h5db_version(name)`
 Returns the HDF5 library version being used.
+
+---
+
+## Settings
+
+### `h5db_swmr_default` (BOOLEAN)
+Default SWMR read mode for h5db table functions. Defaults to `false`.
+
+**Example:**
+```sql
+SET h5db_swmr_default = true;
+```
 
 ---
 

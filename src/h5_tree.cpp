@@ -19,6 +19,7 @@ struct H5TreeBindData : public TableFunctionData {
 	std::string filename;
 	mutable std::vector<H5ObjectInfo> objects;
 	mutable bool scanned = false;
+	bool swmr = false;
 };
 
 struct H5TreeGlobalState : public GlobalTableFunctionState {
@@ -79,6 +80,7 @@ static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunction
 	auto result = make_uniq<H5TreeBindData>();
 
 	result->filename = input.inputs[0].GetValue<string>();
+	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 
 	names = {"path", "type", "dtype", "shape"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
@@ -97,7 +99,7 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 		H5FileHandle file;
 		{
 			H5ErrorSuppressor suppress;
-			file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY);
+			file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 		}
 
 		if (!file.is_valid()) {
@@ -163,6 +165,7 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 void RegisterH5TreeFunction(ExtensionLoader &loader) {
 	TableFunction h5_tree("h5_tree", {LogicalType::VARCHAR}, H5TreeScan, H5TreeBind, H5TreeInit);
 	h5_tree.name = "h5_tree";
+	h5_tree.named_parameters["swmr"] = LogicalType::BOOLEAN;
 
 	loader.RegisterFunction(h5_tree);
 }

@@ -12,6 +12,10 @@ namespace duckdb {
 // This prevents crashes when DuckDB parallelizes table function execution
 extern std::recursive_mutex hdf5_global_mutex;
 
+// Resolve SWMR read mode from named parameters or default setting.
+// Named parameter "swmr" takes precedence over h5db_swmr_default.
+bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters);
+
 // Type tag for compile-time type dispatch
 template <typename T>
 struct TypeTag {

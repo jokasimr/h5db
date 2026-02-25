@@ -68,6 +68,9 @@ GROUP BY status;
 
 -- Read attributes from a dataset or group
 SELECT * FROM h5_attributes('data.h5', '/dataset_name');
+
+-- Enable SWMR read mode for a single call
+SELECT * FROM h5_read('data.h5', '/dataset_name', swmr := true);
 ```
 
 ### Documentation
@@ -136,6 +139,22 @@ D SELECT * FROM h5_attributes('example.h5', '/dataset_name');
 ```
 
 See **[API.md](API.md)** for the complete function reference. For run-start encoding details, see **[RSE_USAGE.md](RSE_USAGE.md)**.
+
+### SWMR (Single Writer Multiple Reader)
+
+By default, SWMR is disabled. You can enable it per call:
+
+```sql
+SELECT * FROM h5_read('data.h5', '/dataset_name', swmr := true);
+SELECT * FROM h5_tree('data.h5', swmr := true);
+SELECT * FROM h5_attributes('data.h5', '/dataset_name', swmr := true);
+```
+
+Or set the default for the session:
+
+```sql
+SET h5db_swmr_default = true;
+```
 
 ## Running the Tests
 

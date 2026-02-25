@@ -1,0 +1,85 @@
+# name: test/sql/swmr.test
+# description: swmr open behavior
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# SWMR files - normal reads should work
+# =============================================================================
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_enabled.h5', '/data');
+----
+10
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_disabled.h5', '/data');
+----
+10
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_enabled.h5', '/data');
+----
+42
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_disabled.h5', '/data');
+----
+42
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_enabled.h5');
+----
+2
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_disabled.h5');
+----
+2
+
+# =============================================================================
+# SWMR enabled opens - observed to succeed for both files
+# =============================================================================
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_enabled.h5', '/data', swmr := true);
+----
+10
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_disabled.h5', '/data', swmr := true);
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_enabled.h5', swmr := true);
+----
+2
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_disabled.h5', swmr := true);
+----
+2
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_enabled.h5', '/data', swmr := true);
+----
+42
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_disabled.h5', '/data', swmr := true);
+----
+42
+
+# =============================================================================
+# Default setting
+# =============================================================================
+
+statement ok
+SET h5db_swmr_default = true;
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_enabled.h5', '/data');
+----
+10

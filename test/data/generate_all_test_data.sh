@@ -114,38 +114,42 @@ echo -e "${GREEN}[11/18] Generating names_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_names_edge_cases.py)
 
 echo ""
-echo -e "${GREEN}[12/18] Generating multidim_mismatch.h5${NC}"
+echo -e "${GREEN}[12/20] Generating multidim_mismatch.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_multidim_mismatch_test.py)
 
-echo -e "${GREEN}[13/18] Generating many_groups.h5${NC}"
+echo -e "${GREEN}[13/20] Generating many_groups.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_many_groups_test.py)
 
 echo ""
-echo -e "${GREEN}[13/18] Generating nd_cache_test.h5${NC}"
+echo -e "${GREEN}[14/20] Generating nd_cache_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_nd_cache_test.py)
+
+echo ""
+echo -e "${GREEN}[15/20] Generating swmr test files${NC}"
+(cd test/data && "$PYTHON_BIN" create_swmr_test.py)
 
 # ====================================================================
 # Large test data files (test/data/large/)
 # ====================================================================
 mkdir -p "$LARGE_DATA_DIR"
 echo ""
-echo -e "${GREEN}[14/18] Generating large_rse_test.h5 (16 MB)${NC}"
+echo -e "${GREEN}[16/20] Generating large_rse_test.h5 (16 MB)${NC}"
 (cd test/data && "$PYTHON_BIN" create_large_rse_test.py)
 
 echo ""
-echo -e "${GREEN}[15/18] Generating large_simple.h5 (1.3 GB)${NC}"
+echo -e "${GREEN}[17/20] Generating large_simple.h5 (1.3 GB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_simple.py")
 
 echo ""
-echo -e "${GREEN}[16/18] Generating large_multithreading.h5 (153 MB)${NC}"
+echo -e "${GREEN}[18/20] Generating large_multithreading.h5 (153 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_multithreading.py")
 
 echo ""
-echo -e "${GREEN}[17/18] Generating large_pushdown_test.h5 (115 MB)${NC}"
+echo -e "${GREEN}[19/20] Generating large_pushdown_test.h5 (115 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_pushdown.py")
 
 echo ""
-echo -e "${GREEN}[18/18] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
+echo -e "${GREEN}[20/20] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
 # ====================================================================
@@ -173,6 +177,8 @@ echo "    - empty_scalar.h5         (empty + scalar datasets)"
 echo "    - names_edge_cases.h5     (dataset name edge cases)"
 echo "    - multidim_mismatch.h5    (multidim row-count mismatch)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"
+echo "    - swmr_enabled.h5         (SWMR flag enabled)"
+echo "    - swmr_disabled.h5        (SWMR flag disabled)"
 echo "    - large_rse_test.h5       (RSE multithreading regression)"
 echo ""
 echo "  Large tests (test/data/large/):"

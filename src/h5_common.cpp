@@ -11,6 +11,20 @@ namespace duckdb {
 // Global mutex for all HDF5 operations (definition)
 std::recursive_mutex hdf5_global_mutex;
 
+bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters) {
+	auto it = named_parameters.find("swmr");
+	if (it != named_parameters.end()) {
+		return it->second.GetValue<bool>();
+	}
+
+	Value setting;
+	if (context.TryGetCurrentSetting("h5db_swmr_default", setting)) {
+		return setting.GetValue<bool>();
+	}
+
+	return false;
+}
+
 // Convert HDF5 type to string representation
 std::string H5TypeToString(hid_t type_id) {
 	H5T_class_t type_class = H5Tget_class(type_id);

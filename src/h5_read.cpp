@@ -173,6 +173,7 @@ struct H5ReadBindData : public TableFunctionData {
 	vector<ColumnSpec> columns;            // Unified column specifications
 	hsize_t num_rows;                      // Row count from regular datasets
 	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
+	bool swmr = false;
 };
 
 struct H5ReadGlobalState : public GlobalTableFunctionState {
@@ -741,6 +742,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	}
 
 	result->filename = input.inputs[0].GetValue<string>();
+	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 	size_t num_columns = input.inputs.size() - 1;
 
 	// Lock for all HDF5 operations (not thread-safe)
@@ -750,7 +752,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	H5FileHandle file;
 	{
 		H5ErrorSuppressor suppress;
-		file = H5FileHandle(result->filename.c_str(), H5F_ACC_RDONLY);
+		file = H5FileHandle(result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
 	}
 
 	if (!file.is_valid()) {
@@ -989,7 +991,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	// Open file (with error suppression) - RAII wrapper handles cleanup
 	{
 		H5ErrorSuppressor suppress;
-		result->file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY);
+		result->file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 	}
 
 	if (!result->file.is_valid()) {
@@ -1966,6 +1968,7 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	h5_read.name = "h5_read";
 	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse())
 	h5_read.varargs = LogicalType::ANY;
+	h5_read.named_parameters["swmr"] = LogicalType::BOOLEAN;
 
 	// Predicate pushdown (RSE only): claim filters in bind, build row ranges in init,
 	// and scan only matching ranges while keeping DuckDB's post-scan verification.

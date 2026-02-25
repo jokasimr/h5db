@@ -24,6 +24,8 @@ required_files=(
   "$PROJECT_ROOT/test/data/names_edge_cases.h5"
   "$PROJECT_ROOT/test/data/multidim_mismatch.h5"
   "$PROJECT_ROOT/test/data/nd_cache_test.h5"
+  "$PROJECT_ROOT/test/data/swmr_enabled.h5"
+  "$PROJECT_ROOT/test/data/swmr_disabled.h5"
   "$PROJECT_ROOT/test/data/large_rse_test.h5"
   "$PROJECT_ROOT/test/data/large/large_simple.h5"
   "$PROJECT_ROOT/test/data/large/large_multithreading.h5"

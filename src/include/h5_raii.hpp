@@ -109,7 +109,7 @@ public:
 	H5FileHandle() : id(-1) {
 	}
 
-	H5FileHandle(const char *filename, unsigned flags) {
+	H5FileHandle(const char *filename, unsigned flags, bool swmr) {
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
 		if (fapl >= 0) {
@@ -118,7 +118,11 @@ public:
 			// Ignore errors in case the HDF5 build does not support this API.
 			H5Pset_file_locking(fapl, 0, 0);
 		}
-		id = H5Fopen(filename, flags, fapl >= 0 ? fapl : H5P_DEFAULT);
+		unsigned open_flags = flags;
+		if (swmr) {
+			open_flags |= H5F_ACC_SWMR_READ;
+		}
+		id = H5Fopen(filename, open_flags, fapl >= 0 ? fapl : H5P_DEFAULT);
 		if (fapl >= 0) {
 			H5Pclose(fapl);
 		}

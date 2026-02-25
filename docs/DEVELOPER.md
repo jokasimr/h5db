@@ -527,6 +527,12 @@ h5db/
 
 ## Troubleshooting
 
+### SWMR Notes
+
+Observed SWMR open behavior can vary by HDF5 build/version. In this repo’s current setup (HDF5 1.14.6 via vcpkg),
+opening with `H5F_ACC_SWMR_READ` succeeds even for files not written in SWMR mode. Other builds may reject SWMR opens
+unless the file is marked by a SWMR writer, so don’t assume identical behavior across environments.
+
 ### Build Issues
 
 **Problem**: CMake can't find HDF5

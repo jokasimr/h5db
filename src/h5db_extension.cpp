@@ -32,6 +32,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    ScalarFunction("h5db_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, H5dbVersionScalarFun);
 	loader.RegisterFunction(h5db_version_scalar_function);
 
+	// Extension settings
+	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	config.AddExtensionOption("h5db_swmr_default", "Default to SWMR read mode for h5db table functions",
+	                          LogicalType::BOOLEAN, Value(false));
+
 	// Register HDF5 table functions
 	RegisterH5TreeFunction(loader);
 	RegisterH5ReadFunction(loader);
