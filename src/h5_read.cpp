@@ -67,6 +67,15 @@ struct RegularColumnSpec {
 	size_t elements_per_row; // Element count per row (1D: 1, ND: product of inner dims)
 };
 
+// Scalar dataset specification (rank-0)
+struct ScalarColumnSpec {
+	std::string path;
+	std::string column_name;
+	LogicalType column_type;
+	H5TypeHandle h5_type_id; // RAII wrapper - automatically closes on destruction
+	bool is_string;
+};
+
 // Run-Start Encoded column specification
 struct RSEColumnSpec {
 	std::string run_starts_path;
@@ -84,7 +93,7 @@ struct IndexColumnSpec {
 };
 
 // A column can be regular, RSE, or virtual index
-using ColumnSpec = std::variant<RegularColumnSpec, RSEColumnSpec, IndexColumnSpec>;
+using ColumnSpec = std::variant<RegularColumnSpec, ScalarColumnSpec, RSEColumnSpec, IndexColumnSpec>;
 
 // Chunk cache data (separate struct to allow unique_ptr due to non-movable atomics)
 struct Chunk {
@@ -119,6 +128,13 @@ struct RegularColumnState {
 	std::unique_ptr<ChunkCache> chunk_cache;
 };
 
+// Scalar column runtime state (cached value)
+struct ScalarColumnState {
+	using ScalarValue =
+	    std::variant<int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, float, double, string>;
+	ScalarValue value;
+};
+
 // RSE column runtime state
 struct RSEColumnState {
 	std::vector<idx_t> run_starts;
@@ -135,8 +151,8 @@ struct RSEColumnState {
 
 struct IndexColumnState {};
 
-// Runtime state for a column (regular, RSE, or index)
-using ColumnState = std::variant<RegularColumnState, RSEColumnState, IndexColumnState>;
+// Runtime state for a column (regular, scalar, RSE, or index)
+using ColumnState = std::variant<RegularColumnState, ScalarColumnState, RSEColumnState, IndexColumnState>;
 
 // Row range for filtering (defined here for use in bind data and global state)
 struct RowRange {
@@ -269,6 +285,9 @@ static string GetColumnName(const string &dataset_path) {
 
 // Helper function to build nested array types for multi-dimensional datasets
 static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims) {
+	if (ndims == 0) {
+		return base_type;
+	}
 	if (ndims == 1) {
 		return base_type;
 	}
@@ -388,6 +407,7 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 			if (string_data[i]) {
 				callback(i, std::string(string_data[i]));
 			} else {
+				// Treat NULL strings as empty strings for consistency with h5py.
 				callback(i, std::string());
 			}
 		}
@@ -737,9 +757,11 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		throw IOException("Failed to open HDF5 file: " + result->filename);
 	}
 
-	// Track minimum rows across all regular datasets
+	// Track minimum rows across all non-scalar regular columns
 	hsize_t min_rows = std::numeric_limits<hsize_t>::max();
-	size_t num_regular_datasets = 0;
+	size_t num_regular_columns = 0;
+	size_t non_scalar_regular_columns = 0;
+	bool has_rse_columns = false;
 
 	// Process each column (regular dataset, RSE, or index)
 	for (size_t i = 0; i < num_columns; i++) {
@@ -781,6 +803,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			rse_spec.run_starts_path = run_starts;
 			rse_spec.values_path = values;
 			rse_spec.column_name = alias_name ? *alias_name : GetColumnName(values);
+			has_rse_columns = true;
 
 			// Open run_starts dataset and get type
 			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, run_starts);
@@ -795,11 +818,11 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			result->columns.push_back(std::move(rse_spec));
 
 		} else {
-			// Regular dataset
+			// Regular column (may be scalar)
 			RegularColumnSpec ds_info;
 			ds_info.path = column_val.GetValue<string>();
 			ds_info.column_name = alias_name ? *alias_name : GetColumnName(ds_info.path);
-			num_regular_datasets++;
+			num_regular_columns++;
 
 			// Open dataset and get type
 			auto [dataset, type] = OpenDatasetAndGetType(file, ds_info.path);
@@ -814,14 +837,33 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
-			if (ds_info.ndims <= 0) {
-				throw IOException("Dataset has no dimensions");
+			if (ds_info.ndims < 0) {
+				throw IOException("Failed to get dataset dimensions");
+			}
+			if (ds_info.is_string && ds_info.ndims > 1) {
+				throw IOException("String datasets with more than 1 dimension are not supported");
+			}
+
+			if (ds_info.ndims == 0) {
+				// Scalar dataset - create ScalarColumnSpec and skip regular path
+				ScalarColumnSpec scalar_info;
+				scalar_info.path = ds_info.path;
+				scalar_info.column_name = ds_info.column_name;
+				scalar_info.is_string = ds_info.is_string;
+
+				LogicalType base_type = H5TypeToDuckDBType(type);
+				scalar_info.column_type = base_type;
+				scalar_info.h5_type_id = std::move(type);
+
+				result->columns.push_back(std::move(scalar_info));
+				continue;
 			}
 
 			ds_info.dims.resize(ds_info.ndims);
 			H5Sget_simple_extent_dims(space, ds_info.dims.data(), nullptr);
 
-			// Track minimum rows
+			// Track minimum rows for non-scalar regular columns
+			non_scalar_regular_columns++;
 			if (ds_info.dims[0] < min_rows) {
 				min_rows = ds_info.dims[0];
 			}
@@ -847,13 +889,24 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		}
 	}
 
-	// Require at least one regular dataset to determine row count
-	if (num_regular_datasets == 0) {
-		throw IOException("h5_read requires at least one regular (non-RSE) dataset to determine row count");
+	// Require at least one regular column (scalar or non-scalar)
+	if (num_regular_columns == 0) {
+		throw IOException("h5_read requires at least one regular column");
 	}
 
-	// Set the row count from regular datasets
-	result->num_rows = min_rows;
+	// RSE requires a non-scalar regular column for row count
+	if (has_rse_columns && non_scalar_regular_columns == 0) {
+		throw IOException(
+		    "h5_read requires at least one non-scalar regular column when using RSE to determine row count");
+	}
+
+	// Set the row count from non-scalar regular columns
+	if (non_scalar_regular_columns > 0) {
+		result->num_rows = min_rows;
+	} else {
+		// Only scalar datasets - return a single row
+		result->num_rows = 1;
+	}
 
 	// Build output schema by iterating through columns in order
 	for (const auto &col : result->columns) {
@@ -1001,6 +1054,41 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 				    // Store in dense array with LOCAL indexing
 				    result->column_states.push_back(std::move(state));
+
+			    } else if constexpr (std::is_same_v<T, ScalarColumnSpec>) {
+				    // Scalar column - open dataset and cache value once
+				    H5DatasetHandle dataset;
+				    {
+					    H5ErrorSuppressor suppress;
+					    dataset = H5DatasetHandle(result->file, spec.path.c_str());
+				    }
+
+				    if (!dataset.is_valid()) {
+					    throw IOException("Failed to open dataset: " + spec.path);
+				    }
+
+				    ScalarColumnState scalar_state;
+				    if (spec.is_string) {
+					    std::string value;
+					    ReadHDF5Strings(dataset, spec.h5_type_id, H5S_ALL, H5S_ALL, 1,
+					                    [&](idx_t, const std::string &str) { value = str; });
+					    scalar_state.value = value;
+				    } else {
+					    auto base_type = GetBaseType(spec.column_type);
+					    DispatchOnNumericType(base_type, [&](auto type_tag) {
+						    using T = typename decltype(type_tag)::type;
+						    T value {};
+						    herr_t status =
+						        H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &value);
+						    if (status < 0) {
+							    throw IOException("Failed to read data from dataset: " + spec.path);
+						    }
+						    scalar_state.value = value;
+					    });
+				    }
+
+				    // Store in dense array with LOCAL indexing
+				    result->column_states.push_back(std::move(scalar_state));
 
 			    } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
 				    // RSE column - load run_starts and values using stored types from Bind
@@ -1621,11 +1709,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		// Handle string data using helper
 		ReadHDF5Strings(
 		    dataset_id, spec.h5_type_id, mem_space, file_space, to_read, [&](idx_t i, const std::string &str) {
-			    if (str.empty()) {
-				    FlatVector::SetNull(result_vector, i, true);
-			    } else {
-				    FlatVector::GetData<string_t>(result_vector)[i] = StringVector::AddString(result_vector, str);
-			    }
+			    FlatVector::GetData<string_t>(result_vector)[i] = StringVector::AddString(result_vector, str);
 		    });
 
 	} else {
@@ -1644,6 +1728,33 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 	}
 
 	// Note: file_space is cached and will be closed in destructor
+}
+
+// Helper function to scan a scalar dataset column (broadcast cached value)
+static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnState &state, Vector &result_vector,
+                             idx_t to_read) {
+	if (to_read == 0) {
+		return;
+	}
+
+	if (spec.is_string) {
+		const auto &value = std::get<string>(state.value);
+		auto result_data = FlatVector::GetData<string_t>(result_vector);
+		result_data[0] = StringVector::AddString(result_vector, value);
+		result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		return;
+	}
+
+	std::visit(
+	    [&](auto &&val) {
+		    using T = std::decay_t<decltype(val)>;
+		    if constexpr (!std::is_same_v<T, string>) {
+			    auto result_data = FlatVector::GetData<T>(result_vector);
+			    result_data[0] = val;
+			    result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		    }
+	    },
+	    state.value);
 }
 
 static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
@@ -1679,6 +1790,11 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 			    if constexpr (std::is_same_v<SpecT, RSEColumnSpec> && std::is_same_v<StateT, RSEColumnState>) {
 				    // RSE column - call helper function
 				    ScanRSEColumn(spec, state, result_vector, position, to_read, bind_data.num_rows);
+
+			    } else if constexpr (std::is_same_v<SpecT, ScalarColumnSpec> &&
+			                         std::is_same_v<StateT, ScalarColumnState>) {
+				    // Scalar dataset - broadcast cached value
+				    ScanScalarColumn(spec, state, result_vector, to_read);
 
 			    } else if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
 			                         std::is_same_v<StateT, RegularColumnState>) {

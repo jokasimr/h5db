@@ -240,6 +240,12 @@ SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_2d');
 ----
 5
 
+# Test 2D string array is rejected
+statement error
+SELECT * FROM h5_read('test/data/multidim.h5', '/array_2d_strings');
+----
+IO Error: String datasets with more than 1 dimension are not supported
+
 query I
 SELECT array_2d[1] FROM h5_read('test/data/multidim.h5', '/array_2d') LIMIT 1;
 ----
@@ -815,7 +821,7 @@ SELECT * FROM h5_read(
     h5_rse('/experiment1/state_run_starts', '/experiment1/state_values')
 );
 ----
-IO Error: h5_read requires at least one regular (non-RSE) dataset to determine row count
+IO Error: h5_read requires at least one regular column
 
 # Test error: non-existent run_starts dataset
 statement error

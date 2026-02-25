@@ -87,6 +87,9 @@ def create_multidim_test_file(filename='multidim.h5'):
         # 4D
         f.create_dataset('array_4d', data=np.arange(120).reshape(5, 4, 3, 2))
 
+        # 2D fixed-length string array (unsupported by h5_read)
+        f.create_dataset('array_2d_strings', data=np.array([[b'aa', b'bb'], [b'cc', b'dd']], dtype='S2'))
+
     print(f"OK Created {filename}")
     print_file_structure(filename)
 

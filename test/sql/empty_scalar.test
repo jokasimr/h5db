@@ -17,13 +17,37 @@ FROM h5_tree('test/data/empty_scalar.h5');
 1	1
 
 # =============================================================================
-# Scalar dataset should be rejected by h5_read
+# Scalar datasets should be read and treated as constants
 # =============================================================================
 
-statement error
-SELECT * FROM h5_read('test/data/empty_scalar.h5', '/scalar_int');
+query II
+SELECT scalar_int, scalar_str FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/scalar_str');
 ----
-IO Error: Dataset has no dimensions
+7	hello
+
+query III
+SELECT COUNT(*), MIN(scalar_int), MIN(scalar_str)
+FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/scalar_str', '/long');
+----
+5	7	hello
+
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/empty_1d');
+----
+0
+
+# =============================================================================
+# Null and empty strings
+# =============================================================================
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE null_strings IS NULL),
+    COUNT(*) FILTER (WHERE null_strings = '')
+FROM h5_read('test/data/empty_scalar.h5', '/null_strings');
+----
+0	2
 
 # =============================================================================
 # Empty datasets should yield zero rows
@@ -64,4 +88,52 @@ SELECT * FROM h5_read(
     h5_rse('/experiment1/state_run_starts', '/experiment1/state_values')
 );
 ----
-IO Error: h5_read requires at least one regular (non-RSE) dataset to determine row count
+IO Error: h5_read requires at least one regular column
+
+# =============================================================================
+# Row count determination with regular/scalar/rse/index combinations
+# =============================================================================
+
+statement error
+SELECT * FROM h5_read('test/data/simple.h5', h5_index());
+----
+IO Error: h5_read requires at least one regular column
+
+statement error
+SELECT * FROM h5_read('test/data/run_encoded.h5', h5_rse('/experiment1/state_run_starts', '/experiment1/state_values'));
+----
+IO Error: h5_read requires at least one regular column
+
+statement error
+SELECT * FROM h5_read(
+    'test/data/empty_scalar.h5',
+    '/scalar_int',
+    h5_rse('/rse_run_starts', '/rse_values')
+);
+----
+IO Error: h5_read requires at least one non-scalar regular column when using RSE to determine row count
+
+statement error
+SELECT * FROM h5_read(
+    'test/data/empty_scalar.h5',
+    h5_index(),
+    h5_rse('/rse_run_starts', '/rse_values')
+);
+----
+IO Error: h5_read requires at least one regular column
+
+query II
+SELECT index, scalar_int FROM h5_read('test/data/empty_scalar.h5', h5_index(), '/scalar_int');
+----
+0	7
+
+query III
+SELECT index, scalar_int, long
+FROM h5_read('test/data/empty_scalar.h5', h5_index(), '/scalar_int', '/long')
+ORDER BY index;
+----
+0	7	0
+1	7	1
+2	7	2
+3	7	3
+4	7	4
