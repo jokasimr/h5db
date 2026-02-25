@@ -73,30 +73,21 @@ std::string H5TypeToString(hid_t type_id) {
 	}
 }
 
-// Get dataset shape as string (e.g., "(10,)" or "(5, 4, 3)")
-std::string H5GetShapeString(hid_t dataset_id) {
+// Get dataset shape as a list of dimensions
+std::vector<hsize_t> H5GetShape(hid_t dataset_id) {
 	H5DataspaceHandle space(dataset_id);
 	if (!space.is_valid()) {
-		return "()";
+		return {};
 	}
 
 	int ndims = H5Sget_simple_extent_ndims(space);
 	if (ndims <= 0) {
-		return "()";
+		return {};
 	}
 
 	std::vector<hsize_t> dims(ndims);
 	H5Sget_simple_extent_dims(space, dims.data(), nullptr);
-
-	std::string result = "(";
-	for (int i = 0; i < ndims; i++) {
-		if (i > 0)
-			result += ", ";
-		result += std::to_string(dims[i]);
-	}
-	result += ")";
-
-	return result;
+	return dims;
 }
 
 // Map HDF5 type to DuckDB LogicalType

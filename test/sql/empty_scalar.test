@@ -10,8 +10,8 @@ require h5db
 
 query II
 SELECT
-    COUNT(*) FILTER (WHERE path = '/scalar_int' AND dtype = 'int32' AND shape = '()'),
-    COUNT(*) FILTER (WHERE path = '/empty_1d' AND dtype = 'int32' AND shape = '(0)')
+    COUNT(*) FILTER (WHERE path = '/scalar_int' AND dtype = 'int32' AND shape = []),
+    COUNT(*) FILTER (WHERE path = '/empty_1d' AND dtype = 'int32' AND shape = [0])
 FROM h5_tree('test/data/empty_scalar.h5');
 ----
 1	1

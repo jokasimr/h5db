@@ -25,13 +25,45 @@ FROM h5_tree('test/data/simple.h5');
 ----
 10	3	7	2
 
+# Test h5_tree shape semantics: groups -> NULL
+query I
+SELECT COUNT(*) FILTER (WHERE type = 'group' AND shape IS NULL)
+FROM h5_tree('test/data/simple.h5');
+----
+3
+
+# Test h5_tree shape semantics: scalar -> []
+query I
+SELECT COUNT(*) FILTER (WHERE path = '/scalar_int' AND shape = [])
+FROM h5_tree('test/data/empty_scalar.h5');
+----
+1
+
+# Test h5_tree shape semantics: empty datasets -> dims
+query II
+SELECT
+    COUNT(*) FILTER (WHERE path = '/empty_1d' AND shape = [0]),
+    COUNT(*) FILTER (WHERE path = '/empty_2d' AND shape = [0, 3])
+FROM h5_tree('test/data/empty_scalar.h5');
+----
+1	1
+
+# Test h5_tree shape semantics: regular -> dims
+query II
+SELECT
+    COUNT(*) FILTER (WHERE path = '/integers' AND shape = [10]),
+    COUNT(*) FILTER (WHERE path = '/matrix' AND shape = [5, 4])
+FROM h5_tree('test/data/simple.h5');
+----
+1	1
+
 # Test h5_tree shows correct types for specific datasets
 query IIII
 SELECT
     COUNT(*) FILTER (WHERE path = '/integers' AND dtype = 'int32'),
     COUNT(*) FILTER (WHERE path = '/floats' AND dtype = 'float64'),
     COUNT(*) FILTER (WHERE path = '/strings' AND dtype = 'string'),
-    COUNT(*) FILTER (WHERE path = '/matrix' AND dtype = 'int32' AND shape = '(5, 4)')
+    COUNT(*) FILTER (WHERE path = '/matrix' AND dtype = 'int32' AND shape = [5, 4])
 FROM h5_tree('test/data/simple.h5');
 ----
 1	1	1	1
@@ -49,10 +81,10 @@ FROM h5_tree('test/data/types.h5');
 # Test h5_tree shows correct shapes for multi-dimensional arrays
 query IIII
 SELECT
-    COUNT(*) FILTER (WHERE path = '/array_1d' AND shape = '(10)'),
-    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = '(5, 4)'),
-    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = '(5, 4, 3)'),
-    COUNT(*) FILTER (WHERE path = '/array_4d' AND shape = '(5, 4, 3, 2)')
+    COUNT(*) FILTER (WHERE path = '/array_1d' AND shape = [10]),
+    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = [5, 4]),
+    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = [5, 4, 3]),
+    COUNT(*) FILTER (WHERE path = '/array_4d' AND shape = [5, 4, 3, 2])
 FROM h5_tree('test/data/multidim.h5');
 ----
 1	1	1	1

@@ -10,8 +10,8 @@ require h5db
 
 query II
 SELECT
-    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = '(4, 3)'),
-    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = '(6, 2, 2)')
+    COUNT(*) FILTER (WHERE path = '/array_2d' AND shape = [4, 3]),
+    COUNT(*) FILTER (WHERE path = '/array_3d' AND shape = [6, 2, 2])
 FROM h5_tree('test/data/multidim_mismatch.h5');
 ----
 1	1

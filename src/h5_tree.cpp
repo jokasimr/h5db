@@ -10,9 +10,9 @@ namespace duckdb {
 
 struct H5ObjectInfo {
 	std::string path;
-	std::string type;  // "group" or "dataset"
-	std::string dtype; // data type (for datasets)
-	std::string shape; // shape (for datasets)
+	std::string type;           // "group" or "dataset"
+	std::string dtype;          // data type (for datasets)
+	std::vector<hsize_t> shape; // shape (for datasets)
 };
 
 struct H5TreeBindData : public TableFunctionData {
@@ -25,6 +25,26 @@ struct H5TreeGlobalState : public GlobalTableFunctionState {
 	idx_t position = 0;
 };
 
+static void WriteShapeListRow(Vector &shape_vector, idx_t row_idx, const H5ObjectInfo &obj, idx_t &shape_offset,
+                              uint64_t *shape_data) {
+	auto shape_entries = ListVector::GetData(shape_vector);
+	auto &shape_validity = FlatVector::Validity(shape_vector);
+
+	if (obj.type == "group") {
+		shape_validity.SetInvalid(row_idx);
+		shape_entries[row_idx].offset = 0;
+		shape_entries[row_idx].length = 0;
+		return;
+	}
+
+	shape_validity.SetValid(row_idx);
+	shape_entries[row_idx].offset = shape_offset;
+	shape_entries[row_idx].length = obj.shape.size();
+	for (auto dim : obj.shape) {
+		shape_data[shape_offset++] = static_cast<uint64_t>(dim);
+	}
+}
+
 static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *info, void *op_data) {
 	auto &objects = *reinterpret_cast<std::vector<H5ObjectInfo> *>(op_data);
 
@@ -34,7 +54,7 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 	if (info->type == H5O_TYPE_GROUP) {
 		obj_info.type = "group";
 		obj_info.dtype = "";
-		obj_info.shape = "";
+		obj_info.shape = {};
 	} else if (info->type == H5O_TYPE_DATASET) {
 		obj_info.type = "dataset";
 
@@ -46,7 +66,7 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 				obj_info.dtype = H5TypeToString(type);
 			}
 
-			obj_info.shape = H5GetShapeString(dataset);
+			obj_info.shape = H5GetShape(dataset);
 		}
 	}
 
@@ -61,7 +81,8 @@ static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunction
 	result->filename = input.inputs[0].GetValue<string>();
 
 	names = {"path", "type", "dtype", "shape"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::LIST(LogicalType::UBIGINT)};
 
 	return std::move(result);
 }
@@ -111,6 +132,17 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &type_vector = output.data[1];
 	auto &dtype_vector = output.data[2];
 	auto &shape_vector = output.data[3];
+	auto &shape_child = ListVector::GetEntry(shape_vector);
+	idx_t total_shape_elems = 0;
+	for (idx_t i = 0; i < to_process; i++) {
+		const auto &obj = bind_data.objects[gstate.position + i];
+		if (obj.type != "group") {
+			total_shape_elems += obj.shape.size();
+		}
+	}
+	ListVector::Reserve(shape_vector, total_shape_elems);
+	auto shape_data = FlatVector::GetData<uint64_t>(shape_child);
+	idx_t shape_offset = 0;
 
 	for (idx_t i = 0; i < to_process; i++) {
 		const auto &obj = bind_data.objects[gstate.position + i];
@@ -118,10 +150,11 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 		FlatVector::GetData<string_t>(path_vector)[i] = StringVector::AddString(path_vector, obj.path);
 		FlatVector::GetData<string_t>(type_vector)[i] = StringVector::AddString(type_vector, obj.type);
 		FlatVector::GetData<string_t>(dtype_vector)[i] = StringVector::AddString(dtype_vector, obj.dtype);
-		FlatVector::GetData<string_t>(shape_vector)[i] = StringVector::AddString(shape_vector, obj.shape);
+		WriteShapeListRow(shape_vector, i, obj, shape_offset, shape_data);
 
 		count++;
 	}
+	ListVector::SetListSize(shape_vector, shape_offset);
 
 	gstate.position += count;
 	output.SetCardinality(count);

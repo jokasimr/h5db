@@ -2,14 +2,15 @@
 
 #include "duckdb.hpp"
 #include <hdf5.h>
+#include <vector>
 
 namespace duckdb {
 
 // Helper function to get HDF5 type as string
 std::string H5TypeToString(hid_t type_id);
 
-// Helper function to get dataset dimensions as string
-std::string H5GetShapeString(hid_t dataset_id);
+// Helper function to get dataset dimensions as a list
+std::vector<hsize_t> H5GetShape(hid_t dataset_id);
 
 // Helper function to map HDF5 type to DuckDB LogicalType
 LogicalType H5TypeToDuckDBType(hid_t type_id);

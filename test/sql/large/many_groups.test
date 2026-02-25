@@ -1,0 +1,28 @@
+# name: test/sql/large/many_groups.test
+# description: h5_tree with many groups/datasets
+# group: [large]
+
+require h5db
+
+# =============================================================================
+# h5_tree on many_groups.h5 (100k groups + 100k datasets)
+# =============================================================================
+
+query III
+SELECT
+    COUNT(*) FILTER (WHERE type = 'group' AND shape IS NULL),
+    COUNT(*) FILTER (WHERE type = 'dataset'),
+    COUNT(*)
+FROM h5_tree('test/data/many_groups.h5');
+----
+100001	100000	200001
+
+query IIII
+SELECT
+    COUNT(*) FILTER (WHERE path LIKE '%/scalar' AND shape = []),
+    COUNT(*) FILTER (WHERE path LIKE '%/vec' AND shape = [1]),
+    COUNT(*) FILTER (WHERE path LIKE '%/mat' AND shape = [1, 2]),
+    COUNT(*) FILTER (WHERE type = 'group' AND shape IS NULL)
+FROM h5_tree('test/data/many_groups.h5');
+----
+33334	33333	33333	100001

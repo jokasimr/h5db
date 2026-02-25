@@ -29,6 +29,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/large/large_multithreading.h5"
   "$PROJECT_ROOT/test/data/large/large_pushdown_test.h5"
   "$PROJECT_ROOT/test/data/large/large_rse_edge_cases.h5"
+  "$PROJECT_ROOT/test/data/many_groups.h5"
 )
 
 missing=()

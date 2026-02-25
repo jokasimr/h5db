@@ -117,6 +117,9 @@ echo ""
 echo -e "${GREEN}[12/18] Generating multidim_mismatch.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_multidim_mismatch_test.py)
 
+echo -e "${GREEN}[13/18] Generating many_groups.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_many_groups_test.py)
+
 echo ""
 echo -e "${GREEN}[13/18] Generating nd_cache_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_nd_cache_test.py)
