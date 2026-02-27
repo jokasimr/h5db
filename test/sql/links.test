@@ -1,0 +1,33 @@
+# name: test/sql/links.test
+# description: hard/soft link reads
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# h5_read via hard/soft links
+# =============================================================================
+
+query I
+SELECT SUM(hard_link) FROM h5_read('test/data/links.h5', '/hard_link');
+----
+6
+
+query I
+SELECT SUM(soft_link) FROM h5_read('test/data/links.h5', '/soft_link');
+----
+6
+
+# =============================================================================
+# h5_attributes via hard/soft links
+# =============================================================================
+
+query I
+SELECT attr FROM h5_attributes('test/data/links.h5', '/hard_link');
+----
+7
+
+query I
+SELECT attr FROM h5_attributes('test/data/links.h5', '/soft_link');
+----
+7
