@@ -280,7 +280,7 @@ All functions provide clear error messages for common issues:
 2. **Enum types** are not currently supported
 3. **Datasets with >4 dimensions** are not supported
 4. **Multi-dimensional string datasets** are not supported
-5. **Reference types** (links to other datasets) are not supported
+5. **HDF5 reference datatypes** (object/region references stored as values) are not supported
 6. **Variable-length array types** are not supported (fixed-size arrays only)
 
 ---
