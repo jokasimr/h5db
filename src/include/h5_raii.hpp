@@ -3,6 +3,8 @@
 #include "hdf5.h"
 #include "duckdb.hpp"
 #include "h5_internal.hpp"
+#include "h5_remote_vfd.hpp"
+#include "duckdb/main/extension_helper.hpp"
 
 using namespace duckdb;
 
@@ -109,20 +111,54 @@ public:
 	H5FileHandle() : id(-1) {
 	}
 
-	H5FileHandle(const char *filename, unsigned flags, bool swmr) {
+	H5FileHandle(ClientContext *context, const char *filename, unsigned flags, bool swmr) {
+		bool is_remote = filename && H5RemoteVFD::IsRemotePath(filename);
+		if (is_remote) {
+			if (!context) {
+				throw IOException("Remote HDF5 paths require an active DuckDB context");
+			}
+			ExtensionHelper::AutoLoadExtension(*context, "httpfs");
+		}
+
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
-		hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-		if (fapl >= 0) {
-			H5Pset_fclose_degree(fapl, H5F_CLOSE_WEAK);
-			// Disable file locking for concurrent read-only access across processes.
-			// Ignore errors in case the HDF5 build does not support this API.
-			H5Pset_file_locking(fapl, 0, 0);
+		hid_t fapl = -1;
+		bool open_context_set = false;
+		try {
+			fapl = H5Pcreate(H5P_FILE_ACCESS);
+			if (fapl >= 0) {
+				H5Pset_fclose_degree(fapl, H5F_CLOSE_WEAK);
+				// Disable file locking for concurrent read-only access across processes.
+				// Ignore errors in case the HDF5 build does not support this API.
+				H5Pset_file_locking(fapl, 0, 0);
+				if (is_remote) {
+					H5RemoteVFD::ConfigureFAPL(*context, fapl);
+				}
+			}
+
+			unsigned open_flags = flags;
+			// Remote URLs are served as immutable snapshots through duckdb/httpfs.
+			// SWMR coordination with live writers does not apply in this mode, and
+			// passing H5F_ACC_SWMR_READ can fail for the custom remote VFD path.
+			if (swmr && !is_remote) {
+				open_flags |= H5F_ACC_SWMR_READ;
+			}
+			if (is_remote) {
+				H5RemoteVFD::SetOpenContext(context);
+				open_context_set = true;
+			}
+			id = H5Fopen(filename, open_flags, fapl >= 0 ? fapl : H5P_DEFAULT);
+		} catch (...) {
+			if (open_context_set) {
+				H5RemoteVFD::SetOpenContext(nullptr);
+			}
+			if (fapl >= 0) {
+				H5Pclose(fapl);
+			}
+			throw;
 		}
-		unsigned open_flags = flags;
-		if (swmr) {
-			open_flags |= H5F_ACC_SWMR_READ;
+		if (open_context_set) {
+			H5RemoteVFD::SetOpenContext(nullptr);
 		}
-		id = H5Fopen(filename, open_flags, fapl >= 0 ? fapl : H5P_DEFAULT);
 		if (fapl >= 0) {
 			H5Pclose(fapl);
 		}

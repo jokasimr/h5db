@@ -10,12 +10,18 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 # Override test targets to ensure test data exists before running tests.
 test_release_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
-	./build/release/$(TEST_PATH) "test/sql/*"
+	./build/release/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH)
 
 test_debug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
-	./build/debug/$(TEST_PATH) "test/sql/*"
+	./build/debug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH)
 
 test_reldebug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
-	./build/reldebug/$(TEST_PATH) "test/sql/*"
+	./build/reldebug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH)
+
+test_remote_http:
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh

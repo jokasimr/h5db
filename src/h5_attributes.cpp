@@ -144,7 +144,7 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	H5ErrorSuppressor suppress_errors;
-	H5FileHandle file(result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
+	H5FileHandle file(&context, result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
 	if (!file.is_valid()) {
 		throw IOException("Failed to open HDF5 file: " + result->filename);
 	}
@@ -194,7 +194,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
 	H5ErrorSuppressor suppress_errors;
-	H5FileHandle file(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
+	H5FileHandle file(&context, bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 	if (!file.is_valid()) {
 		throw IOException("Failed to open HDF5 file: " + bind_data.filename);
 	}

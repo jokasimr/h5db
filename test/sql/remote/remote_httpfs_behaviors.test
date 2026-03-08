@@ -1,0 +1,103 @@
+# name: test/sql/remote/remote_httpfs_behaviors.test
+# description: Remote HTTP-specific behavior tests (auth, status errors, timeout)
+# group: [remote]
+
+require h5db
+
+# =============================================================================
+# Basic auth via DuckDB HTTP secret headers
+# =============================================================================
+
+statement ok
+DROP SECRET IF EXISTS h5db_http_auth;
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/auth/simple.h5', '/integers');
+----
+
+statement ok
+CREATE SECRET h5db_http_auth (
+  TYPE HTTP,
+  SCOPE 'test/data/auth/',
+  EXTRA_HTTP_HEADERS MAP {'Authorization': 'Basic aDVkYjpkdWNrZGI='}
+);
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/auth/simple.h5', '/integers');
+----
+10
+
+# =============================================================================
+# Non-existing file
+# =============================================================================
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/does_not_exist_remote_case.h5', '/integers');
+----
+
+# =============================================================================
+# Simulated server errors
+# =============================================================================
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/status/503/simple.h5', '/integers');
+----
+
+# =============================================================================
+# Retry behavior on transient server errors
+# =============================================================================
+
+statement ok
+SET http_retries=3;
+
+statement ok
+SET http_retry_wait_ms=1;
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/dropflaky/2/simple.h5', '/integers');
+----
+10
+
+# =============================================================================
+# Redirect handling
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/redirect/307/simple.h5', '/integers');
+----
+10
+
+# =============================================================================
+# Timeout behavior
+# =============================================================================
+
+statement ok
+SET http_retries=0;
+
+statement ok
+SET http_timeout=1;
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/slow/3000/simple.h5', '/integers');
+----
+
+statement ok
+SET http_timeout=30000;
+
+# =============================================================================
+# Corrupt/truncated response bodies
+# =============================================================================
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/corrupt/simple.h5', '/integers');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/truncate/256/simple.h5', '/integers');
+----
+
+statement ok
+SET http_retries=3;
+
+statement ok
+SET http_retry_wait_ms=100;

@@ -83,3 +83,28 @@ query I
 SELECT SUM(data) FROM h5_read('test/data/swmr_enabled.h5', '/data');
 ----
 10
+
+query I
+SELECT SUM(data) FROM h5_read('test/data/swmr_disabled.h5', '/data');
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_enabled.h5');
+----
+2
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/swmr_disabled.h5');
+----
+2
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_enabled.h5', '/data');
+----
+42
+
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_disabled.h5', '/data');
+----
+42

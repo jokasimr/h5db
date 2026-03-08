@@ -29,6 +29,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(EXTENSION_SOURCES
     src/h5db_extension.cpp
     src/h5_common.cpp
+    src/h5_remote_vfd.cpp
     src/h5_tree.cpp
     src/h5_read.cpp
     src/h5_attributes.cpp

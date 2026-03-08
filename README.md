@@ -15,6 +15,7 @@ H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scient
 - **Browse file structure**: List groups and datasets with `h5_tree()`
 - **Read datasets**: Access data from HDF5 files with `h5_read()`
 - **Read attributes**: Access dataset and group attributes with `h5_attributes()`
+- **Remote file support**: Read `http://`, `https://`, and `s3://` paths through DuckDB `httpfs`
 - **Hierarchical navigation**: Full support for nested groups
 - **Multiple datasets**: Read and combine multiple datasets in a single query
 - **Run-start encoding (RSE)**: Efficient reading of run-length encoded data with automatic expansion
@@ -68,6 +69,9 @@ GROUP BY status;
 
 -- Read attributes from a dataset or group
 SELECT * FROM h5_attributes('data.h5', '/dataset_name');
+
+-- Read a remote file (httpfs must be available/configured)
+SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
 
 -- Enable SWMR read mode for a single call
 SELECT * FROM h5_read('data.h5', '/dataset_name', swmr := true);
@@ -159,11 +163,14 @@ SET h5db_swmr_default = true;
 ## Running the Tests
 
 ```bash
-# Run all tests (generates test data if missing)
+# Run the complete test suite (local + remote URL coverage; generates test data if missing)
 ./build/release/test/unittest "test/sql/*"
 
-# Or use the makefile target (also generates test data if missing)
+# Or use the makefile target
 make test
+
+# Run the full suite rewritten to remote URLs against the local range-capable test server
+make test_remote_http
 ```
 
 **For detailed testing instructions, test creation, and Python script usage, see [docs/DEVELOPER.md](docs/DEVELOPER.md).**

@@ -752,7 +752,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	H5FileHandle file;
 	{
 		H5ErrorSuppressor suppress;
-		file = H5FileHandle(result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
+		file = H5FileHandle(&context, result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
 	}
 
 	if (!file.is_valid()) {
@@ -991,7 +991,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	// Open file (with error suppression) - RAII wrapper handles cleanup
 	{
 		H5ErrorSuppressor suppress;
-		result->file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
+		result->file = H5FileHandle(&context, bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 	}
 
 	if (!result->file.is_valid()) {
@@ -1611,29 +1611,35 @@ static void WaitForFetchComplete(H5ReadGlobalState &gstate) {
 static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
+		try {
 
-		// Only refresh cache for columns being scanned (projection pushdown)
-		// Uses LOCAL indexing (dense array)
-		for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {
-			LocalColumnIdx local_idx(i);
-			GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
-			const auto &col_spec = bind_data.columns[global_idx];
-			auto &col_state = gstate.column_states[local_idx];
+			// Only refresh cache for columns being scanned (projection pushdown)
+			// Uses LOCAL indexing (dense array)
+			for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {
+				LocalColumnIdx local_idx(i);
+				GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
+				const auto &col_spec = bind_data.columns[global_idx];
+				auto &col_state = gstate.column_states[local_idx];
 
-			std::visit(
-			    [&](auto &&spec, auto &&state) {
-				    using SpecT = std::decay_t<decltype(spec)>;
-				    using StateT = std::decay_t<decltype(state)>;
+				std::visit(
+				    [&](auto &&spec, auto &&state) {
+					    using SpecT = std::decay_t<decltype(spec)>;
+					    using StateT = std::decay_t<decltype(state)>;
 
-				    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
-				                  std::is_same_v<StateT, RegularColumnState>) {
-					    if (state.chunk_cache) {
-						    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-						                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec);
+					    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
+					                  std::is_same_v<StateT, RegularColumnState>) {
+						    if (state.chunk_cache) {
+							    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
+							                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec);
+						    }
 					    }
-				    }
-			    },
-			    col_spec, col_state);
+				    },
+				    col_spec, col_state);
+			}
+		} catch (...) {
+			gstate.someone_is_fetching.store(false);
+			NotifyFetchComplete(gstate);
+			throw;
 		}
 		// Done loading - release the flag so another thread can load next time
 		gstate.someone_is_fetching.store(false);

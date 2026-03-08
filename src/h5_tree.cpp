@@ -99,7 +99,7 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 		H5FileHandle file;
 		{
 			H5ErrorSuppressor suppress;
-			file = H5FileHandle(bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
+			file = H5FileHandle(&context, bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 		}
 
 		if (!file.is_valid()) {

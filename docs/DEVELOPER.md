@@ -218,7 +218,7 @@ test/sql/large/                # Large SQLLogicTest files (slow)
 ### Running All Tests
 
 ```bash
-# Run all tests
+# Run tests from test/sql/* directly
 ./build/release/test/unittest "test/sql/*"
 
 # Optional: skip slow tests
@@ -252,12 +252,23 @@ You can filter tests by pattern:
 The Makefile provides a convenient test target:
 
 ```bash
-# This internally runs: ./build/release/test/unittest "test/sql/*"
+# Full suite: local tests + remote URL suite via local range-capable server
 make test
 ```
 
 `make test` also ensures all HDF5 test data is present by running
 `test/data/ensure_test_data.sh` before executing the tests.
+It then runs the local SQLLogicTests and the rewritten remote URL suite (including `test/sql/remote/*.test`).
+
+### Running Remote-URL Test Suite
+
+To run the suite against rewritten remote URLs (using the local range-capable HTTP server):
+
+```bash
+make test_remote_http
+```
+
+This target also runs `test/sql/remote/*.test` (auth, timeout, retries, redirects, and error injection).
 
 ---
 

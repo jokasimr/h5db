@@ -9,7 +9,7 @@ This document describes all functions provided by the h5db extension.
 Lists all groups and datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Path to the HDF5 file
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
@@ -34,7 +34,7 @@ SELECT * FROM h5_tree('data.h5', swmr := true);
 Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Path to the HDF5 file
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
@@ -90,7 +90,7 @@ SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 Reads attributes from a dataset or group.
 
 **Parameters:**
-- `filename` (VARCHAR): Path to the HDF5 file
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
 - `object_path` (VARCHAR): Path to the dataset or group (use empty string or '/' for root)
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 

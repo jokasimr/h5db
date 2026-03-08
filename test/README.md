@@ -25,3 +25,16 @@ Large tests live in `test/sql/large/` as `*.test` and are included in `make test
 ```bash
 make test
 ```
+
+## Run Suite Against Remote URLs
+
+Run the full SQL suite against rewritten remote paths using the local range-capable HTTP endpoint:
+
+```bash
+make test_remote_http
+```
+
+## Remote-Only SQLLogicTests
+
+`test/sql/remote/*.test` contains remote HTTP-specific checks (auth, timeout, and simulated server errors).
+These are included in `make test` through the remote runner and can also be executed directly with `make test_remote_http`.
