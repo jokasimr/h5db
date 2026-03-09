@@ -1,0 +1,60 @@
+# name: test/sql/batch_size_setting.test
+# description: h5db batch size setting
+# group: [sql]
+
+require h5db
+
+query T
+SELECT current_setting('h5db_batch_size');
+----
+1MB
+
+statement ok
+SET h5db_batch_size='1MB';
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers');
+----
+10
+
+statement ok
+SET h5db_batch_size='2MB';
+
+query T
+SELECT current_setting('h5db_batch_size');
+----
+2MB
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers');
+----
+10
+
+statement ok
+SET h5db_batch_size='2GB';
+
+query T
+SELECT current_setting('h5db_batch_size');
+----
+1GB
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers');
+----
+10
+
+statement error
+SET h5db_batch_size='not-a-size';
+----
+Invalid value for h5db_batch_size
+
+statement ok
+SET h5db_batch_size='1MB';
+
+statement ok
+RESET h5db_batch_size;
+
+query T
+SELECT current_setting('h5db_batch_size');
+----
+1MB

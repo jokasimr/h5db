@@ -11,6 +11,7 @@
 
 // H5DB functions
 #include "h5_functions.hpp"
+#include "h5_internal.hpp"
 
 namespace duckdb {
 
@@ -26,6 +27,16 @@ inline void H5dbVersionScalarFun(DataChunk &args, ExpressionState &state, Vector
 	});
 }
 
+static void SetH5dbBatchSize(ClientContext &context, SetScope scope, Value &parameter) {
+	auto input = parameter.ToString();
+	auto parsed = ParseBatchSizeSetting(parameter);
+	if (parsed > H5DB_MAX_BATCH_SIZE_BYTES) {
+		parameter = Value(H5DB_MAX_BATCH_SIZE_SETTING);
+	} else {
+		parameter = Value(input);
+	}
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// Register HDF5 version check function
 	auto h5db_version_scalar_function =
@@ -36,6 +47,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption("h5db_swmr_default", "Default to SWMR read mode for h5db table functions",
 	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("h5db_batch_size", "Target batch size for h5_read chunk caching (e.g. 1MB, 8MB)",
+	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_BATCH_SIZE_SETTING), SetH5dbBatchSize);
 
 	// Register HDF5 table functions
 	RegisterH5TreeFunction(loader);

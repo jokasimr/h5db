@@ -336,25 +336,33 @@ static H5DataspaceHandle CreateMemspaceAndSelect(hid_t file_space_id, const Regu
 	return mem_space;
 }
 
-static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id) {
-	idx_t chunk_size = 0;
+static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, idx_t target_batch_size_bytes) {
+	idx_t chunk_rows = 0;
 	hid_t dcpl = H5Dget_create_plist(dataset_id);
 	if (dcpl >= 0) {
 		H5D_layout_t layout = H5Pget_layout(dcpl);
 		if (layout == H5D_CHUNKED) {
 			std::vector<hsize_t> chunk_dims(spec.ndims);
-			if (H5Pget_chunk(dcpl, spec.ndims, chunk_dims.data()) >= 0) {
-				chunk_size = chunk_dims[0];
+			if (H5Pget_chunk(dcpl, spec.ndims, chunk_dims.data()) >= 0 && chunk_dims[0] > 0) {
+				chunk_rows = chunk_dims[0];
 			}
 		}
 		H5Pclose(dcpl);
 	}
 
-	if (chunk_size == 0) {
-		constexpr idx_t DEFAULT_CHUNK_BYTES = 1 * 1024 * 1024;
-		// Note: for very wide rows this can still pick a large row count.
-		// We accept this to preserve scan chunk sizing requirements.
-		chunk_size = DEFAULT_CHUNK_BYTES / spec.element_size;
+	idx_t chunk_size;
+	if (chunk_rows > 0) {
+		auto row_bytes = MaxValue<idx_t>(spec.element_size, 1);
+		idx_t target_rows = MaxValue<idx_t>(target_batch_size_bytes / row_bytes, 1);
+		target_rows = MaxValue<idx_t>(target_rows, chunk_rows);
+		idx_t remainder = target_rows % chunk_rows;
+		if (remainder != 0) {
+			target_rows += (chunk_rows - remainder);
+		}
+		chunk_size = target_rows;
+		D_ASSERT(chunk_size % chunk_rows == 0);
+	} else {
+		chunk_size = H5DB_DEFAULT_BATCH_SIZE_BYTES / MaxValue<idx_t>(spec.element_size, 1);
 	}
 	if (chunk_size < STANDARD_VECTOR_SIZE) {
 		chunk_size = STANDARD_VECTOR_SIZE;
@@ -967,6 +975,7 @@ static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx,
 static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
+	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
 
 	// Store which columns to scan (projection pushdown)
 	if (input.column_ids.empty()) {
@@ -1040,7 +1049,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    // Create cache structure (chunks array is already allocated)
 					    state.chunk_cache = std::make_unique<ChunkCache>();
 
-					    idx_t chunk_size = ComputeChunkSize(spec, state.dataset.get());
+					    idx_t chunk_size = ComputeChunkSize(spec, state.dataset.get(), target_batch_size_bytes);
 
 					    // Allocate typed cache buffer (chunk_size * elements_per_row elements)
 					    auto base_type = GetBaseType(spec.column_type);

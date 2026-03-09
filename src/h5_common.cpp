@@ -2,6 +2,7 @@
 #include "h5_internal.hpp"
 #include "h5_raii.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/config.hpp"
 #include <vector>
 #include <string>
 #include <mutex>
@@ -23,6 +24,32 @@ bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &name
 	}
 
 	return false;
+}
+
+idx_t ParseBatchSizeSetting(const Value &setting_value) {
+	auto input = setting_value.ToString();
+	idx_t parsed;
+	try {
+		parsed = DBConfig::ParseMemoryLimit(input);
+	} catch (std::exception &) {
+		throw InvalidInputException("Invalid value for h5db_batch_size: %s", input);
+	}
+
+	if (parsed == 0 || parsed == DConstants::INVALID_INDEX ||
+	    parsed >= static_cast<idx_t>(NumericLimits<int64_t>::Maximum())) {
+		throw InvalidInputException("Invalid value for h5db_batch_size: %s", input);
+	}
+	return parsed;
+}
+
+idx_t ResolveBatchSizeOption(ClientContext &context) {
+	Value setting;
+	if (!context.TryGetCurrentSetting("h5db_batch_size", setting)) {
+		return H5DB_DEFAULT_BATCH_SIZE_BYTES;
+	}
+
+	auto parsed = ParseBatchSizeSetting(setting);
+	return MinValue<idx_t>(parsed, H5DB_MAX_BATCH_SIZE_BYTES);
 }
 
 // Convert HDF5 type to string representation

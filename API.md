@@ -214,6 +214,15 @@ Default SWMR read mode for h5db table functions. Defaults to `false`.
 SET h5db_swmr_default = true;
 ```
 
+### `h5db_batch_size` (VARCHAR)
+Target batch size used by `h5_read` chunk caching for chunked datasets. Accepts DuckDB memory-size strings such as
+`'1MB'`, `'8MB'`, `'512KB'`. Defaults to `'1MB'`. Values above `1GB` are clamped to `1GB`.
+
+**Example:**
+```sql
+SET h5db_batch_size = '4MB';
+```
+
 ---
 
 ## Type Mapping

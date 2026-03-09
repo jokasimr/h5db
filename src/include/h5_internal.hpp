@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include <string>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
@@ -12,9 +13,24 @@ namespace duckdb {
 // This prevents crashes when DuckDB parallelizes table function execution
 extern std::recursive_mutex hdf5_global_mutex;
 
+// Single source of truth for h5_read default batch size.
+static constexpr idx_t H5DB_DEFAULT_BATCH_SIZE_BYTES = 1 * 1024 * 1024;
+// Hard upper bound for h5_read batch size setting.
+static constexpr idx_t H5DB_MAX_BATCH_SIZE_BYTES = 1 * 1024 * 1024 * 1024;
+
+static constexpr const char *H5DB_DEFAULT_BATCH_SIZE_SETTING = "1MB";
+static constexpr const char *H5DB_MAX_BATCH_SIZE_SETTING = "1GB";
+
 // Resolve SWMR read mode from named parameters or default setting.
 // Named parameter "swmr" takes precedence over h5db_swmr_default.
 bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters);
+
+// Parse and validate h5db batch size from a VARCHAR setting value.
+// Invalid inputs throw InvalidInputException.
+idx_t ParseBatchSizeSetting(const Value &setting_value);
+
+// Resolve configured target batch size in bytes for h5_read chunk caching.
+idx_t ResolveBatchSizeOption(ClientContext &context);
 
 // Type tag for compile-time type dispatch
 template <typename T>
