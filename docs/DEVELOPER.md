@@ -270,6 +270,14 @@ make test_remote_http
 
 This target also runs `test/sql/remote/*.test` (auth, timeout, retries, redirects, and error injection).
 
+### TODO: Re-enable macOS Remote CI Coverage
+
+Remote HTTP tests are currently skipped on macOS in the Makefile test targets (`test_*_internal`) due to a GitHub-hosted macOS runner issue where the local range test server process can stay alive but fail readiness.
+
+TODO:
+- Root-cause and fix the macOS runner startup/readiness behavior for `test/scripts/range_http_server.py`.
+- Remove the Darwin skip guard in the Makefile once fixed so remote tests run on macOS CI again.
+
 ---
 
 ## Working with Python Scripts
