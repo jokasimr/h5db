@@ -89,7 +89,37 @@ done
 
 if [[ "$READY" -ne 1 ]]; then
   echo "Failed to start range HTTP server on port $PORT" >&2
+  echo "Diagnostic: server_pid=$SERVER_PID" >&2
+  if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    echo "Diagnostic: server process is still alive" >&2
+    ps -p "$SERVER_PID" -o pid,ppid,stat,etime,command >&2 || true
+  else
+    echo "Diagnostic: server process is not alive" >&2
+  fi
+
+  echo "Diagnostic: probe result for http://127.0.0.1:${PORT}/simple.h5" >&2
+  python3 - "$PORT" >&2 <<'PY' || true
+import sys
+import urllib.request
+
+port = sys.argv[1]
+url = f"http://127.0.0.1:{port}/simple.h5"
+req = urllib.request.Request(url, method="HEAD", headers={"Range": "bytes=0-99"})
+try:
+    with urllib.request.urlopen(req, timeout=1.0) as resp:
+        code = getattr(resp, "status", resp.getcode())
+        print(f"HEAD+Range status={code}")
+except Exception as e:
+    print(f"HEAD+Range exception={type(e).__name__}: {e}")
+PY
+
+  if command -v lsof >/dev/null 2>&1; then
+    echo "Diagnostic: listeners on TCP port $PORT" >&2
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
+  fi
+
   if [[ -f /tmp/h5db_remote_http.log ]]; then
+    echo "Diagnostic: tail of /tmp/h5db_remote_http.log" >&2
     tail -n 80 /tmp/h5db_remote_http.log >&2 || true
   fi
   exit 1
