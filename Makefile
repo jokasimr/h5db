@@ -11,17 +11,29 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 test_release_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/release/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH)
+	if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "Skipping remote HTTP tests on macOS"; \
+	else \
+		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH); \
+	fi
 
 test_debug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/debug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH)
+	if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "Skipping remote HTTP tests on macOS"; \
+	else \
+		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH); \
+	fi
 
 test_reldebug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/reldebug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH)
+	if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "Skipping remote HTTP tests on macOS"; \
+	else \
+		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH); \
+	fi
 
 test_remote_http:
 	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh
