@@ -1,0 +1,17 @@
+# name: test/sql/batch_index_plan.test
+# description: Planner regression tests for h5_read batch-index support
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query TT
+EXPLAIN CREATE TEMP TABLE tmp_h5 AS
+SELECT * FROM h5_read('test/data/simple.h5', '/integers');
+----
+physical_plan	<REGEX>:.*BATCH_CREATE_TABLE_AS.*H5_READ.*

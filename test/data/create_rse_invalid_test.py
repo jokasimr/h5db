@@ -31,4 +31,14 @@ with h5py.File("rse_invalid.h5", "w") as f:
     grp = f.create_group("non_integer_starts")
     create_case(grp, [0.0, 5.0], [100, 200], np.float64, np.int32)
 
+    # run_starts must be 1-dimensional.
+    grp = f.create_group("multidim_starts")
+    grp.create_dataset("run_starts", data=np.array([[0], [5]], dtype=np.uint64))
+    grp.create_dataset("values", data=np.array([100, 200], dtype=np.int32))
+
+    # values must be 1-dimensional.
+    grp = f.create_group("multidim_values")
+    grp.create_dataset("run_starts", data=np.array([0, 5], dtype=np.uint64))
+    grp.create_dataset("values", data=np.array([[100], [200]], dtype=np.int32))
+
 print("Created rse_invalid.h5 successfully!")

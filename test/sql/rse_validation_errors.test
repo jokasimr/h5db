@@ -47,3 +47,23 @@ SELECT * FROM h5_read(
 );
 ----
 IO Error: RSE run_starts must be integer type
+
+# run_starts must be 1-dimensional
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/multidim_starts/run_starts', '/multidim_starts/values')
+);
+----
+IO Error: RSE run_starts must be a 1-dimensional dataset
+
+# values must be 1-dimensional
+statement error
+SELECT * FROM h5_read(
+    'test/data/rse_invalid.h5',
+    '/regular',
+    h5_rse('/multidim_values/run_starts', '/multidim_values/values')
+);
+----
+IO Error: RSE values must be a 1-dimensional dataset

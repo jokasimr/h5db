@@ -217,6 +217,10 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	// No destructor needed - RAII wrappers handle all cleanup automatically
 };
 
+struct H5ReadLocalState : public LocalTableFunctionState {
+	idx_t last_range_start = 0;
+};
+
 // =============================================================================
 // Helper functions for safe column index mapping
 // =============================================================================
@@ -1123,9 +1127,24 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 				    // Get array sizes
 				    H5DataspaceHandle starts_space(starts_ds);
+				    int starts_ndims = H5Sget_simple_extent_ndims(starts_space);
+				    if (starts_ndims < 0) {
+					    throw IOException("Failed to get dimensions for RSE run_starts dataset: " +
+					                      spec.run_starts_path);
+				    }
+				    if (starts_ndims != 1) {
+					    throw IOException("RSE run_starts must be a 1-dimensional dataset");
+				    }
 				    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(starts_space);
 
 				    H5DataspaceHandle values_space(values_ds);
+				    int values_ndims = H5Sget_simple_extent_ndims(values_space);
+				    if (values_ndims < 0) {
+					    throw IOException("Failed to get dimensions for RSE values dataset: " + spec.values_path);
+				    }
+				    if (values_ndims != 1) {
+					    throw IOException("RSE values must be a 1-dimensional dataset");
+				    }
 				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
 				    if (num_runs_hssize < 0 || num_values_hssize < 0) {
@@ -1187,6 +1206,11 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	result->position_done = AdjustPositionDoneForRanges(result->valid_row_ranges, 0);
 
 	return std::move(result);
+}
+
+static unique_ptr<LocalTableFunctionState> H5ReadInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                                           GlobalTableFunctionState *global_state) {
+	return make_uniq<H5ReadLocalState>();
 }
 
 // Helper: Flip comparison for when constant is on left side (e.g., 10 < col becomes col > 10)
@@ -1777,6 +1801,7 @@ static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnSta
 static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
 	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
+	auto &lstate = data.local_state->Cast<H5ReadLocalState>();
 
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate);
@@ -1787,6 +1812,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	idx_t position = range_selection.position;
 	idx_t to_read = range_selection.to_read;
+	lstate.last_range_start = position;
 
 	// Process only scanned columns (projection pushdown)
 	// Uses LOCAL indexing - both output.data and column_states are indexed [0, 1, 2...]
@@ -1977,6 +2003,14 @@ static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, cons
 	return make_uniq<NodeStatistics>(bind_data.num_rows);
 }
 
+static OperatorPartitionData H5ReadGetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input) {
+	if (input.partition_info.RequiresPartitionColumns()) {
+		throw InternalException("h5_read::GetPartitionData: partition columns not supported");
+	}
+	auto &lstate = input.local_state->Cast<H5ReadLocalState>();
+	return OperatorPartitionData(lstate.last_range_start);
+}
+
 void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// First argument is filename (VARCHAR), then 1+ dataset paths (VARCHAR or STRUCT for RSE)
 	TableFunction h5_read("h5_read", {LogicalType::VARCHAR, LogicalType::ANY}, H5ReadScan, H5ReadBind, H5ReadInit);
@@ -1998,6 +2032,11 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 
 	// Set cardinality function for query optimizer
 	h5_read.cardinality = H5ReadCardinality;
+	h5_read.init_local = H5ReadInitLocal;
+	// We use the chunk's starting row as its batch index. DuckDB requires batch indexes to stay below
+	// PipelineBuildState::BATCH_INCREMENT (currently 1e13) within a pipeline, so this limits h5_read scans
+	// participating in batch-indexed sink paths to fewer than 1e13 rows.
+	h5_read.get_partition_data = H5ReadGetPartitionData;
 
 	loader.RegisterFunction(h5_read);
 }
