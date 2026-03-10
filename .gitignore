@@ -9,3 +9,5 @@ __pycache__
 *.hdf5
 *.hdf
 *.h5
+*.parquet
+*.csv

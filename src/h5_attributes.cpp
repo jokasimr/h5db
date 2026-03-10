@@ -37,6 +37,13 @@ struct AttrIterData {
 	std::string error_message;
 };
 
+static std::string NormalizeObjectPath(std::string object_path) {
+	if (object_path.empty()) {
+		return "/";
+	}
+	return object_path;
+}
+
 static std::string NormalizeExceptionMessage(const std::string &message) {
 	if (message.empty() || message.front() != '{') {
 		return message;
@@ -123,6 +130,12 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 		}
 	}
 
+	if (duckdb_type.id() == LogicalTypeId::ARRAY &&
+	    ArrayType::GetChildType(duckdb_type).id() == LogicalTypeId::VARCHAR) {
+		return fail("Attribute '" + std::string(attr_name) +
+		            "' has unsupported type: string array attributes are not supported");
+	}
+
 	AttributeInfo info;
 	info.name = attr_name;
 	info.type = duckdb_type;
@@ -138,7 +151,7 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	auto result = make_uniq<H5AttributesBindData>();
 
 	result->filename = input.inputs[0].GetValue<string>();
-	result->object_path = input.inputs[1].GetValue<string>();
+	result->object_path = NormalizeObjectPath(input.inputs[1].GetValue<string>());
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
@@ -239,7 +252,9 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 
 				if (str_ptr) {
 					FlatVector::GetData<string_t>(result_vector)[0] = StringVector::AddString(result_vector, str_ptr);
-					free(str_ptr);
+					if (H5free_memory(str_ptr) < 0) {
+						throw IOException("Failed to reclaim variable-length string attribute: " + attr_info.name);
+					}
 				} else {
 					FlatVector::SetNull(result_vector, 0, true);
 				}

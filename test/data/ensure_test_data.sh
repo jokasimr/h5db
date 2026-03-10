@@ -20,6 +20,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/rse_invalid.h5"
   "$PROJECT_ROOT/test/data/unsupported_types.h5"
   "$PROJECT_ROOT/test/data/attrs_edge_cases.h5"
+  "$PROJECT_ROOT/test/data/root_attrs.h5"
   "$PROJECT_ROOT/test/data/empty_scalar.h5"
   "$PROJECT_ROOT/test/data/names_edge_cases.h5"
   "$PROJECT_ROOT/test/data/multidim_mismatch.h5"

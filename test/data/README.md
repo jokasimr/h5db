@@ -35,6 +35,7 @@ To ensure test data exists (generate only if missing):
 | `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
 | `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported HDF5 types (enum, compound, float16) |
 | `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Attribute edge cases (empty, vlen, multidim) |
+| `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling and unsupported string-array attrs |
 | `empty_scalar.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets (row-count edge cases) |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
@@ -71,6 +72,7 @@ test/data/
 ├── create_rse_invalid_test.py         # Creates: rse_invalid.h5
 ├── create_unsupported_types_test.py   # Creates: unsupported_types.h5
 ├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
+├── create_root_attrs_test.py          # Creates: root_attrs.h5
 ├── create_empty_scalar_test.py        # Creates: empty_scalar.h5
 ├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5

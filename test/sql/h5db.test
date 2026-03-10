@@ -32,6 +32,15 @@ FROM h5_tree('test/data/simple.h5');
 ----
 3
 
+# Test h5_tree normalizes the root object path to '/'
+query T
+SELECT path
+FROM h5_tree('test/data/simple.h5')
+WHERE path = '/'
+ORDER BY path;
+----
+/
+
 # Test h5_tree shape semantics: scalar -> []
 query I
 SELECT COUNT(*) FILTER (WHERE path = '/scalar_int' AND shape = [])
@@ -487,9 +496,9 @@ SELECT SUM(array_1d) FROM h5_read('test/data/multidim.h5', '/array_1d');
 ----
 45
 
-# Test that root group ("/." path) appears in h5_tree
+# Test that root group appears in h5_tree as "/"
 query I
-SELECT COUNT(*) FROM h5_tree('test/data/simple.h5') WHERE path = '/.';
+SELECT COUNT(*) FROM h5_tree('test/data/simple.h5') WHERE path = '/';
 ----
 1
 

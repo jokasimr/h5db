@@ -28,6 +28,24 @@ FROM h5_attributes('test/data/attrs_edge_cases.h5', '/string_attrs');
 ----
 variable	fixed
 
+# Root attributes should work for both '/' and ''.
+query TI
+SELECT root_name, root_number
+FROM h5_attributes('test/data/root_attrs.h5', '/');
+----
+root	7
+
+query TI
+SELECT root_name, root_number
+FROM h5_attributes('test/data/root_attrs.h5', '');
+----
+root	7
+
+statement error
+SELECT * FROM h5_attributes('test/data/root_attrs.h5', '/string_array_attrs');
+----
+IO Error: Attribute 'labels' has unsupported type: string array attributes are not supported
+
 # =============================================================================
 # Unsupported multidimensional attribute
 # =============================================================================

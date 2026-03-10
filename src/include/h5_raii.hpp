@@ -11,6 +11,14 @@ using namespace duckdb;
 // ==================== HDF5 RAII Wrappers ====================
 // These classes provide automatic resource management for HDF5 handles
 // All wrappers are move-only to prevent accidental double-close bugs
+//
+// Locking invariant:
+// - Constructors/destructors acquire hdf5_global_mutex around HDF5 API calls.
+// - Reassigning a live wrapper via move-assignment assumes the caller already
+//   holds hdf5_global_mutex before replacing the existing handle.
+// Current call sites only move into default-initialized wrappers, so the
+// "close old handle" branch is effectively a documented footgun rather than an
+// active concurrency path.
 
 // RAII wrapper for HDF5 error handler state
 // Automatically disables HDF5 error printing on construction and restores it on destruction

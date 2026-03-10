@@ -99,7 +99,8 @@ Reads attributes from a dataset or group.
 - Column types match the attribute types (numeric, string, or arrays)
 
 **Type Support:**
-- Same as `h5_read()`: all numeric types, strings, and 1D arrays
+- Numeric scalars, string scalars, and 1D numeric arrays
+- String array attributes are not currently supported
 
 **Examples:**
 ```sql

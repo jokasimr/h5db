@@ -50,7 +50,7 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 	auto &objects = *reinterpret_cast<std::vector<H5ObjectInfo> *>(op_data);
 
 	H5ObjectInfo obj_info;
-	obj_info.path = std::string("/") + name;
+	obj_info.path = std::string(name) == "." ? "/" : std::string("/") + name;
 
 	if (info->type == H5O_TYPE_GROUP) {
 		obj_info.type = "group";
