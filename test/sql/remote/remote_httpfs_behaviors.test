@@ -27,6 +27,35 @@ SELECT COUNT(*) FROM h5_read('test/data/auth/simple.h5', '/integers');
 ----
 10
 
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/auth/simple.h5');
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+1
+
+# =============================================================================
+# Remote SWMR argument behavior
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/simple.h5', '/integers', swmr := true);
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/simple.h5', swmr := true);
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs', swmr := true);
+----
+1
+
 # =============================================================================
 # Non-existing file
 # =============================================================================
@@ -41,6 +70,14 @@ SELECT COUNT(*) FROM h5_read('test/data/does_not_exist_remote_case.h5', '/intege
 
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/status/503/simple.h5', '/integers');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/status/503/simple.h5');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/status/503/with_attrs.h5', '/dataset_with_attrs');
 ----
 
 # =============================================================================

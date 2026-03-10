@@ -195,6 +195,7 @@ public:
 	H5FileHandle &operator=(H5FileHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Fclose(id);
 			}
 			id = other.id;
