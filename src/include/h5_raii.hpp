@@ -151,6 +151,7 @@ public:
 				open_flags |= H5F_ACC_SWMR_READ;
 			}
 			if (is_remote) {
+				H5RemoteVFD::ClearLastError();
 				H5RemoteVFD::SetOpenContext(context);
 				open_context_set = true;
 			}
@@ -169,6 +170,9 @@ public:
 		}
 		if (fapl >= 0) {
 			H5Pclose(fapl);
+		}
+		if (id >= 0 && is_remote) {
+			H5RemoteVFD::ClearLastError();
 		}
 	}
 

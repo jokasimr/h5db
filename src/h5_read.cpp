@@ -28,6 +28,30 @@
 
 namespace duckdb {
 
+static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
+	auto remote_error = H5RemoteVFD::TakeLastError();
+	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
+		return prefix + ": " + filename + " (" + remote_error + ")";
+	}
+	return prefix + ": " + filename;
+}
+
+static string FormatRemoteDatasetReadError(const string &filename, const string &dataset_path) {
+	auto remote_error = H5RemoteVFD::TakeLastError();
+	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
+		return "Failed to read data from dataset: " + dataset_path + " (" + remote_error + ")";
+	}
+	return "Failed to read data from dataset: " + dataset_path;
+}
+
+static string FormatRemoteChunkReadError(const string &filename, const string &dataset_path) {
+	auto remote_error = H5RemoteVFD::TakeLastError();
+	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
+		return "Failed to read chunk from HDF5 dataset: " + dataset_path + " (" + remote_error + ")";
+	}
+	return "Failed to read chunk from HDF5 dataset: " + dataset_path;
+}
+
 // =============================================================================
 // Type-safe index wrappers for projection pushdown
 // =============================================================================
@@ -768,7 +792,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	}
 
 	if (!file.is_valid()) {
-		throw IOException("Failed to open HDF5 file: " + result->filename);
+		throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", result->filename));
 	}
 
 	// Track minimum rows across all non-scalar regular columns
@@ -1008,7 +1032,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	}
 
 	if (!result->file.is_valid()) {
-		throw IOException("Failed to open HDF5 file: " + bind_data.filename);
+		throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", bind_data.filename));
 	}
 
 	// Allocate DENSE column_states array - only for scanned columns
@@ -1096,7 +1120,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 						    herr_t status =
 						        H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &value);
 						    if (status < 0) {
-							    throw IOException("Failed to read data from dataset: " + spec.path);
+							    throw IOException(FormatRemoteDatasetReadError(bind_data.filename, spec.path));
 						    }
 						    scalar_state.value = value;
 					    });
@@ -1556,7 +1580,7 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 // Helper: Read data from HDF5 into typed cache buffer
 static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_rows, hid_t dataset_id,
                                hid_t file_space_id, idx_t dataset_row_start, idx_t rows_to_read,
-                               const RegularColumnSpec &spec) {
+                               const RegularColumnSpec &spec, const string &filename) {
 	auto base_type = GetBaseType(spec.column_type);
 	DispatchOnNumericType(base_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
@@ -1572,7 +1596,7 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_r
 		herr_t status = H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space_id, H5P_DEFAULT,
 		                        typed_cache.data() + buffer_offset);
 		if (status < 0) {
-			throw IOException("Failed to read chunk from HDF5 dataset");
+			throw IOException(FormatRemoteChunkReadError(filename, spec.path));
 		}
 	});
 }
@@ -1598,7 +1622,7 @@ static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_of
 
 static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
                           const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
-                          idx_t total_rows, const RegularColumnSpec &spec) {
+                          idx_t total_rows, const RegularColumnSpec &spec, const string &filename) {
 
 	idx_t max_end_row = 0;
 	for (Chunk &chunk : cache.chunks) {
@@ -1613,7 +1637,8 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 			if (next_range.has_data) {
 
 				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
-				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec);
+				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
+				                   filename);
 
 				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
@@ -1663,7 +1688,8 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 					                  std::is_same_v<StateT, RegularColumnState>) {
 						    if (state.chunk_cache) {
 							    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-							                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec);
+							                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec,
+							                  bind_data.filename);
 						    }
 					    }
 				    },
@@ -1764,7 +1790,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		});
 
 		if (status < 0) {
-			throw IOException("Failed to read data from dataset: " + spec.path);
+			throw IOException(FormatRemoteDatasetReadError(bind_data.filename, spec.path));
 		}
 	}
 

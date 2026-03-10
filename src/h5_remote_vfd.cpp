@@ -4,6 +4,7 @@
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/storage/caching_file_system.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "h5_internal.hpp"
@@ -18,31 +19,33 @@
 namespace duckdb {
 
 static constexpr H5FD_class_value_t DUCKDB_VFD_VALUE = 600;
-static constexpr idx_t METADATA_CACHE_BLOCK_SIZE = 1048576;
-static constexpr idx_t METADATA_CACHE_MAX_BLOCKS = 128;
+static constexpr idx_t REMOTE_CACHE_BLOCK_SIZE = 1048576;
+static constexpr idx_t REMOTE_CACHE_MAX_BLOCKS = 128;
 static hid_t duckdb_vfd_driver_id = -1;
 static std::once_flag duckdb_vfd_register_once;
 static thread_local ClientContext *duckdb_vfd_open_context = nullptr;
+static thread_local std::string duckdb_vfd_last_error;
 
 struct DuckDBVFDConfig {
 	ClientContext *context;
 };
 
 struct H5FD_duckdb_t : public H5FD_t {
-	struct MetadataCacheBlock {
+	struct CachedBlock {
 		shared_ptr<BlockHandle> block_handle;
 		idx_t valid_bytes = 0;
 		std::list<idx_t>::iterator lru_it;
 	};
-	using MetadataCacheMap = std::unordered_map<idx_t, MetadataCacheBlock>;
+	using CachedBlockMap = std::unordered_map<idx_t, CachedBlock>;
 
-	unique_ptr<FileHandle> handle;
+	unique_ptr<CachingFileSystem> caching_fs;
+	unique_ptr<CachingFileHandle> handle;
 	BufferManager *buffer_manager = nullptr;
 	std::string path;
 	haddr_t eof;
 	haddr_t eoa;
-	MetadataCacheMap metadata_cache_blocks;
-	std::list<idx_t> metadata_cache_lru;
+	CachedBlockMap cached_blocks;
+	std::list<idx_t> cache_lru;
 };
 
 static inline H5FD_duckdb_t *GetFile(H5FD_t *f) {
@@ -54,70 +57,107 @@ static inline const H5FD_duckdb_t *GetFile(const H5FD_t *f) {
 }
 
 static inline idx_t CacheBlockId(idx_t offset) {
-	return offset / METADATA_CACHE_BLOCK_SIZE;
+	return offset / REMOTE_CACHE_BLOCK_SIZE;
 }
 
-static void TouchMetadataBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::MetadataCacheMap::iterator it) {
-	file.metadata_cache_lru.erase(it->second.lru_it);
-	file.metadata_cache_lru.push_front(it->first);
-	it->second.lru_it = file.metadata_cache_lru.begin();
+static void SetLastError(const std::string &error) {
+	duckdb_vfd_last_error = error;
 }
 
-static void EvictMetadataBlockIfNeeded(H5FD_duckdb_t &file) {
-	while (file.metadata_cache_blocks.size() >= METADATA_CACHE_MAX_BLOCKS && !file.metadata_cache_lru.empty()) {
-		auto evict_block_id = file.metadata_cache_lru.back();
-		file.metadata_cache_lru.pop_back();
-		file.metadata_cache_blocks.erase(evict_block_id);
+static void ClearLastErrorInternal() {
+	duckdb_vfd_last_error.clear();
+}
+
+static void TouchBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::CachedBlockMap::iterator it) {
+	file.cache_lru.erase(it->second.lru_it);
+	file.cache_lru.push_front(it->first);
+	it->second.lru_it = file.cache_lru.begin();
+}
+
+static void EvictBlockIfNeeded(H5FD_duckdb_t &file) {
+	while (file.cached_blocks.size() >= REMOTE_CACHE_MAX_BLOCKS && !file.cache_lru.empty()) {
+		auto evict_block_id = file.cache_lru.back();
+		file.cache_lru.pop_back();
+		file.cached_blocks.erase(evict_block_id);
 	}
 }
 
-static H5FD_duckdb_t::MetadataCacheBlock &LoadMetadataBlock(H5FD_duckdb_t &file, idx_t block_id) {
-	auto it = file.metadata_cache_blocks.find(block_id);
-	if (it != file.metadata_cache_blocks.end()) {
-		TouchMetadataBlock(file, it);
+static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t block_id) {
+	auto it = file.cached_blocks.find(block_id);
+	if (it != file.cached_blocks.end()) {
+		TouchBlock(file, it);
 		return it->second;
 	}
 
-	EvictMetadataBlockIfNeeded(file);
+	EvictBlockIfNeeded(file);
 
-	auto block_offset = block_id * METADATA_CACHE_BLOCK_SIZE;
-	auto bytes_to_read = MinValue<idx_t>(METADATA_CACHE_BLOCK_SIZE, static_cast<idx_t>(file.eof) - block_offset);
+	auto block_offset = block_id * REMOTE_CACHE_BLOCK_SIZE;
+	auto bytes_to_read = MinValue<idx_t>(REMOTE_CACHE_BLOCK_SIZE, static_cast<idx_t>(file.eof) - block_offset);
 	if (bytes_to_read == 0) {
-		throw IOException("Failed to load metadata cache block: zero bytes available");
+		throw IOException("Failed to load remote cache block: zero bytes available");
 	}
-	if (!file.buffer_manager) {
-		throw IOException("Failed to load metadata cache block: no buffer manager");
+	if (!file.handle) {
+		throw IOException("Failed to load remote cache block: no readable file handle");
 	}
 
-	H5FD_duckdb_t::MetadataCacheBlock block;
-	auto pinned_buffer = file.buffer_manager->Allocate(MemoryTag::EXTENSION, bytes_to_read);
+	data_ptr_t buffer = nullptr;
+	auto pinned_buffer = file.handle->Read(buffer, bytes_to_read, block_offset);
+	H5FD_duckdb_t::CachedBlock block;
 	block.block_handle = pinned_buffer.GetBlockHandle();
 	if (!block.block_handle) {
-		throw IOException("Failed to load metadata cache block: allocation returned invalid block handle");
+		throw IOException("Failed to load remote cache block: invalid block handle");
 	}
-	auto *source_handle = file.handle.get();
-	if (!source_handle) {
-		throw IOException("Failed to load metadata cache block: no readable file handle");
-	}
-	source_handle->Read(pinned_buffer.Ptr(), bytes_to_read, block_offset);
 	block.valid_bytes = bytes_to_read;
-	file.metadata_cache_lru.push_front(block_id);
-	block.lru_it = file.metadata_cache_lru.begin();
+	file.cache_lru.push_front(block_id);
+	block.lru_it = file.cache_lru.begin();
 
-	auto inserted = file.metadata_cache_blocks.emplace(block_id, std::move(block));
+	auto inserted = file.cached_blocks.emplace(block_id, std::move(block));
 	return inserted.first->second;
 }
 
-static void CopyFromMetadataBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::MetadataCacheBlock &block, idx_t offset_in_block,
-                                  char *out, idx_t to_copy) {
+static void CopyFromCachedBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::CachedBlock &block, idx_t offset_in_block,
+                                char *out, idx_t to_copy) {
 	if (!file.buffer_manager) {
-		throw IOException("Failed to read metadata cache block: no buffer manager");
+		throw IOException("Failed to read remote cache block: no buffer manager");
 	}
 	if (!block.block_handle) {
-		throw IOException("Failed to read metadata cache block: invalid block handle");
+		throw IOException("Failed to read remote cache block: invalid block handle");
 	}
 	auto pinned_block = file.buffer_manager->Pin(block.block_handle);
 	std::memcpy(out, pinned_block.Ptr() + offset_in_block, to_copy);
+}
+
+static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
+	auto *out = static_cast<char *>(buf);
+	idx_t remaining = read_size;
+	idx_t current_offset = read_offset;
+	while (remaining > 0) {
+		auto block_id = CacheBlockId(current_offset);
+		auto &block = LoadCachedBlock(file, block_id);
+		auto block_offset = block_id * REMOTE_CACHE_BLOCK_SIZE;
+		auto offset_in_block = current_offset - block_offset;
+		if (offset_in_block >= block.valid_bytes) {
+			throw IOException("Failed to read remote cache block: read past valid block data");
+		}
+		auto bytes_in_block = block.valid_bytes - offset_in_block;
+		auto to_copy = MinValue<idx_t>(remaining, bytes_in_block);
+		CopyFromCachedBlock(file, block, offset_in_block, out, to_copy);
+		out += to_copy;
+		current_offset += to_copy;
+		remaining -= to_copy;
+	}
+}
+
+static void ReadExact(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
+	if (!file.handle) {
+		throw IOException("Failed to read remote data: no readable file handle");
+	}
+	data_ptr_t buffer = nullptr;
+	auto pinned_buffer = file.handle->Read(buffer, read_size, read_offset);
+	if (!pinned_buffer.IsValid() || !buffer) {
+		throw IOException("Failed to read remote data: invalid cached buffer");
+	}
+	std::memcpy(buf, buffer, read_size);
 }
 
 static void *DuckDBFAPLCopy(const void *fapl) {
@@ -152,20 +192,25 @@ static H5FD_t *DuckDBOpen(const char *name, unsigned flags, hid_t fapl_id, haddr
 	}
 
 	try {
-		auto &fs = FileSystem::GetFileSystem(*context);
-		auto buffered_handle = fs.OpenFile(name, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
-		if (!buffered_handle) {
-			return nullptr;
-		}
-
-		auto file = new H5FD_duckdb_t();
-		file->handle = std::move(buffered_handle);
+		auto file = make_uniq<H5FD_duckdb_t>();
+		file->caching_fs = make_uniq<CachingFileSystem>(CachingFileSystem::Get(*context));
+		OpenFileInfo open_info(name);
+		file->handle = file->caching_fs->OpenFile(QueryContext(*context), open_info,
+		                                          FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
 		file->buffer_manager = &BufferManager::GetBufferManager(*context);
 		file->path = name;
 		file->eof = static_cast<haddr_t>(file->handle->GetFileSize());
 		file->eoa = file->eof;
-		return reinterpret_cast<H5FD_t *>(file);
+		ClearLastErrorInternal();
+		return reinterpret_cast<H5FD_t *>(file.release());
+	} catch (const Exception &ex) {
+		SetLastError(ex.what());
+		return nullptr;
+	} catch (const std::exception &ex) {
+		SetLastError(ex.what());
+		return nullptr;
 	} catch (...) {
+		SetLastError("Unknown error opening remote file through DuckDB httpfs");
 		return nullptr;
 	}
 }
@@ -221,33 +266,23 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 	try {
 		auto read_size = static_cast<idx_t>(size);
 		auto read_offset = static_cast<idx_t>(addr);
-		// `DRAW` corresponds to raw dataset payload. In h5db scans this path is predominantly streaming, so bypass
-		// cache.
-		if (mem_type == H5FD_MEM_DRAW) {
-			f->handle->Read(buf, read_size, read_offset);
-			return 0;
+		// HDF5 can issue tiny chunk-sized raw reads even when the application requested a large hyperslab. Use the
+		// block cache for small reads to collapse those requests, but keep large raw reads exact.
+		if (mem_type == H5FD_MEM_DRAW && read_size >= REMOTE_CACHE_BLOCK_SIZE) {
+			ReadExact(*f, read_offset, read_size, buf);
+		} else {
+			ReadFromBlockCache(*f, read_offset, read_size, buf);
 		}
-
-		auto *out = static_cast<char *>(buf);
-		idx_t remaining = read_size;
-		idx_t current_offset = read_offset;
-		while (remaining > 0) {
-			auto block_id = CacheBlockId(current_offset);
-			auto &block = LoadMetadataBlock(*f, block_id);
-			auto block_offset = block_id * METADATA_CACHE_BLOCK_SIZE;
-			auto offset_in_block = current_offset - block_offset;
-			if (offset_in_block >= block.valid_bytes) {
-				return -1;
-			}
-			auto bytes_in_block = block.valid_bytes - offset_in_block;
-			auto to_copy = MinValue<idx_t>(remaining, bytes_in_block);
-			CopyFromMetadataBlock(*f, block, offset_in_block, out, to_copy);
-			out += to_copy;
-			current_offset += to_copy;
-			remaining -= to_copy;
-		}
+		ClearLastErrorInternal();
 		return 0;
+	} catch (const Exception &ex) {
+		SetLastError(ex.what());
+		return -1;
+	} catch (const std::exception &ex) {
+		SetLastError(ex.what());
+		return -1;
 	} catch (...) {
+		SetLastError("Unknown error reading remote file through DuckDB httpfs");
 		return -1;
 	}
 }
@@ -334,6 +369,16 @@ void H5RemoteVFD::SetOpenContext(ClientContext *context) {
 
 ClientContext *H5RemoteVFD::GetOpenContext() {
 	return duckdb_vfd_open_context;
+}
+
+void H5RemoteVFD::ClearLastError() {
+	ClearLastErrorInternal();
+}
+
+std::string H5RemoteVFD::TakeLastError() {
+	auto error = duckdb_vfd_last_error;
+	duckdb_vfd_last_error.clear();
+	return error;
 }
 
 } // namespace duckdb

@@ -11,6 +11,8 @@ public:
 	static void ConfigureFAPL(ClientContext &context, hid_t fapl_id);
 	static void SetOpenContext(ClientContext *context);
 	static ClientContext *GetOpenContext();
+	static void ClearLastError();
+	static std::string TakeLastError();
 };
 
 } // namespace duckdb

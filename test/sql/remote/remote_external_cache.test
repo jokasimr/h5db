@@ -1,0 +1,47 @@
+# name: test/sql/remote/remote_external_cache.test
+# description: Remote HDF5 reads should use DuckDB's external file cache
+# group: [remote]
+
+require h5db
+
+statement ok
+PRAGMA enable_external_file_cache=true;
+
+statement ok
+SET enable_http_metadata_cache=true;
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+query I
+SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET';
+----
+5
+
+query I
+SELECT COUNT(*) > 0 FROM duckdb_external_file_cache() WHERE path LIKE '%nd_cache_test.h5';
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+query II
+SELECT
+  (SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='HEAD'),
+  (SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
+----
+0	0
