@@ -4,6 +4,8 @@
 
 require h5db
 
+set ignore_error_messages
+
 # =============================================================================
 # Basic auth via DuckDB HTTP secret headers
 # =============================================================================
@@ -14,6 +16,7 @@ DROP SECRET IF EXISTS h5db_http_auth;
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/auth/simple.h5', '/integers');
 ----
+Failed to open HDF5 file: test/data/auth/simple.h5
 
 statement ok
 CREATE SECRET h5db_http_auth (
@@ -63,14 +66,17 @@ SELECT COUNT(*) FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_att
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/does_not_exist_remote_case.h5', '/integers');
 ----
+Failed to open HDF5 file: test/data/does_not_exist_remote_case.h5
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/does_not_exist_remote_case.h5');
 ----
+Failed to open HDF5 file: test/data/does_not_exist_remote_case.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/does_not_exist_remote_case.h5', '/dataset_with_attrs');
 ----
+Failed to open HDF5 file: test/data/does_not_exist_remote_case.h5
 
 # =============================================================================
 # Simulated server errors
@@ -79,14 +85,22 @@ SELECT COUNT(*) FROM h5_attributes('test/data/does_not_exist_remote_case.h5', '/
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/status/503/simple.h5', '/integers');
 ----
+Failed to open HDF5 file: test/data/status/503/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/status/503/simple.h5');
 ----
+Failed to open HDF5 file: test/data/status/503/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/status/503/with_attrs.h5', '/dataset_with_attrs');
 ----
+Failed to open HDF5 file: test/data/status/503/with_attrs.h5
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/status/404/simple.h5', '/integers');
+----
+Failed to open HDF5 file: test/data/status/404/simple.h5
 
 # =============================================================================
 # Retry behavior on transient server errors
@@ -102,6 +116,27 @@ query I
 SELECT COUNT(*) FROM h5_read('test/data/dropflaky/2/simple.h5', '/integers');
 ----
 10
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/flaky/2/503/simple.h5?case=success', '/integers');
+----
+10
+
+statement ok
+SET http_retries=0;
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/dropflaky/2/simple.h5?case=fail', '/integers');
+----
+Server returned nothing
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/flaky/2/503/simple.h5?case=fail', '/integers');
+----
+Request returned HTTP 503 for HTTP HEAD
+
+statement ok
+SET http_retries=3;
 
 # =============================================================================
 # Redirect handling
@@ -135,14 +170,17 @@ SET http_timeout=1;
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/slow/3000/simple.h5', '/integers');
 ----
+Failed to open HDF5 file: test/data/slow/3000/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/slow/3000/simple.h5');
 ----
+Failed to open HDF5 file: test/data/slow/3000/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/slow/3000/with_attrs.h5', '/dataset_with_attrs');
 ----
+Failed to open HDF5 file: test/data/slow/3000/with_attrs.h5
 
 statement ok
 SET http_timeout=30000;
@@ -154,26 +192,32 @@ SET http_timeout=30000;
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/corrupt/simple.h5', '/integers');
 ----
+Failed to open HDF5 file: test/data/corrupt/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/corrupt/simple.h5');
 ----
+Failed to open HDF5 file: test/data/corrupt/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/corrupt/with_attrs.h5', '/dataset_with_attrs');
 ----
+Failed to open HDF5 file: test/data/corrupt/with_attrs.h5
 
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/truncate/256/simple.h5', '/integers');
 ----
+truncate/256/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/truncate/256/simple.h5');
 ----
+Failed to open HDF5 file: test/data/truncate/256/simple.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/truncate/256/with_attrs.h5', '/dataset_with_attrs');
 ----
+Failed to open object: /dataset_with_attrs
 
 statement ok
 SET http_retries=3;

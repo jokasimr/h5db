@@ -85,7 +85,7 @@ SELECT
     COUNT(*) FILTER (WHERE dtype LIKE 'float%')
 FROM h5_tree('test/data/types.h5');
 ----
-4	3	2
+4	4	2
 
 # Test h5_tree shows correct shapes for multi-dimensional arrays
 query IIII
@@ -136,6 +136,11 @@ SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int16');
 3
 
 query I
+SELECT SUM(int16) FROM h5_read('test/data/types.h5', '/int16');
+----
+600
+
+query I
 SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int32');
 ----
 2
@@ -149,6 +154,11 @@ query I
 SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/int64');
 ----
 1
+
+query I
+SELECT int64 FROM h5_read('test/data/types.h5', '/int64');
+----
+1000000
 
 # Test unsigned integers
 query I
@@ -167,9 +177,29 @@ SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint16');
 1
 
 query I
+SELECT uint16 FROM h5_read('test/data/types.h5', '/uint16');
+----
+65535
+
+query I
 SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint32');
 ----
 1
+
+query I
+SELECT uint32 FROM h5_read('test/data/types.h5', '/uint32');
+----
+4294967295
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/uint64');
+----
+1
+
+query I
+SELECT uint64 FROM h5_read('test/data/types.h5', '/uint64');
+----
+18446744073709551615
 
 # Test float types
 query I
@@ -186,6 +216,17 @@ query I
 SELECT COUNT(*) FROM h5_read('test/data/types.h5', '/float64');
 ----
 1
+
+query R
+SELECT float32 FROM h5_read('test/data/types.h5', '/float32') ORDER BY float32;
+----
+2.71
+3.14
+
+query R
+SELECT float64 FROM h5_read('test/data/types.h5', '/float64');
+----
+3.141592653589793
 
 # =============================================================================
 # h5_read() Tests - String Types
@@ -420,14 +461,49 @@ SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/
 TINYINT
 
 query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/int16'));
+----
+SMALLINT
+
+query I
 SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/uint8'));
 ----
 UTINYINT
 
 query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/uint16'));
+----
+USMALLINT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/uint32'));
+----
+UINTEGER
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/uint64'));
+----
+UBIGINT
+
+query I
 SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/float32'));
 ----
 FLOAT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/float64'));
+----
+DOUBLE
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/fixed_strings'));
+----
+VARCHAR
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read('test/data/types.h5', '/var_strings'));
+----
+VARCHAR
 
 # Test array types
 query I

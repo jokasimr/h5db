@@ -17,6 +17,16 @@ FROM h5_tree('test/data/unsupported_types.h5');
 ----
 1	1	1
 
+query IIII
+SELECT
+    COUNT(*) FILTER (WHERE path = '/reference_values' AND dtype = 'unknown'),
+    COUNT(*) FILTER (WHERE path = '/vlen_int_values' AND dtype = 'unknown'),
+    COUNT(*) FILTER (WHERE path = '/opaque_values' AND dtype = 'unknown'),
+    COUNT(*) FILTER (WHERE path = '/bitfield_values' AND dtype = 'unknown')
+FROM h5_tree('test/data/unsupported_types.h5');
+----
+1	1	1	1
+
 # =============================================================================
 # h5_read should error on unsupported types
 # =============================================================================
@@ -35,3 +45,23 @@ statement error
 SELECT * FROM h5_read('test/data/unsupported_types.h5', '/compound_values');
 ----
 IO Error: Unsupported HDF5 type class: 6
+
+statement error
+SELECT * FROM h5_read('test/data/unsupported_types.h5', '/reference_values');
+----
+IO Error: Unsupported HDF5 type class: 7
+
+statement error
+SELECT * FROM h5_read('test/data/unsupported_types.h5', '/vlen_int_values');
+----
+IO Error: Unsupported HDF5 type class: 9
+
+statement error
+SELECT * FROM h5_read('test/data/unsupported_types.h5', '/opaque_values');
+----
+IO Error: Unsupported HDF5 type class: 5
+
+statement error
+SELECT * FROM h5_read('test/data/unsupported_types.h5', '/bitfield_values');
+----
+IO Error: Unsupported HDF5 type class: 4

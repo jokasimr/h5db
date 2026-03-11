@@ -4,6 +4,8 @@
 
 require h5db
 
+set ignore_error_messages
+
 statement ok
 PRAGMA enable_external_file_cache=true;
 
@@ -45,3 +47,61 @@ SELECT
   (SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
 ----
 0	0
+
+statement ok
+PRAGMA enable_external_file_cache=false;
+
+statement ok
+SET enable_http_metadata_cache=true;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+query II
+SELECT
+  (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='HEAD'),
+  (SELECT COUNT(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
+----
+true	true
+
+statement ok
+PRAGMA enable_external_file_cache=true;
+
+statement ok
+SET enable_http_metadata_cache=false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+----
+10
+
+query II
+SELECT
+  (SELECT COUNT(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='HEAD'),
+  (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
+----
+true	true

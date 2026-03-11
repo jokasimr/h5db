@@ -35,4 +35,19 @@ with h5py.File("attrs_edge_cases.h5", "w") as f:
     ds = f.create_dataset("float16_attr_dataset", data=np.arange(2, dtype=np.int32))
     ds.attrs["float16_attr"] = np.float16(1.5)
 
+    # Dataset with object reference attribute (unsupported type).
+    target = f.create_dataset("reference_attr_target", data=np.arange(3, dtype=np.int32))
+    ds = f.create_dataset("reference_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs["ref_attr"] = target.ref
+
+    # Dataset with opaque attribute (unsupported type).
+    opaque_dtype = h5py.opaque_dtype(np.dtype("V4"))
+    ds = f.create_dataset("opaque_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs["opaque_attr"] = np.array(np.void(b"qrst"), dtype=opaque_dtype)
+
+    # Dataset with bitfield attribute (unsupported type).
+    ds = f.create_dataset("bitfield_attr_dataset", data=np.arange(2, dtype=np.int32))
+    attr = h5py.h5a.create(ds.id, b"bitfield_attr", h5py.h5t.STD_B8LE, h5py.h5s.create(h5py.h5s.SCALAR))
+    attr.write(np.array(7, dtype=np.uint8))
+
 print("Created attrs_edge_cases.h5 successfully!")

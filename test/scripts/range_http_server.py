@@ -29,7 +29,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.range_start = None
         self.range_end = None
 
-        raw_path = urllib.parse.urlsplit(self.path).path
+        request_target = self.path
+        raw_path = urllib.parse.urlsplit(request_target).path
         control = self._parse_control_path(raw_path)
         self.truncate_bytes = control["truncate_bytes"]
         self.corrupt_shift = control["corrupt_shift"]
@@ -45,7 +46,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             return None
 
         if control["flaky_failures"] > 0 and control["flaky_status"] is not None:
-            flaky_key = f"{self.command}:{raw_path}"
+            # Key flaky counters by the full request target so tests can namespace
+            # independent failure scenarios with query strings on the same file path.
+            flaky_key = f"{self.command}:{request_target}"
             with FLAKY_LOCK:
                 count = FLAKY_COUNTS.get(flaky_key, 0)
                 FLAKY_COUNTS[flaky_key] = count + 1
@@ -55,7 +58,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 return None
 
         if control["drop_failures"] > 0:
-            drop_key = f"{self.command}:{raw_path}"
+            drop_key = f"{self.command}:{request_target}"
             with FLAKY_LOCK:
                 count = FLAKY_COUNTS.get(drop_key, 0)
                 FLAKY_COUNTS[drop_key] = count + 1
@@ -149,11 +152,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 rewritten = "/" + parts[3]
 
         if rewritten.startswith("/flaky/"):
-            parts = rewritten.split("/", 5)
-            if len(parts) >= 6 and parts[2].isdigit() and parts[3].isdigit():
+            parts = rewritten.split("/", 4)
+            if len(parts) >= 5 and parts[2].isdigit() and parts[3].isdigit():
                 flaky_failures = int(parts[2])
                 flaky_status = int(parts[3])
-                rewritten = "/" + parts[5]
+                rewritten = "/" + parts[4]
 
         if rewritten.startswith("/dropflaky/"):
             parts = rewritten.split("/", 3)

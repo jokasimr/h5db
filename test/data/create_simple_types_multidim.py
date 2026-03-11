@@ -56,6 +56,7 @@ def create_types_test_file(filename='types.h5'):
         f.create_dataset('uint8', data=np.array([255, 254], dtype=np.uint8))
         f.create_dataset('uint16', data=np.array([65535], dtype=np.uint16))
         f.create_dataset('uint32', data=np.array([4294967295], dtype=np.uint32))
+        f.create_dataset('uint64', data=np.array([18446744073709551615], dtype=np.uint64))
 
         # Floats
         f.create_dataset('float32', data=np.array([3.14, 2.71], dtype=np.float32))

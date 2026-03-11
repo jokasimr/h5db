@@ -73,3 +73,18 @@ statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset');
 ----
 IO Error: Attribute 'float16_attr' has unsupported type: Unsupported float size: 2
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/reference_attr_dataset');
+----
+IO Error: Attribute 'ref_attr' has unsupported type: Unsupported HDF5 type class: 7
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/opaque_attr_dataset');
+----
+IO Error: Attribute 'opaque_attr' has unsupported type: Unsupported HDF5 type class: 5
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset');
+----
+IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4
