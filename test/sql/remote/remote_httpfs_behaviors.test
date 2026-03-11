@@ -64,6 +64,14 @@ statement error
 SELECT COUNT(*) FROM h5_read('test/data/does_not_exist_remote_case.h5', '/integers');
 ----
 
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/does_not_exist_remote_case.h5');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/does_not_exist_remote_case.h5', '/dataset_with_attrs');
+----
+
 # =============================================================================
 # Simulated server errors
 # =============================================================================
@@ -104,6 +112,16 @@ SELECT COUNT(*) FROM h5_read('test/data/redirect/307/simple.h5', '/integers');
 ----
 10
 
+query I
+SELECT COUNT(*) FROM h5_tree('test/data/redirect/307/simple.h5');
+----
+10
+
+query I
+SELECT COUNT(*) FROM h5_attributes('test/data/redirect/307/with_attrs.h5', '/dataset_with_attrs');
+----
+1
+
 # =============================================================================
 # Timeout behavior
 # =============================================================================
@@ -118,6 +136,14 @@ statement error
 SELECT COUNT(*) FROM h5_read('test/data/slow/3000/simple.h5', '/integers');
 ----
 
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/slow/3000/simple.h5');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/slow/3000/with_attrs.h5', '/dataset_with_attrs');
+----
+
 statement ok
 SET http_timeout=30000;
 
@@ -130,7 +156,23 @@ SELECT COUNT(*) FROM h5_read('test/data/corrupt/simple.h5', '/integers');
 ----
 
 statement error
+SELECT COUNT(*) FROM h5_tree('test/data/corrupt/simple.h5');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/corrupt/with_attrs.h5', '/dataset_with_attrs');
+----
+
+statement error
 SELECT COUNT(*) FROM h5_read('test/data/truncate/256/simple.h5', '/integers');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/truncate/256/simple.h5');
+----
+
+statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/truncate/256/with_attrs.h5', '/dataset_with_attrs');
 ----
 
 statement ok

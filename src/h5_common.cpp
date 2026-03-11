@@ -1,6 +1,7 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "h5_raii.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/config.hpp"
 #include <vector>
@@ -50,6 +51,45 @@ idx_t ResolveBatchSizeOption(ClientContext &context) {
 
 	auto parsed = ParseBatchSizeSetting(setting);
 	return MinValue<idx_t>(parsed, H5DB_MAX_BATCH_SIZE_BYTES);
+}
+
+bool IsInterrupted(ClientContext &context) {
+	return context.interrupted.load(std::memory_order_relaxed);
+}
+
+void ThrowIfInterrupted(ClientContext &context) {
+	if (IsInterrupted(context)) {
+		throw InterruptException();
+	}
+}
+
+H5RemoteErrorInfo TakeRemoteErrorInfo(const std::string &filename) {
+	if (!H5RemoteVFD::IsRemotePath(filename)) {
+		return {};
+	}
+	return H5RemoteVFD::TakeLastErrorInfo();
+}
+
+std::string AppendRemoteError(const std::string &message, const std::string &filename) {
+	auto error = TakeRemoteErrorInfo(filename);
+	if (error.interrupted) {
+		throw InterruptException();
+	}
+	if (!error.message.empty()) {
+		auto remote_message = error.message;
+		if (!remote_message.empty() && remote_message[0] == '{') {
+			ErrorData error_data(remote_message);
+			if (!error_data.RawMessage().empty()) {
+				remote_message = error_data.RawMessage();
+			}
+		}
+		return message + " (" + remote_message + ")";
+	}
+	return message;
+}
+
+std::string FormatRemoteFileError(const std::string &prefix, const std::string &filename) {
+	return AppendRemoteError(prefix + ": " + filename, filename);
 }
 
 // Convert HDF5 type to string representation

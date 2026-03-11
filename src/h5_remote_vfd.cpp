@@ -6,7 +6,6 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/storage/caching_file_system.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
-#include "duckdb/storage/buffer_manager.hpp"
 #include "h5_internal.hpp"
 
 #include <hdf5.h>
@@ -25,6 +24,7 @@ static hid_t duckdb_vfd_driver_id = -1;
 static std::once_flag duckdb_vfd_register_once;
 static thread_local ClientContext *duckdb_vfd_open_context = nullptr;
 static thread_local std::string duckdb_vfd_last_error;
+static thread_local bool duckdb_vfd_last_error_interrupted = false;
 
 struct DuckDBVFDConfig {
 	ClientContext *context;
@@ -33,6 +33,7 @@ struct DuckDBVFDConfig {
 struct H5FD_duckdb_t : public H5FD_t {
 	struct CachedBlock {
 		shared_ptr<BlockHandle> block_handle;
+		idx_t buffer_offset = 0;
 		idx_t valid_bytes = 0;
 		std::list<idx_t>::iterator lru_it;
 	};
@@ -40,7 +41,7 @@ struct H5FD_duckdb_t : public H5FD_t {
 
 	unique_ptr<CachingFileSystem> caching_fs;
 	unique_ptr<CachingFileHandle> handle;
-	BufferManager *buffer_manager = nullptr;
+	ClientContext *context = nullptr;
 	std::string path;
 	haddr_t eof;
 	haddr_t eoa;
@@ -60,12 +61,28 @@ static inline idx_t CacheBlockId(idx_t offset) {
 	return offset / REMOTE_CACHE_BLOCK_SIZE;
 }
 
-static void SetLastError(const std::string &error) {
+static bool IsContextInterrupted(ClientContext *context) {
+	return context && context->interrupted.load(std::memory_order_relaxed);
+}
+
+static void ThrowIfContextInterrupted(ClientContext *context) {
+	if (IsContextInterrupted(context)) {
+		throw InterruptException();
+	}
+}
+
+static void SetLastError(const std::string &error, bool interrupted = false) {
 	duckdb_vfd_last_error = error;
+	duckdb_vfd_last_error_interrupted = interrupted;
+}
+
+static void SetInterruptError() {
+	SetLastError("Interrupted!", true);
 }
 
 static void ClearLastErrorInternal() {
 	duckdb_vfd_last_error.clear();
+	duckdb_vfd_last_error_interrupted = false;
 }
 
 static void TouchBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::CachedBlockMap::iterator it) {
@@ -100,13 +117,16 @@ static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t bl
 		throw IOException("Failed to load remote cache block: no readable file handle");
 	}
 
+	ThrowIfContextInterrupted(file.context);
 	data_ptr_t buffer = nullptr;
 	auto pinned_buffer = file.handle->Read(buffer, bytes_to_read, block_offset);
+	ThrowIfContextInterrupted(file.context);
 	H5FD_duckdb_t::CachedBlock block;
 	block.block_handle = pinned_buffer.GetBlockHandle();
 	if (!block.block_handle) {
 		throw IOException("Failed to load remote cache block: invalid block handle");
 	}
+	block.buffer_offset = UnsafeNumericCast<idx_t>(buffer - pinned_buffer.Ptr());
 	block.valid_bytes = bytes_to_read;
 	file.cache_lru.push_front(block_id);
 	block.lru_it = file.cache_lru.begin();
@@ -117,14 +137,11 @@ static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t bl
 
 static void CopyFromCachedBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::CachedBlock &block, idx_t offset_in_block,
                                 char *out, idx_t to_copy) {
-	if (!file.buffer_manager) {
-		throw IOException("Failed to read remote cache block: no buffer manager");
-	}
 	if (!block.block_handle) {
 		throw IOException("Failed to read remote cache block: invalid block handle");
 	}
-	auto pinned_block = file.buffer_manager->Pin(block.block_handle);
-	std::memcpy(out, pinned_block.Ptr() + offset_in_block, to_copy);
+	auto pinned_block = block.block_handle->GetMemory().GetBufferManager().Pin(block.block_handle);
+	std::memcpy(out, pinned_block.Ptr() + block.buffer_offset + offset_in_block, to_copy);
 }
 
 static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
@@ -132,6 +149,7 @@ static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t rea
 	idx_t remaining = read_size;
 	idx_t current_offset = read_offset;
 	while (remaining > 0) {
+		ThrowIfContextInterrupted(file.context);
 		auto block_id = CacheBlockId(current_offset);
 		auto &block = LoadCachedBlock(file, block_id);
 		auto block_offset = block_id * REMOTE_CACHE_BLOCK_SIZE;
@@ -146,14 +164,17 @@ static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t rea
 		current_offset += to_copy;
 		remaining -= to_copy;
 	}
+	ThrowIfContextInterrupted(file.context);
 }
 
 static void ReadExact(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
 	if (!file.handle) {
 		throw IOException("Failed to read remote data: no readable file handle");
 	}
+	ThrowIfContextInterrupted(file.context);
 	data_ptr_t buffer = nullptr;
 	auto pinned_buffer = file.handle->Read(buffer, read_size, read_offset);
+	ThrowIfContextInterrupted(file.context);
 	if (!pinned_buffer.IsValid() || !buffer) {
 		throw IOException("Failed to read remote data: invalid cached buffer");
 	}
@@ -192,17 +213,21 @@ static H5FD_t *DuckDBOpen(const char *name, unsigned flags, hid_t fapl_id, haddr
 	}
 
 	try {
+		ThrowIfContextInterrupted(context);
 		auto file = make_uniq<H5FD_duckdb_t>();
 		file->caching_fs = make_uniq<CachingFileSystem>(CachingFileSystem::Get(*context));
 		OpenFileInfo open_info(name);
 		file->handle = file->caching_fs->OpenFile(QueryContext(*context), open_info,
 		                                          FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-		file->buffer_manager = &BufferManager::GetBufferManager(*context);
+		file->context = context;
 		file->path = name;
 		file->eof = static_cast<haddr_t>(file->handle->GetFileSize());
 		file->eoa = file->eof;
 		ClearLastErrorInternal();
 		return reinterpret_cast<H5FD_t *>(file.release());
+	} catch (const InterruptException &) {
+		SetInterruptError();
+		return nullptr;
 	} catch (const Exception &ex) {
 		SetLastError(ex.what());
 		return nullptr;
@@ -264,6 +289,7 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 	}
 
 	try {
+		ThrowIfContextInterrupted(f->context);
 		auto read_size = static_cast<idx_t>(size);
 		auto read_offset = static_cast<idx_t>(addr);
 		// HDF5 can issue tiny chunk-sized raw reads even when the application requested a large hyperslab. Use the
@@ -275,6 +301,9 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 		}
 		ClearLastErrorInternal();
 		return 0;
+	} catch (const InterruptException &) {
+		SetInterruptError();
+		return -1;
 	} catch (const Exception &ex) {
 		SetLastError(ex.what());
 		return -1;
@@ -375,10 +404,16 @@ void H5RemoteVFD::ClearLastError() {
 	ClearLastErrorInternal();
 }
 
-std::string H5RemoteVFD::TakeLastError() {
-	auto error = duckdb_vfd_last_error;
-	duckdb_vfd_last_error.clear();
+H5RemoteErrorInfo H5RemoteVFD::TakeLastErrorInfo() {
+	H5RemoteErrorInfo error;
+	error.message = duckdb_vfd_last_error;
+	error.interrupted = duckdb_vfd_last_error_interrupted;
+	ClearLastErrorInternal();
 	return error;
+}
+
+std::string H5RemoteVFD::TakeLastError() {
+	return TakeLastErrorInfo().message;
 }
 
 } // namespace duckdb

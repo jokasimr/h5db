@@ -148,6 +148,7 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 
 static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
+	ThrowIfInterrupted(context);
 	auto result = make_uniq<H5AttributesBindData>();
 
 	result->filename = input.inputs[0].GetValue<string>();
@@ -159,12 +160,14 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	H5ErrorSuppressor suppress_errors;
 	H5FileHandle file(&context, result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
 	if (!file.is_valid()) {
-		throw IOException("Failed to open HDF5 file: " + result->filename);
+		throw IOException(FormatRemoteFileError("Failed to open HDF5 file", result->filename));
 	}
 
 	H5ObjectHandle obj(file, result->object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException("Failed to open object: " + result->object_path + " in file: " + result->filename);
+		throw IOException(
+		    AppendRemoteError("Failed to open object: " + result->object_path + " in file: " + result->filename,
+		                      result->filename));
 	}
 
 	hsize_t idx = 0;
@@ -174,9 +177,10 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 
 	if (status < 0) {
 		if (iter_data.error) {
-			throw IOException(iter_data.error_message);
+			throw IOException(AppendRemoteError(iter_data.error_message, result->filename));
 		}
-		throw IOException("Failed to iterate attributes for: " + result->object_path);
+		throw IOException(AppendRemoteError("Failed to iterate attributes for: " + result->object_path,
+		                                    result->filename));
 	}
 
 	if (result->attributes.empty()) {
@@ -196,6 +200,7 @@ static unique_ptr<GlobalTableFunctionState> H5AttributesInit(ClientContext &cont
 }
 
 static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	ThrowIfInterrupted(context);
 	auto &gstate = input.global_state->Cast<H5AttributesGlobalState>();
 	auto &bind_data = input.bind_data->Cast<H5AttributesBindData>();
 
@@ -209,12 +214,12 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 	H5ErrorSuppressor suppress_errors;
 	H5FileHandle file(&context, bind_data.filename.c_str(), H5F_ACC_RDONLY, bind_data.swmr);
 	if (!file.is_valid()) {
-		throw IOException("Failed to open HDF5 file: " + bind_data.filename);
+		throw IOException(FormatRemoteFileError("Failed to open HDF5 file", bind_data.filename));
 	}
 
 	H5ObjectHandle obj(file, bind_data.object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException("Failed to open object: " + bind_data.object_path);
+		throw IOException(AppendRemoteError("Failed to open object: " + bind_data.object_path, bind_data.filename));
 	}
 
 	for (idx_t col_idx = 0; col_idx < bind_data.attributes.size(); col_idx++) {
@@ -223,7 +228,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 
 		H5AttributeHandle attr(obj, attr_info.name.c_str());
 		if (!attr.is_valid()) {
-			throw IOException("Failed to open attribute: " + attr_info.name);
+			throw IOException(AppendRemoteError("Failed to open attribute: " + attr_info.name, bind_data.filename));
 		}
 
 		if (attr_info.type.id() == LogicalTypeId::ARRAY) {
@@ -236,8 +241,10 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 
 				auto child_data = FlatVector::GetData<T>(child_vector);
 
+				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), child_data) < 0) {
-					throw IOException("Failed to read array attribute: " + attr_info.name);
+					throw IOException(
+					    AppendRemoteError("Failed to read array attribute: " + attr_info.name, bind_data.filename));
 				}
 			});
 
@@ -246,14 +253,17 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 
 			if (is_variable > 0) {
 				char *str_ptr = nullptr;
+				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), &str_ptr) < 0) {
-					throw IOException("Failed to read variable-length string attribute: " + attr_info.name);
+					throw IOException(AppendRemoteError("Failed to read variable-length string attribute: " +
+					                                    attr_info.name, bind_data.filename));
 				}
 
 				if (str_ptr) {
 					FlatVector::GetData<string_t>(result_vector)[0] = StringVector::AddString(result_vector, str_ptr);
 					if (H5free_memory(str_ptr) < 0) {
-						throw IOException("Failed to reclaim variable-length string attribute: " + attr_info.name);
+						throw IOException(AppendRemoteError("Failed to reclaim variable-length string attribute: " +
+						                                    attr_info.name, bind_data.filename));
 					}
 				} else {
 					FlatVector::SetNull(result_vector, 0, true);
@@ -263,8 +273,10 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 				size_t str_len = H5Tget_size(attr_info.h5_type.get());
 				std::vector<char> buffer(str_len);
 
+				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), buffer.data()) < 0) {
-					throw IOException("Failed to read fixed-length string attribute: " + attr_info.name);
+					throw IOException(AppendRemoteError("Failed to read fixed-length string attribute: " +
+					                                    attr_info.name, bind_data.filename));
 				}
 
 				size_t actual_len = strnlen(buffer.data(), str_len);
@@ -277,8 +289,10 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 				using T = typename decltype(type_tag)::type;
 
 				T value;
+				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), &value) < 0) {
-					throw IOException("Failed to read attribute: " + attr_info.name);
+					throw IOException(AppendRemoteError("Failed to read attribute: " + attr_info.name,
+					                                    bind_data.filename));
 				}
 
 				auto data = FlatVector::GetData<T>(result_vector);

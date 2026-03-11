@@ -5,6 +5,11 @@
 
 namespace duckdb {
 
+struct H5RemoteErrorInfo {
+	std::string message;
+	bool interrupted = false;
+};
+
 class H5RemoteVFD {
 public:
 	static bool IsRemotePath(const std::string &path);
@@ -12,6 +17,7 @@ public:
 	static void SetOpenContext(ClientContext *context);
 	static ClientContext *GetOpenContext();
 	static void ClearLastError();
+	static H5RemoteErrorInfo TakeLastErrorInfo();
 	static std::string TakeLastError();
 };
 

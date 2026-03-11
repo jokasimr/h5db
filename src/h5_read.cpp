@@ -29,27 +29,11 @@
 namespace duckdb {
 
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
-	auto remote_error = H5RemoteVFD::TakeLastError();
-	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
-		return prefix + ": " + filename + " (" + remote_error + ")";
-	}
-	return prefix + ": " + filename;
+	return FormatRemoteFileError(prefix, filename);
 }
 
 static string FormatRemoteDatasetReadError(const string &filename, const string &dataset_path) {
-	auto remote_error = H5RemoteVFD::TakeLastError();
-	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
-		return "Failed to read data from dataset: " + dataset_path + " (" + remote_error + ")";
-	}
-	return "Failed to read data from dataset: " + dataset_path;
-}
-
-static string FormatRemoteChunkReadError(const string &filename, const string &dataset_path) {
-	auto remote_error = H5RemoteVFD::TakeLastError();
-	if (H5RemoteVFD::IsRemotePath(filename) && !remote_error.empty()) {
-		return "Failed to read chunk from HDF5 dataset: " + dataset_path + " (" + remote_error + ")";
-	}
-	return "Failed to read chunk from HDF5 dataset: " + dataset_path;
+	return AppendRemoteError("Failed to read data from dataset: " + dataset_path, filename);
 }
 
 // =============================================================================
@@ -399,7 +383,8 @@ static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, i
 }
 
 // Helper function to open a dataset and get its type in one operation
-static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file, const std::string &path) {
+static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file, const std::string &filename,
+                                                                      const std::string &path) {
 	// Open dataset (with error suppression)
 	H5DatasetHandle dataset;
 	{
@@ -408,13 +393,13 @@ static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file
 	}
 
 	if (!dataset.is_valid()) {
-		throw IOException("Failed to open dataset: " + path);
+		throw IOException(AppendRemoteError("Failed to open dataset: " + path, filename));
 	}
 
 	// Get datatype
 	hid_t type_id = H5Dget_type(dataset);
 	if (type_id < 0) {
-		throw IOException("Failed to get dataset type");
+		throw IOException(AppendRemoteError("Failed to get dataset type: " + path, filename));
 	}
 
 	return {std::move(dataset), H5TypeHandle::TakeOwnershipOf(type_id)};
@@ -433,6 +418,7 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		// Variable-length strings
 		std::vector<char *> string_data(count);
 
+		H5ErrorSuppressor suppress;
 		herr_t status = H5Dread(dataset_id, h5_type, mem_space, file_space, H5P_DEFAULT, string_data.data());
 
 		if (status < 0) {
@@ -459,6 +445,7 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		size_t str_len = H5Tget_size(h5_type);
 		std::vector<char> buffer(count * str_len);
 
+		H5ErrorSuppressor suppress;
 		herr_t status = H5Dread(dataset_id, h5_type, mem_space, file_space, H5P_DEFAULT, buffer.data());
 
 		if (status < 0) {
@@ -675,16 +662,18 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 // RSE Helpers
 //===--------------------------------------------------------------------===//
 
-static vector<idx_t> LoadRunStarts(const RSEColumnSpec &spec, hid_t starts_ds, size_t num_runs, hsize_t num_rows) {
+static vector<idx_t> LoadRunStarts(const string &filename, const RSEColumnSpec &spec, hid_t starts_ds, size_t num_runs,
+                                   hsize_t num_rows) {
 	H5T_class_t starts_class = H5Tget_class(spec.run_starts_h5_type);
 	if (starts_class != H5T_INTEGER) {
 		throw IOException("RSE run_starts must be integer type");
 	}
 
 	vector<idx_t> run_starts(num_runs);
+	H5ErrorSuppressor suppress;
 	herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, run_starts.data());
 	if (status < 0) {
-		throw IOException("Failed to read run_starts from: " + spec.run_starts_path);
+		throw IOException(AppendRemoteError("Failed to read run_starts from: " + spec.run_starts_path, filename));
 	}
 
 	for (size_t i = 1; i < num_runs; i++) {
@@ -700,7 +689,8 @@ static vector<idx_t> LoadRunStarts(const RSEColumnSpec &spec, hid_t starts_ds, s
 	return run_starts;
 }
 
-static RSEColumnState::RSEValueStorage LoadRSEValues(const RSEColumnSpec &spec, hid_t values_ds, size_t num_values) {
+static RSEColumnState::RSEValueStorage LoadRSEValues(const string &filename, const RSEColumnSpec &spec, hid_t values_ds,
+                                                     size_t num_values) {
 	return DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) -> RSEColumnState::RSEValueStorage {
 		using T = typename decltype(type_tag)::type;
 
@@ -712,10 +702,11 @@ static RSEColumnState::RSEValueStorage LoadRSEValues(const RSEColumnSpec &spec, 
 			return string_values;
 		} else {
 			std::vector<T> typed_values(num_values);
+			H5ErrorSuppressor suppress;
 			herr_t status =
 			    H5Dread(values_ds, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, typed_values.data());
 			if (status < 0) {
-				throw IOException("Failed to read values from: " + spec.values_path);
+				throw IOException(AppendRemoteError("Failed to read values from: " + spec.values_path, filename));
 			}
 			return typed_values;
 		}
@@ -769,6 +760,7 @@ static Value UnwrapAliasSpec(const Value &input, std::optional<std::string> &ali
 // Bind function - opens datasets and determines schema
 static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
+	ThrowIfInterrupted(context);
 	auto result = make_uniq<H5ReadBindData>();
 
 	// Get parameters - first is filename, rest are dataset paths, h5_rse(), h5_index(), or h5_alias()
@@ -844,11 +836,11 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			has_rse_columns = true;
 
 			// Open run_starts dataset and get type
-			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, run_starts);
+			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, result->filename, run_starts);
 			rse_spec.run_starts_h5_type = std::move(starts_type);
 
 			// Open values dataset and get type
-			auto [values_ds, values_type] = OpenDatasetAndGetType(file, values);
+			auto [values_ds, values_type] = OpenDatasetAndGetType(file, result->filename, values);
 			// Determine DuckDB column type from values (before move)
 			rse_spec.column_type = H5TypeToDuckDBType(values_type);
 			rse_spec.values_h5_type = std::move(values_type);
@@ -863,7 +855,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			num_regular_columns++;
 
 			// Open dataset and get type
-			auto [dataset, type] = OpenDatasetAndGetType(file, ds_info.path);
+			auto [dataset, type] = OpenDatasetAndGetType(file, result->filename, ds_info.path);
 
 			// Check if it's a string type
 			ds_info.is_string = (H5Tget_class(type) == H5T_STRING);
@@ -871,12 +863,14 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			// Get dataspace to determine dimensions - RAII handles cleanup
 			H5DataspaceHandle space(dataset);
 			if (!space.is_valid()) {
-				throw IOException("Failed to get dataset dataspace");
+				throw IOException(AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path,
+				                                    result->filename));
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
-				throw IOException("Failed to get dataset dimensions");
+				throw IOException(AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path,
+				                                    result->filename));
 			}
 			if (ds_info.is_string && ds_info.ndims > 1) {
 				throw IOException("String datasets with more than 1 dimension are not supported");
@@ -1001,6 +995,7 @@ static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx,
 
 // Init function - open file and dataset for reading
 static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
+	ThrowIfInterrupted(context);
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
 	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
@@ -1057,13 +1052,15 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException("Failed to open dataset: " + spec.path);
+					    throw IOException(AppendRemoteError("Failed to open dataset: " + spec.path,
+					                                        bind_data.filename));
 				    }
 
 				    // Cache the file dataspace (reused across all chunks)
 				    H5DataspaceHandle file_space(dataset);
 				    if (!file_space.is_valid()) {
-					    throw IOException("Failed to get dataspace for dataset: " + spec.path);
+					    throw IOException(AppendRemoteError("Failed to get dataspace for dataset: " + spec.path,
+					                                        bind_data.filename));
 				    }
 
 				    RegularColumnState state;
@@ -1103,7 +1100,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException("Failed to open dataset: " + spec.path);
+					    throw IOException(AppendRemoteError("Failed to open dataset: " + spec.path,
+					                                        bind_data.filename));
 				    }
 
 				    ScalarColumnState scalar_state;
@@ -1117,6 +1115,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    DispatchOnNumericType(base_type, [&](auto type_tag) {
 						    using T = typename decltype(type_tag)::type;
 						    T value {};
+						    H5ErrorSuppressor suppress;
 						    herr_t status =
 						        H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &value);
 						    if (status < 0) {
@@ -1140,12 +1139,14 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    H5ErrorSuppressor suppress;
 					    starts_ds = H5DatasetHandle(result->file, spec.run_starts_path.c_str());
 					    if (!starts_ds.is_valid()) {
-						    throw IOException("Failed to open RSE run_starts dataset: " + spec.run_starts_path);
+						    throw IOException(AppendRemoteError("Failed to open RSE run_starts dataset: " +
+						                                        spec.run_starts_path, bind_data.filename));
 					    }
 
 					    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
 					    if (!values_ds.is_valid()) {
-						    throw IOException("Failed to open RSE values dataset: " + spec.values_path);
+						    throw IOException(AppendRemoteError("Failed to open RSE values dataset: " +
+						                                        spec.values_path, bind_data.filename));
 					    }
 				    }
 
@@ -1172,7 +1173,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
 				    if (num_runs_hssize < 0 || num_values_hssize < 0) {
-					    throw IOException("Failed to get dataset sizes for RSE column");
+					    throw IOException(AppendRemoteError("Failed to get dataset sizes for RSE column",
+					                                        bind_data.filename));
 				    }
 
 				    size_t num_runs = static_cast<size_t>(num_runs_hssize);
@@ -1184,8 +1186,9 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					                      std::to_string(num_runs) + " and " + std::to_string(num_values));
 				    }
 
-				    rse_col.run_starts = LoadRunStarts(spec, starts_ds, num_runs, bind_data.num_rows);
-				    rse_col.values = LoadRSEValues(spec, values_ds, num_values);
+				    rse_col.run_starts = LoadRunStarts(bind_data.filename, spec, starts_ds, num_runs,
+				                                      bind_data.num_rows);
+				    rse_col.values = LoadRSEValues(bind_data.filename, spec, values_ds, num_values);
 
 				    // Note: RSEColumnState is now stateless (thread-safe)
 				    // No runtime state initialization needed
@@ -1593,10 +1596,11 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_r
 
 		// Read into cache buffer at specified offset
 		idx_t buffer_offset = buffer_offset_rows * spec.elements_per_row;
+		H5ErrorSuppressor suppress;
 		herr_t status = H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space_id, H5P_DEFAULT,
 		                        typed_cache.data() + buffer_offset);
 		if (status < 0) {
-			throw IOException(FormatRemoteChunkReadError(filename, spec.path));
+			throw IOException(FormatRemoteDatasetReadError(filename, spec.path));
 		}
 	});
 }
@@ -1707,9 +1711,10 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 }
 
 // Helper function to scan a regular dataset column
-static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState &state, Vector &result_vector,
-                              idx_t position, idx_t to_read, const H5ReadBindData &bind_data,
+static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &spec, RegularColumnState &state,
+                              Vector &result_vector, idx_t position, idx_t to_read, const H5ReadBindData &bind_data,
                               H5ReadGlobalState &gstate) {
+	ThrowIfInterrupted(context);
 	// Check if using cache
 	if (state.chunk_cache) {
 		auto &cache = *state.chunk_cache;
@@ -1719,6 +1724,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
 
 		for (;;) {
+			ThrowIfInterrupted(context);
 
 			TryRefreshCache(gstate, bind_data);
 
@@ -1783,6 +1789,7 @@ static void ScanRegularColumn(const RegularColumnSpec &spec, RegularColumnState 
 		// Handle numeric data
 		LogicalType base_type;
 		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
+		H5ErrorSuppressor suppress;
 		herr_t status = DispatchOnNumericType(base_type, [&](auto type_tag) {
 			using T = typename decltype(type_tag)::type;
 			void *child_data = FlatVector::GetData<T>(target_vector);
@@ -1825,6 +1832,7 @@ static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnSta
 }
 
 static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	ThrowIfInterrupted(context);
 	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
 	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
 	auto &lstate = data.local_state->Cast<H5ReadLocalState>();
@@ -1868,7 +1876,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 			    } else if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
 			                         std::is_same_v<StateT, RegularColumnState>) {
 				    // Regular dataset - call helper function
-				    ScanRegularColumn(spec, state, result_vector, position, to_read, bind_data, gstate);
+				    ScanRegularColumn(context, spec, state, result_vector, position, to_read, bind_data, gstate);
 			    } else if constexpr (std::is_same_v<SpecT, IndexColumnSpec> &&
 			                         std::is_same_v<StateT, IndexColumnState>) {
 				    // Virtual index column - sequence vector

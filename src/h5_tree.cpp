@@ -26,6 +26,12 @@ struct H5TreeGlobalState : public GlobalTableFunctionState {
 	idx_t position = 0;
 };
 
+struct H5TreeVisitData {
+	std::vector<H5ObjectInfo> *objects;
+	std::string error_message;
+	bool error = false;
+};
+
 static void WriteShapeListRow(Vector &shape_vector, idx_t row_idx, const H5ObjectInfo &obj, idx_t &shape_offset,
                               uint64_t *shape_data) {
 	auto shape_entries = ListVector::GetData(shape_vector);
@@ -47,7 +53,16 @@ static void WriteShapeListRow(Vector &shape_vector, idx_t row_idx, const H5Objec
 }
 
 static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *info, void *op_data) {
-	auto &objects = *reinterpret_cast<std::vector<H5ObjectInfo> *>(op_data);
+	auto &visit_data = *reinterpret_cast<H5TreeVisitData *>(op_data);
+	if (visit_data.error) {
+		return -1;
+	}
+	auto fail = [&](std::string message) {
+		visit_data.error = true;
+		visit_data.error_message = std::move(message);
+		return -1;
+	};
+	auto &objects = *visit_data.objects;
 
 	H5ObjectInfo obj_info;
 	obj_info.path = std::string(name) == "." ? "/" : std::string("/") + name;
@@ -59,15 +74,21 @@ static herr_t visit_callback(hid_t obj_id, const char *name, const H5O_info_t *i
 	} else if (info->type == H5O_TYPE_DATASET) {
 		obj_info.type = "dataset";
 
-		H5DatasetHandle dataset(obj_id, name);
-		if (dataset.is_valid()) {
-			hid_t type_id = H5Dget_type(dataset);
-			if (type_id >= 0) {
-				H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
-				obj_info.dtype = H5TypeToString(type);
+		try {
+			H5ErrorSuppressor suppress;
+			H5DatasetHandle dataset(obj_id, name);
+			if (!dataset.is_valid()) {
+				return fail("Failed to open dataset during tree traversal: " + obj_info.path);
 			}
-
+			hid_t type_id = H5Dget_type(dataset);
+			if (type_id < 0) {
+				return fail("Failed to get dataset type during tree traversal: " + obj_info.path);
+			}
+			H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
+			obj_info.dtype = H5TypeToString(type);
 			obj_info.shape = H5GetShape(dataset);
+		} catch (const std::exception &ex) {
+			return fail(ex.what());
 		}
 	}
 
@@ -90,6 +111,7 @@ static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunction
 }
 
 static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, TableFunctionInitInput &input) {
+	ThrowIfInterrupted(context);
 	auto &bind_data = input.bind_data->Cast<H5TreeBindData>();
 	auto result = make_uniq<H5TreeGlobalState>();
 
@@ -103,12 +125,25 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 		}
 
 		if (!file.is_valid()) {
-			throw IOException("Failed to open HDF5 file: " + bind_data.filename);
+			throw IOException(FormatRemoteFileError("Failed to open HDF5 file", bind_data.filename));
 		}
 
 		H5O_info_t obj_info;
-		if (H5Oget_info(file, &obj_info, H5O_INFO_BASIC) >= 0) {
-			H5Ovisit(file, H5_INDEX_NAME, H5_ITER_NATIVE, visit_callback, &bind_data.objects, H5O_INFO_BASIC);
+		H5ErrorSuppressor suppress;
+		if (H5Oget_info(file, &obj_info, H5O_INFO_BASIC) < 0) {
+			throw IOException(FormatRemoteFileError("Failed to inspect HDF5 root object", bind_data.filename));
+		}
+		H5TreeVisitData visit_data;
+		visit_data.objects = &bind_data.objects;
+		auto status = H5Ovisit(file, H5_INDEX_NAME, H5_ITER_NATIVE, visit_callback, &visit_data, H5O_INFO_BASIC);
+		if (status < 0) {
+			if (visit_data.error && !visit_data.error_message.empty()) {
+				throw IOException(AppendRemoteError(visit_data.error_message, bind_data.filename));
+			}
+			throw IOException(FormatRemoteFileError("Failed to traverse HDF5 objects", bind_data.filename));
+		}
+		if (bind_data.objects.empty()) {
+			throw IOException(FormatRemoteFileError("Failed to traverse HDF5 objects", bind_data.filename));
 		}
 
 		bind_data.scanned = true;
@@ -118,6 +153,7 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 }
 
 static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	ThrowIfInterrupted(context);
 	auto &bind_data = data.bind_data->Cast<H5TreeBindData>();
 	auto &gstate = data.global_state->Cast<H5TreeGlobalState>();
 

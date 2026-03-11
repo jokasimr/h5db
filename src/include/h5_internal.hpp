@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "h5_remote_vfd.hpp"
 #include <string>
 #include <mutex>
 #include <condition_variable>
@@ -31,6 +32,12 @@ idx_t ParseBatchSizeSetting(const Value &setting_value);
 
 // Resolve configured target batch size in bytes for h5_read chunk caching.
 idx_t ResolveBatchSizeOption(ClientContext &context);
+
+bool IsInterrupted(ClientContext &context);
+void ThrowIfInterrupted(ClientContext &context);
+H5RemoteErrorInfo TakeRemoteErrorInfo(const std::string &filename);
+std::string AppendRemoteError(const std::string &message, const std::string &filename);
+std::string FormatRemoteFileError(const std::string &prefix, const std::string &filename);
 
 // Type tag for compile-time type dispatch
 template <typename T>
