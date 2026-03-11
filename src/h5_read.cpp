@@ -1257,7 +1257,8 @@ static ExpressionType FlipComparison(ExpressionType type) {
 }
 
 // Helper: Try to claim a filter on an RSE or index column
-static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, idx_t table_index,
+template <typename TableIndexT>
+static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const TableIndexT &table_index,
                                    const unordered_map<idx_t, idx_t> &get_to_bind_map,
                                    const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
                                    vector<ClaimedFilter> &claimed) {
@@ -1436,7 +1437,7 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 		}
 	}
 
-	idx_t table_index = get.table_index;
+	const auto &table_index = get.table_index;
 
 	// Claim filters for I/O optimization (but keep them in filter list for post-scan)
 	// DuckDB will apply all filters after scan to ensure correctness (defensive approach)
