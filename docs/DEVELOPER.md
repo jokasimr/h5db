@@ -218,11 +218,14 @@ test/sql/large/                # Large SQLLogicTest files (slow)
 ### Running All Tests
 
 ```bash
-# Run tests from test/sql/* directly
-./build/release/test/unittest "test/sql/*"
+# Full suite: local tests + rewritten remote URL suite
+make test
+
+# Run the local SQLLogicTests directly
+./build/release/test/unittest "test/sql/*" "~test/sql/remote/*"
 
 # Optional: skip slow tests
-./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
 ```
 
 If you run tests directly, ensure test data exists first:
@@ -234,8 +237,11 @@ If you run tests directly, ensure test data exists first:
 ### Running Specific Tests
 
 ```bash
-# Run a specific test file
+# Run a specific local test file directly
 ./build/release/test/unittest "test/sql/<testfile>.test"
+
+# Run the rewritten remote suite (includes test/sql/remote/*.test)
+make test_remote_http
 ```
 
 ### Running Individual Test Cases
@@ -268,7 +274,8 @@ To run the suite against rewritten remote URLs (using the local range-capable HT
 make test_remote_http
 ```
 
-This target also runs `test/sql/remote/*.test` (auth, timeout, retries, redirects, and error injection).
+This target also runs `test/sql/remote/*.test` (auth, retries, redirects, timeout, truncation, corruption,
+cache behavior, and simulated server/drop failures).
 
 ### TODO: Re-enable macOS Remote CI Coverage
 
@@ -328,15 +335,17 @@ cd ../..
 If you modify a test data generation script or need to recreate test files:
 
 ```bash
-# Regenerate all test data
+# Regenerate the entire test-data tree
+./test/data/generate_all_test_data.sh
+
+# Or regenerate only the fixture touched by your change
 cd test/data
-
-# Main test files
-../../venv/bin/python create_attrs_test.py
-../../venv/bin/python create_rse_edge_cases.py
-
+../../venv/bin/python create_unsupported_types_test.py
 cd ../..
 ```
+
+`test/data/ensure_test_data.sh` only generates missing files. If you change a generator script, rerun that specific
+generator or `generate_all_test_data.sh`.
 
 ### Installing Additional Python Packages
 
@@ -359,11 +368,11 @@ deactivate
    ```
 3. **Run tests** to verify:
    ```bash
-   ./build/release/test/unittest "test/sql/*"
+   ./build/release/test/unittest "test/sql/*" "~test/sql/remote/*"
    ```
    ```bash
    # Optional: skip slow tests
-   ./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+   ./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
    ```
 4. **Interactive testing** with DuckDB CLI:
    ```bash
@@ -484,7 +493,7 @@ D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 source venv/bin/activate && make debug
 
 # Run under GDB
-gdb --args ./build/debug/test/unittest "test/sql/*"
+gdb --args ./build/debug/test/unittest "test/sql/*" "~test/sql/remote/*"
 ```
 
 **Viewing test file contents**:
@@ -539,6 +548,7 @@ h5db/
 - **`src/h5_attributes.cpp`**: Attribute reader
 - **`src/h5_common.cpp`**: Shared HDF5 helpers
 - **`test/sql/*.test`**: SQLLogicTest test files (regular)
+- **`test/sql/remote/*.test`**: remote-only SQLLogicTests (auth, retries, redirects, transport faults)
 - **`test/sql/large/*.test`**: large SQLLogicTests (slow)
 - **`vcpkg.json`**: Dependencies (HDF5, etc.)
 
@@ -582,7 +592,7 @@ Solution: HDF5 libraries may not be linked. Check CMakeLists.txt includes:
 Solution: Ensure test data exists, then run tests from project root:
   cd /path/to/h5db
   ./test/data/ensure_test_data.sh
-  ./build/release/test/unittest "test/sql/*"
+  ./build/release/test/unittest "test/sql/*" "~test/sql/remote/*"
 ```
 
 **Problem**: Python script fails with "ModuleNotFoundError"
@@ -631,10 +641,13 @@ Solution: Ensure vcpkg is bootstrapped and path is set:
 source venv/bin/activate && make -j8
 
 # Test all suites
-./build/release/test/unittest "test/sql/*"
+make test
+
+# Test local SQLLogicTests only
+./build/release/test/unittest "test/sql/*" "~test/sql/remote/*"
 
 # Optional: skip slow tests
-./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
 
 # Ensure test data exists (generate if missing)
 ./test/data/ensure_test_data.sh

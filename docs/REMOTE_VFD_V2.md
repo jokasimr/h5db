@@ -1,14 +1,19 @@
 # Remote VFD V2
 
+> Status: This is a design/implementation note, not a description of missing functionality. The current repository now
+> opens remote files through `CachingFileSystem::OpenFile(QueryContext(...), ...)`, uses `FILE_FLAGS_DIRECT_IO`, keeps a
+> VFD-managed small-read block cache, preserves remote error text, and has remote cache/failure tests. Treat the
+> remaining text as rationale plus remaining ideas rather than as a statement of the current repo being pre-V2.
+
 ## Goal
 
 Improve remote HDF5 read performance while preserving correctness and integrating with DuckDB's `httpfs` and external file cache.
 
 ## Key Findings
 
-### 1. The current implementation bypasses DuckDB's external file cache
+### 1. The pre-V2 implementation bypassed DuckDB's external file cache
 
-The remote VFD currently opens remote files through `FileSystem::OpenFile`, not `CachingFileSystem::OpenFile`.
+The remote VFD originally opened remote files through `FileSystem::OpenFile`, not `CachingFileSystem::OpenFile`.
 
 Consequence:
 - repeated remote HDF5 scans re-fetch byte ranges
@@ -42,7 +47,8 @@ Observed examples:
   - observed many `8192`-byte GETs
 
 Implication:
-- a v2 that uses `DIRECT_IO` plus exact-range reads for all raw dataset traffic would be worse than the current implementation on chunked datasets
+- a v2 that uses `DIRECT_IO` plus exact-range reads for all raw dataset traffic would be worse than the implementation
+  this note started from on chunked datasets
 
 ### 4. Small raw reads are spatially clustered
 
@@ -70,7 +76,8 @@ V2 should use:
 - a VFD-managed block cache for all small reads, including `H5FD_MEM_DRAW`
 - exact reads for large requests
 
-This keeps the good part of the current architecture, coalescing tiny HDF5 reads, while moving the fetched bytes into DuckDB's shared external file cache.
+This keeps the good part of that architecture, coalescing tiny HDF5 reads, while moving the fetched bytes into
+DuckDB's shared external file cache.
 
 ### Open Path
 
@@ -120,7 +127,7 @@ Behavior:
 
 Why this is the right default:
 - large enough to absorb tiny chunk reads
-- matches the current metadata block size
+- matches the metadata block size used by this design
 - still small enough to avoid pathological overfetch for scattered metadata
 
 ### Why not exact caching for all reads

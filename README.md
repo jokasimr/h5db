@@ -1,92 +1,85 @@
-# H5DB - HDF5 Extension for DuckDB
+# h5db: HDF5 Extension for DuckDB
 
-A DuckDB extension for reading HDF5 (Hierarchical Data Format 5) files directly using SQL queries.
+`h5db` lets DuckDB query HDF5 files directly with SQL. It is aimed at analytics-style access to HDF5 data: inspect
+file structure, read datasets as columns, read attributes, and work with remote files through DuckDB `httpfs`.
 
-This repository is based on https://github.com/duckdb/extension-template.
+## Highlights
 
----
+- Reads local HDF5 files directly from SQL.
+- Reads remote `httpfs`-handled paths such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`,
+  `gcs://`, `gs://`, and `hf://`.
+- Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
+- Treats scalar datasets as constant columns.
+- Supports projection pushdown and row-range pushdown for `h5_index()` and run-start encoded columns.
+- Supports HDF5 attributes on groups and datasets.
+- Includes a DuckDB-backed remote VFD with support for `httpfs`, the HTTP metadata cache, and the external file cache.
 
-## Overview
+## Core Functions
 
-H5DB enables DuckDB to read data from HDF5 files, a widely-used format in scientific computing, machine learning, and data science. Query HDF5 datasets using standard SQL without conversion to other formats.
+- `h5_tree(filename[, swmr := ...])`
+  Lists groups and datasets with `path`, `type`, `dtype`, and `shape`.
+- `h5_read(filename, dataset_or_definition, ...[, swmr := ...])`
+  Reads one or more datasets as DuckDB columns. Supports regular datasets plus helpers such as `h5_rse()`,
+  `h5_index()`, and `h5_alias()`.
+- `h5_attributes(filename, object_path[, swmr := ...])`
+  Reads attributes from a dataset or group as a single wide row.
 
-### Features
+For the full API, see [API.md](API.md).
 
-- **Browse file structure**: List groups and datasets with `h5_tree()`
-- **Read datasets**: Access data from HDF5 files with `h5_read()`
-- **Read attributes**: Access dataset and group attributes with `h5_attributes()`
-- **Remote file support**: Read `http://`, `https://`, and `s3://` paths through DuckDB `httpfs`
-- **Hierarchical navigation**: Full support for nested groups
-- **Multiple datasets**: Read and combine multiple datasets in a single query
-- **Run-start encoding (RSE)**: Efficient reading of run-length encoded data with automatic expansion
-- **Projection pushdown**: Only read columns actually needed by your query for better performance
-- **Predicate pushdown**: Range filters with static constants on RSE and `h5_index()` columns reduce I/O (e.g., `col > 10`, `col BETWEEN 5 AND 20`)
-- **Type mapping**: Automatic conversion between HDF5 and DuckDB data types
-- **Multi-dimensional arrays**: Support for 1D-4D datasets using DuckDB's array types
-- **Scalar datasets**: Read rank-0 datasets as constant columns
-- **Virtual index column**: Add a row index column with `h5_index()`
-- **Column aliasing**: Rename columns with `h5_alias()`
+## Quick Start
 
-### Quick Start
+In DuckDB, install and load the extension:
 
 ```sql
--- List all datasets and groups in an HDF5 file
-SELECT * FROM h5_tree('data.h5');
-
--- Read a dataset
-SELECT * FROM h5_read('data.h5', '/dataset_name');
-
--- Read from nested groups
-SELECT * FROM h5_read('data.h5', '/group1/subgroup/dataset');
-
--- Read multiple datasets (horizontal stacking)
-SELECT * FROM h5_read('data.h5', '/dataset1', '/dataset2');
-
--- Read scalar datasets (returned as constants)
-SELECT * FROM h5_read('data.h5', '/scalar_value');
-
--- Add a virtual index column
-SELECT * FROM h5_read('data.h5', h5_index(), '/dataset1');
-
--- Rename a column definition
-SELECT * FROM h5_read('data.h5', h5_alias('idx', h5_index()), '/dataset1');
-
--- Read run-start encoded data (automatic expansion)
-SELECT * FROM h5_read(
-    'data.h5',
-    '/timestamp',                                      -- Regular column
-    h5_rse('/state_run_starts', '/state_values')      -- Run-encoded column
-);
-
--- Combine regular and run-encoded columns with aggregation
-SELECT status, COUNT(*) as count, AVG(measurement) as avg_val
-FROM h5_read(
-    'experiment.h5',
-    '/data/measurement',
-    h5_rse('/data/status_starts', '/data/status_vals')
-)
-GROUP BY status;
-
--- Read attributes from a dataset or group
-SELECT * FROM h5_attributes('data.h5', '/dataset_name');
-
--- Read a remote file (httpfs must be available/configured)
-SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
-
--- Enable SWMR read mode for a single call
-SELECT * FROM h5_read('data.h5', '/dataset_name', swmr := true);
+INSTALL h5db FROM community;
+LOAD h5db;
 ```
 
-### Documentation
+Then run queries such as:
 
-- **[API.md](API.md)** - Complete API reference for all functions
-- **[RSE_USAGE.md](RSE_USAGE.md)** - Complete guide to run-start encoding support
-- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** - Developer guide (building, testing, development)
+```sql
+-- Inspect the file structure
+SELECT * FROM h5_tree('data.h5');
 
+-- Read one dataset
+SELECT * FROM h5_read('data.h5', '/measurements');
 
-## Building
+-- Read multiple datasets side by side
+SELECT * FROM h5_read('data.h5', '/timestamps', '/temperatures');
 
-### Quick Start
+-- Add a virtual row index
+SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
+
+-- Read run-start encoded data
+SELECT * FROM h5_read(
+    'experiment.h5',
+    '/timestamp',
+    h5_rse('/state_run_starts', '/state_values')
+);
+
+-- Rename a column definition
+SELECT * FROM h5_read(
+    'data.h5',
+    h5_alias('idx', h5_index()),
+    '/measurements'
+);
+
+-- Read attributes
+SELECT * FROM h5_attributes('data.h5', '/measurements');
+
+-- Read a remote file
+SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
+```
+
+## Build From Source
+
+### Prerequisites
+
+- `vcpkg`
+- `VCPKG_TOOLCHAIN_PATH` pointing to `vcpkg/scripts/buildsystems/vcpkg.cmake`
+- Git submodules initialized
+
+### Quick Build
 
 ```bash
 # 1. Install vcpkg (one-time setup, outside this repo)
@@ -97,129 +90,67 @@ export VCPKG_TOOLCHAIN_PATH="$(pwd)/scripts/buildsystems/vcpkg.cmake"
 cd ..
 
 # 2. Clone and build h5db
-git clone <repository-url>
+git clone https://github.com/jokasimr/h5db.git
 cd h5db
 git submodule update --init --recursive
-
-# 3. Make VCPKG_TOOLCHAIN_PATH available for builds
-# Option A: export it in your shell (as above)
-# Option B: put it in a .env file at repo root (see docs/DEVELOPER.md)
-
-# 4. Build
 make -j8
 ```
 
-The main binaries will be built in:
-- `./build/release/duckdb` - DuckDB shell with h5db extension loaded
-- `./build/release/test/unittest` - Test runner
-- `./build/release/extension/h5db/h5db.duckdb_extension` - Loadable extension
+If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a repo-root `.env` file instead. See
+[docs/DEVELOPER.md](docs/DEVELOPER.md) for the full setup and troubleshooting guide.
 
-**For detailed build instructions, testing, and development workflows, see [docs/DEVELOPER.md](docs/DEVELOPER.md).**
+### Build Outputs
 
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
+- `./build/release/duckdb`
+  DuckDB shell with `h5db` loaded.
+- `./build/release/test/unittest`
+  SQLLogicTest runner.
+- `./build/release/extension/h5db/h5db.duckdb_extension`
+  Loadable extension artifact.
 
-Once loaded, you can use the H5DB functions to query HDF5 files:
+## Behavior Notes
 
-```sql
--- List all datasets in a file
-D SELECT * FROM h5_tree('example.h5');
+- `swmr := true` enables HDF5 SWMR read mode for local files.
+- Remote URLs accept `swmr`, but remote opens use the DuckDB-backed remote VFD as immutable snapshots served by
+  `httpfs`; `H5F_ACC_SWMR_READ` is not used on that path.
+- If multiple non-scalar regular datasets are read together, `h5_read()` uses the minimum outer dimension as the output
+  row count.
+- If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
 
--- Read a regular dataset
-D SELECT * FROM h5_read('example.h5', '/measurements');
+## Current Limitations
 
--- Read multiple datasets
-D SELECT * FROM h5_read('example.h5', '/timestamps', '/measurements');
+- Compound, enum, reference, opaque, bitfield, time-like, and non-string variable-length HDF5 types are not supported.
+- Datasets with more than 4 dimensions are not supported.
+- Multi-dimensional string datasets are not supported.
+- Attribute string arrays are not supported.
+- Attribute multidimensional dataspaces are not supported.
 
--- Read run-start encoded data (expands automatically)
-D SELECT * FROM h5_read(
-    'example.h5',
-    '/timestamps',
-    h5_rse('/state_run_starts', '/state_values')
-);
+See [API.md](API.md) for full type-mapping details and error behavior.
 
--- Read attributes
-D SELECT * FROM h5_attributes('example.h5', '/dataset_name');
-```
-
-See **[API.md](API.md)** for the complete function reference. For run-start encoding details, see **[RSE_USAGE.md](RSE_USAGE.md)**.
-
-### SWMR (Single Writer Multiple Reader)
-
-By default, SWMR is disabled. You can enable it per call:
-
-```sql
-SELECT * FROM h5_read('data.h5', '/dataset_name', swmr := true);
-SELECT * FROM h5_tree('data.h5', swmr := true);
-SELECT * FROM h5_attributes('data.h5', '/dataset_name', swmr := true);
-```
-
-Or set the default for the session:
-
-```sql
-SET h5db_swmr_default = true;
-```
-
-## Running the Tests
+## Testing
 
 ```bash
-# Run the complete test suite (local + remote URL coverage; generates test data if missing)
-./build/release/test/unittest "test/sql/*"
-
-# Or use the makefile target
+# Full suite: local tests + rewritten remote suite
 make test
 
-# Run the full suite rewritten to remote URLs against the local range-capable test server
+# Local SQLLogicTests only
+./build/release/test/unittest "test/sql/*" "~test/sql/remote/*"
+
+# Rewritten remote URL suite via the local range-capable HTTP server
 make test_remote_http
 ```
 
-**For detailed testing instructions, test creation, and Python script usage, see [docs/DEVELOPER.md](docs/DEVELOPER.md).**
+Notes:
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+- `make test` ensures missing HDF5 fixtures exist before running tests.
+- On macOS, the Makefile currently skips the remote HTTP portion of `make test`; use Linux to exercise the rewritten
+  remote suite.
 
-CLI:
-```shell
-duckdb -unsigned
-```
+For targeted test runs, test-data generation, and debugging workflows, see [docs/DEVELOPER.md](docs/DEVELOPER.md) and
+[test/README.md](test/README.md).
 
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
+## Documentation
 
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
-
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL h5db;
-LOAD h5db;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+- [API.md](API.md): function reference, settings, type mapping, and limitations
+- [RSE_USAGE.md](RSE_USAGE.md): detailed guide to run-start encoding support
+- [docs/DEVELOPER.md](docs/DEVELOPER.md): building, testing, debugging, and project layout

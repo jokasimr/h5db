@@ -4,12 +4,17 @@ This document describes all functions provided by the h5db extension.
 
 ## Table Functions
 
+`swmr := true` enables HDF5 SWMR read mode for local files. Remote URLs accept the parameter, but remote paths are
+opened through the DuckDB-backed remote VFD as immutable snapshots served by `httpfs`, so `H5F_ACC_SWMR_READ` is not
+used there.
+
 ### `h5_tree(filename)`
 
 Lists all groups and datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
+  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
@@ -34,7 +39,8 @@ SELECT * FROM h5_tree('data.h5', swmr := true);
 Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
+  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
@@ -49,6 +55,7 @@ Reads data from one or more datasets in an HDF5 file.
 - Scalar (rank-0) datasets are returned as constant columns.
 - If all selected datasets are scalar, `h5_read()` returns a single row.
 - If any non-scalar dataset is present, scalar columns are broadcast to the row count of the non-scalar datasets.
+- If multiple non-scalar regular datasets are selected, the output row count is the minimum outer dimension among them.
 
 **Type Support:**
 - Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64
@@ -90,16 +97,19 @@ SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 Reads attributes from a dataset or group.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs` (for example `http://`, `https://`, `s3://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
+  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
 - `object_path` (VARCHAR): Path to the dataset or group (use empty string or '/' for root)
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Single-row table where each column represents one attribute
 - Column names are the attribute names
 - Column types match the attribute types (numeric, string, or arrays)
+- If the target object has no attributes, the function raises `IO Error: Object has no attributes: ...`
 
 **Type Support:**
 - Numeric scalars, string scalars, and 1D numeric arrays
+- HDF5 `H5T_ARRAY`-typed attributes are supported only when they are 1D and numeric
 - String array attributes are not currently supported
 
 **Examples:**
@@ -268,6 +278,7 @@ All functions provide clear error messages for common issues:
 - **Invalid path**: "IO Error: Dataset or group not found"
 - **Unsupported type**: "IO Error: Unsupported HDF5 type"
 - **Invalid RSE data**: "IO Error: RSE run_starts must be strictly increasing"
+- **No attributes**: "IO Error: Object has no attributes"
 
 ---
 
@@ -288,10 +299,11 @@ All functions provide clear error messages for common issues:
 
 1. **Compound types** (HDF5 structs) are not currently supported
 2. **Enum types** are not currently supported
-3. **Datasets with >4 dimensions** are not supported
-4. **Multi-dimensional string datasets** are not supported
-5. **HDF5 reference datatypes** (object/region references stored as values) are not supported
-6. **Variable-length array types** are not supported (fixed-size arrays only)
+3. **Opaque, bitfield, reference, time-like, and non-string variable-length HDF5 type classes** are not supported
+4. **Datasets with >4 dimensions** are not supported
+5. **Multi-dimensional string datasets** are not supported
+6. **Attribute string arrays** are not supported
+7. **Attribute multidimensional dataspaces** are not supported (only scalar and 1D)
 
 ---
 

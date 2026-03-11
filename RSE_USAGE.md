@@ -263,7 +263,7 @@ Typical compression ratios by use case:
 
 ### I/O Benefits
 
-For remote files (S3, HTTP):
+For remote files handled through DuckDB `httpfs` (HTTP/S, S3, R2, GCS, HF, etc.):
 - Only need to read small run_starts and values datasets
 - Significant bandwidth savings (100×-1000× less data transferred)
 

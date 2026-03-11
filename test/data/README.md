@@ -18,6 +18,9 @@ To ensure test data exists (generate only if missing):
 ./test/data/ensure_test_data.sh
 ```
 
+`ensure_test_data.sh` only checks for missing files. If you change a generator script, rerun that specific generator or
+`./test/data/generate_all_test_data.sh`.
+
 ## Test Data Files and Generators
 
 ### Core Test Files (`test/data/`)
@@ -33,8 +36,8 @@ To ensure test data exists (generate only if missing):
 | `pushdown_test.h5` | `create_pushdown_test.py` | 24 KB | Predicate pushdown optimization |
 | `rse_edge_cases.h5` | `create_rse_edge_cases.py` | 168 KB | RSE edge cases (chunk boundaries, constants, etc.) |
 | `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
-| `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported HDF5 types (enum, compound, float16) |
-| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Attribute edge cases (empty, vlen, multidim) |
+| `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, float16, reference, non-string vlen, opaque, bitfield) |
+| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, string array, enum, compound, float16, reference, opaque, bitfield) |
 | `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling and unsupported string-array attrs |
 | `empty_scalar.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets (row-count edge cases) |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |

@@ -17,7 +17,7 @@ make test_debug
 
 Large tests live in `test/sql/large/` as `*.test` and are included in `make test`. To skip them:
 ```bash
-./build/release/test/unittest "test/sql/*" "~test/sql/large/*"
+./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
 ```
 
 ## Run Everything
@@ -34,7 +34,11 @@ Run the full SQL suite against rewritten remote paths using the local range-capa
 make test_remote_http
 ```
 
+On macOS, `make test` currently skips the remote HTTP portion of the suite; use `make test_remote_http` on Linux to
+exercise the rewritten remote coverage.
+
 ## Remote-Only SQLLogicTests
 
-`test/sql/remote/*.test` contains remote HTTP-specific checks (auth, timeout, and simulated server errors).
-These are included in `make test` through the remote runner and can also be executed directly with `make test_remote_http`.
+`test/sql/remote/*.test` contains remote HTTP-specific checks (auth, retries, redirects, timeout, truncation,
+corruption, caching, and simulated server/drop errors).
+These are included in `make test` through the remote runner and can also be executed via `make test_remote_http`.
