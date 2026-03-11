@@ -863,14 +863,14 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			// Get dataspace to determine dimensions - RAII handles cleanup
 			H5DataspaceHandle space(dataset);
 			if (!space.is_valid()) {
-				throw IOException(AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path,
-				                                    result->filename));
+				throw IOException(
+				    AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result->filename));
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
-				throw IOException(AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path,
-				                                    result->filename));
+				throw IOException(
+				    AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result->filename));
 			}
 			if (ds_info.is_string && ds_info.ndims > 1) {
 				throw IOException("String datasets with more than 1 dimension are not supported");
@@ -1052,15 +1052,15 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException(AppendRemoteError("Failed to open dataset: " + spec.path,
-					                                        bind_data.filename));
+					    throw IOException(
+					        AppendRemoteError("Failed to open dataset: " + spec.path, bind_data.filename));
 				    }
 
 				    // Cache the file dataspace (reused across all chunks)
 				    H5DataspaceHandle file_space(dataset);
 				    if (!file_space.is_valid()) {
-					    throw IOException(AppendRemoteError("Failed to get dataspace for dataset: " + spec.path,
-					                                        bind_data.filename));
+					    throw IOException(
+					        AppendRemoteError("Failed to get dataspace for dataset: " + spec.path, bind_data.filename));
 				    }
 
 				    RegularColumnState state;
@@ -1100,8 +1100,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException(AppendRemoteError("Failed to open dataset: " + spec.path,
-					                                        bind_data.filename));
+					    throw IOException(
+					        AppendRemoteError("Failed to open dataset: " + spec.path, bind_data.filename));
 				    }
 
 				    ScalarColumnState scalar_state;
@@ -1139,14 +1139,14 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					    H5ErrorSuppressor suppress;
 					    starts_ds = H5DatasetHandle(result->file, spec.run_starts_path.c_str());
 					    if (!starts_ds.is_valid()) {
-						    throw IOException(AppendRemoteError("Failed to open RSE run_starts dataset: " +
-						                                        spec.run_starts_path, bind_data.filename));
+						    throw IOException(AppendRemoteError(
+						        "Failed to open RSE run_starts dataset: " + spec.run_starts_path, bind_data.filename));
 					    }
 
 					    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
 					    if (!values_ds.is_valid()) {
-						    throw IOException(AppendRemoteError("Failed to open RSE values dataset: " +
-						                                        spec.values_path, bind_data.filename));
+						    throw IOException(AppendRemoteError(
+						        "Failed to open RSE values dataset: " + spec.values_path, bind_data.filename));
 					    }
 				    }
 
@@ -1173,8 +1173,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
 				    if (num_runs_hssize < 0 || num_values_hssize < 0) {
-					    throw IOException(AppendRemoteError("Failed to get dataset sizes for RSE column",
-					                                        bind_data.filename));
+					    throw IOException(
+					        AppendRemoteError("Failed to get dataset sizes for RSE column", bind_data.filename));
 				    }
 
 				    size_t num_runs = static_cast<size_t>(num_runs_hssize);
@@ -1186,8 +1186,8 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 					                      std::to_string(num_runs) + " and " + std::to_string(num_values));
 				    }
 
-				    rse_col.run_starts = LoadRunStarts(bind_data.filename, spec, starts_ds, num_runs,
-				                                      bind_data.num_rows);
+				    rse_col.run_starts =
+				        LoadRunStarts(bind_data.filename, spec, starts_ds, num_runs, bind_data.num_rows);
 				    rse_col.values = LoadRSEValues(bind_data.filename, spec, values_ds, num_values);
 
 				    // Note: RSEColumnState is now stateless (thread-safe)
@@ -1261,7 +1261,6 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, idx_t tab
                                    const unordered_map<idx_t, idx_t> &get_to_bind_map,
                                    const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
                                    vector<ClaimedFilter> &claimed) {
-
 	// Handle comparison expressions: col > 10, col = 20, 10 < col, etc.
 	if (expr->expression_class == ExpressionClass::BOUND_COMPARISON) {
 		auto &comp = expr->Cast<BoundComparisonExpression>();
@@ -1337,7 +1336,6 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, idx_t tab
 		if (between.input->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
 		    between.lower->expression_class == ExpressionClass::BOUND_CONSTANT &&
 		    between.upper->expression_class == ExpressionClass::BOUND_CONSTANT) {
-
 			auto &colref = between.input->Cast<BoundColumnRefExpression>();
 			auto &lower_const = between.lower->Cast<BoundConstantExpression>();
 			auto &upper_const = between.upper->Cast<BoundConstantExpression>();
@@ -1627,19 +1625,16 @@ static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_of
 static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
                           const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
                           idx_t total_rows, const RegularColumnSpec &spec, const string &filename) {
-
 	idx_t max_end_row = 0;
 	for (Chunk &chunk : cache.chunks) {
 		auto end_row = chunk.end_row.load(std::memory_order_acquire);
 		max_end_row = end_row > max_end_row ? end_row : max_end_row;
 	}
 	for (Chunk &chunk : cache.chunks) {
-
 		if (chunk.end_row.load(std::memory_order_acquire) <= position_done.load(std::memory_order_acquire)) {
 			// Chunk is finished
 			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
 			if (next_range.has_data) {
-
 				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
 				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
 				                   filename);
@@ -1674,7 +1669,6 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
 		try {
-
 			// Only refresh cache for columns being scanned (projection pushdown)
 			// Uses LOCAL indexing (dense array)
 			for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {

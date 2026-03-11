@@ -165,9 +165,8 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 
 	H5ObjectHandle obj(file, result->object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException(
-		    AppendRemoteError("Failed to open object: " + result->object_path + " in file: " + result->filename,
-		                      result->filename));
+		throw IOException(AppendRemoteError(
+		    "Failed to open object: " + result->object_path + " in file: " + result->filename, result->filename));
 	}
 
 	hsize_t idx = 0;
@@ -179,8 +178,8 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 		if (iter_data.error) {
 			throw IOException(AppendRemoteError(iter_data.error_message, result->filename));
 		}
-		throw IOException(AppendRemoteError("Failed to iterate attributes for: " + result->object_path,
-		                                    result->filename));
+		throw IOException(
+		    AppendRemoteError("Failed to iterate attributes for: " + result->object_path, result->filename));
 	}
 
 	if (result->attributes.empty()) {
@@ -255,15 +254,16 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 				char *str_ptr = nullptr;
 				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), &str_ptr) < 0) {
-					throw IOException(AppendRemoteError("Failed to read variable-length string attribute: " +
-					                                    attr_info.name, bind_data.filename));
+					throw IOException(AppendRemoteError(
+					    "Failed to read variable-length string attribute: " + attr_info.name, bind_data.filename));
 				}
 
 				if (str_ptr) {
 					FlatVector::GetData<string_t>(result_vector)[0] = StringVector::AddString(result_vector, str_ptr);
 					if (H5free_memory(str_ptr) < 0) {
-						throw IOException(AppendRemoteError("Failed to reclaim variable-length string attribute: " +
-						                                    attr_info.name, bind_data.filename));
+						throw IOException(
+						    AppendRemoteError("Failed to reclaim variable-length string attribute: " + attr_info.name,
+						                      bind_data.filename));
 					}
 				} else {
 					FlatVector::SetNull(result_vector, 0, true);
@@ -275,8 +275,8 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 
 				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), buffer.data()) < 0) {
-					throw IOException(AppendRemoteError("Failed to read fixed-length string attribute: " +
-					                                    attr_info.name, bind_data.filename));
+					throw IOException(AppendRemoteError(
+					    "Failed to read fixed-length string attribute: " + attr_info.name, bind_data.filename));
 				}
 
 				size_t actual_len = strnlen(buffer.data(), str_len);
@@ -291,8 +291,8 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 				T value;
 				H5ErrorSuppressor suppress;
 				if (H5Aread(attr, attr_info.h5_type.get(), &value) < 0) {
-					throw IOException(AppendRemoteError("Failed to read attribute: " + attr_info.name,
-					                                    bind_data.filename));
+					throw IOException(
+					    AppendRemoteError("Failed to read attribute: " + attr_info.name, bind_data.filename));
 				}
 
 				auto data = FlatVector::GetData<T>(result_vector);
