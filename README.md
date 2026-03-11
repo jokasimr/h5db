@@ -5,23 +5,22 @@ file structure, read datasets as columns, read attributes, and work with remote 
 
 ## Highlights
 
-- Reads local HDF5 files directly from SQL.
-- Reads remote `httpfs`-handled paths such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`,
-  `gcs://`, `gs://`, and `hf://`.
+- Reads local or remote (`https://`, `s3://`, ...) HDF5 files directly from SQL.
 - Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
-- Treats scalar datasets as constant columns.
-- Supports projection pushdown and row-range pushdown for `h5_index()` and run-start encoded columns.
-- Supports HDF5 attributes on groups and datasets.
-- Includes a DuckDB-backed remote VFD with support for `httpfs`, the HTTP metadata cache, and the external file cache.
+- Multiple dataset can be stacked horizontally to make a table.
+- Scalar datasets are treated as constant columns.
+- Supports projection pushdown.
+- Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
+- Supports reading HDF5 attributes on groups and datasets.
 
 ## Core Functions
 
-- `h5_tree(filename[, swmr := ...])`
+- `h5_read(filename, datasets_or_definitions...)`
+  Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
+  "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`).
+- `h5_tree(filename)`
   Lists groups and datasets with `path`, `type`, `dtype`, and `shape`.
-- `h5_read(filename, dataset_or_definition, ...[, swmr := ...])`
-  Reads one or more datasets as DuckDB columns. Supports regular datasets plus helpers such as `h5_rse()`,
-  `h5_index()`, and `h5_alias()`.
-- `h5_attributes(filename, object_path[, swmr := ...])`
+- `h5_attributes(filename, object_path)`
   Reads attributes from a dataset or group as a single wide row.
 
 For the full API, see [API.md](API.md).
