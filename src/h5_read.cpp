@@ -374,7 +374,7 @@ static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, i
 		chunk_size = target_rows;
 		D_ASSERT(chunk_size % chunk_rows == 0);
 	} else {
-		chunk_size = H5DB_DEFAULT_BATCH_SIZE_BYTES / MaxValue<idx_t>(spec.element_size, 1);
+		chunk_size = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.element_size, 1), 1);
 	}
 	if (chunk_size < STANDARD_VECTOR_SIZE) {
 		chunk_size = STANDARD_VECTOR_SIZE;
