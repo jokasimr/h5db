@@ -112,19 +112,20 @@ struct Chunk {
 	    std::variant<std::monostate, // No cache (for non-cacheable columns)
 	                 std::vector<int8_t>, std::vector<int16_t>, std::vector<int32_t>, std::vector<int64_t>,
 	                 std::vector<uint8_t>, std::vector<uint16_t>, std::vector<uint32_t>, std::vector<uint64_t>,
-	                 std::vector<float>, std::vector<double>,
-	                 std::vector<string> // Included for template instantiation (but not actually used for caching)
-	                 >;
+	                 std::vector<float>, std::vector<double>>;
 	CacheStorage cache; // Size: chunk_size * elements_per_row elements
 
 	// Chunk state tracking
-	// end_row: One past the last row in this chunk. Chunk covers [end_row - chunk_size, end_row)
-	// Initialized to 0, which makes chunk appear stale (covers negative range)
+	// end_row is one past the logical cache window start plus chunk_size.
+	// This makes the cache window start recoverable as (end_row - chunk_size).
+	// Initialized to 0, which makes chunk appear stale (covers negative range).
 	std::atomic<idx_t> end_row {0};
 };
 
 struct ChunkCache {
-	Chunk chunks[2]; // Fixed size array (atomic members prevent std::vector usage)
+	static constexpr idx_t MAX_CHUNKS = 2;
+
+	Chunk chunks[MAX_CHUNKS]; // Fixed size array (atomic members prevent std::vector usage)
 };
 
 // Regular column runtime state
@@ -198,6 +199,8 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 
 	// Row range filtering (for predicate pushdown on RSE or index columns)
 	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
+	idx_t scan_batch_size = STANDARD_VECTOR_SIZE;
+	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
 
 	// Mutex for thread-safe range selection (enables parallel scanning)
 	std::mutex range_selection_mutex;
@@ -219,7 +222,7 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 
 	// Override MaxThreads to enable parallel scanning
 	idx_t MaxThreads() const override {
-		return GlobalTableFunctionState::MAX_THREADS; // Use all available threads
+		return max_threads;
 	}
 
 	// No destructor needed - RAII wrappers handle all cleanup automatically
@@ -348,7 +351,8 @@ static H5DataspaceHandle CreateMemspaceAndSelect(hid_t file_space_id, const Regu
 	return mem_space;
 }
 
-static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, idx_t target_batch_size_bytes) {
+static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, idx_t target_batch_size_bytes,
+                              idx_t total_rows) {
 	idx_t chunk_rows = 0;
 	hid_t dcpl = H5Dget_create_plist(dataset_id);
 	if (dcpl >= 0) {
@@ -376,10 +380,10 @@ static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, i
 	} else {
 		chunk_size = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.element_size, 1), 1);
 	}
-	if (chunk_size < STANDARD_VECTOR_SIZE) {
-		chunk_size = STANDARD_VECTOR_SIZE;
+	if (total_rows == 0) {
+		return 0;
 	}
-	return chunk_size;
+	return MinValue<idx_t>(chunk_size, total_rows);
 }
 
 // Helper function to open a dataset and get its type in one operation
@@ -999,6 +1003,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
 	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
+	static constexpr idx_t WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
 
 	// Store which columns to scan (projection pushdown)
 	if (input.column_ids.empty()) {
@@ -1033,6 +1038,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	// Allocate DENSE column_states array - only for scanned columns
 	// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
 	result->column_states.reserve(GetNumScannedColumns(*result));
+	idx_t projected_numeric_row_bytes = 0;
 
 	// Process columns in scan order (builds dense array)
 	for (idx_t i = 0; i < GetNumScannedColumns(*result); i++) {
@@ -1069,23 +1075,26 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 				    // Cache numeric columns (strings are read directly)
 				    bool is_cacheable = !spec.is_string;
-
 				    if (is_cacheable) {
-					    // Create cache structure (chunks array is already allocated)
-					    state.chunk_cache = std::make_unique<ChunkCache>();
+					    projected_numeric_row_bytes += NumericCast<idx_t>(spec.element_size);
+					    idx_t chunk_size =
+					        ComputeChunkSize(spec, state.dataset.get(), target_batch_size_bytes, bind_data.num_rows);
+					    if (chunk_size > 0) {
+						    state.chunk_cache = std::make_unique<ChunkCache>();
 
-					    idx_t chunk_size = ComputeChunkSize(spec, state.dataset.get(), target_batch_size_bytes);
+						    auto chunk_count = (chunk_size >= bind_data.num_rows) ? 1 : ChunkCache::MAX_CHUNKS;
 
-					    // Allocate typed cache buffer (chunk_size * elements_per_row elements)
-					    auto base_type = GetBaseType(spec.column_type);
-					    DispatchOnDuckDBType(base_type, [&](auto type_tag) {
-						    using T = typename decltype(type_tag)::type;
-						    for (auto &chunk : state.chunk_cache->chunks) {
-							    idx_t buffer_elements = chunk_size * spec.elements_per_row;
-							    chunk.cache = std::vector<T>(buffer_elements);
-							    chunk.chunk_size = chunk_size;
-						    }
-					    });
+						    auto base_type = GetBaseType(spec.column_type);
+						    DispatchOnNumericType(base_type, [&](auto type_tag) {
+							    using T = typename decltype(type_tag)::type;
+							    for (idx_t chunk_idx = 0; chunk_idx < chunk_count; chunk_idx++) {
+								    auto &chunk = state.chunk_cache->chunks[chunk_idx];
+								    idx_t buffer_elements = chunk_size * spec.elements_per_row;
+								    chunk.cache = std::vector<T>(buffer_elements);
+								    chunk.chunk_size = chunk_size;
+							    }
+						    });
+					    }
 				    }
 
 				    // Store in dense array with LOCAL indexing
@@ -1201,6 +1210,15 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 			    }
 		    },
 		    col);
+	}
+
+	if (projected_numeric_row_bytes > 0) {
+		auto target_rows = MaxValue<idx_t>(target_batch_size_bytes / projected_numeric_row_bytes, 1);
+		result->scan_batch_size = MinValue<idx_t>(target_rows, STANDARD_VECTOR_SIZE);
+	}
+
+	if (projected_numeric_row_bytes >= WIDE_ROW_FEW_ROWS_THRESHOLD && bind_data.num_rows < STANDARD_VECTOR_SIZE) {
+		result->max_threads = 1;
 	}
 
 	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
@@ -1456,21 +1474,47 @@ struct RangeSelection {
 	idx_t to_read;  // Number of rows to read
 };
 
-static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position) {
+static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position, idx_t batch_size) {
 	auto it = FindRangeForPosition(valid_row_ranges, position);
 	if (it != valid_row_ranges.end()) {
 		idx_t start = position < it->start_row ? it->start_row : position;
-		idx_t remains = MinValue<idx_t>(STANDARD_VECTOR_SIZE, it->end_row - start);
+		idx_t remains = MinValue<idx_t>(batch_size, it->end_row - start);
 		return {true, start, remains};
 	}
 	return {false, 0, 0}; // no range after position
+}
+
+static idx_t GetChunkStart(const Chunk &chunk) {
+	auto chunk_end = chunk.end_row.load(std::memory_order_acquire);
+	if (chunk_end == 0) {
+		return 0;
+	}
+	return (chunk_end > chunk.chunk_size) ? (chunk_end - chunk.chunk_size) : 0;
+}
+
+static idx_t GetChunkLoadedEnd(const Chunk &chunk, const std::vector<RowRange> &valid_row_ranges) {
+	auto chunk_end = chunk.end_row.load(std::memory_order_acquire);
+	if (chunk_end == 0) {
+		return 0;
+	}
+	auto chunk_start = GetChunkStart(chunk);
+	auto loaded_range = NextRangeFrom(valid_row_ranges, chunk_start, chunk.chunk_size);
+	return loaded_range.has_data ? (chunk_start + loaded_range.to_read) : chunk_start;
+}
+
+static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
+	auto chunk_size = cache.chunks[0].chunk_size;
+	if (chunk_size == 0 || chunk_size >= total_rows) {
+		return 1;
+	}
+	return ChunkCache::MAX_CHUNKS;
 }
 
 // Helper function to determine the next data range to read
 static RangeSelection GetNextDataRange(H5ReadGlobalState &gstate) {
 	// Thread-safe range selection for parallel scanning
 	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
-	auto range = NextRangeFrom(gstate.valid_row_ranges, gstate.position.load());
+	auto range = NextRangeFrom(gstate.valid_row_ranges, gstate.position.load(), gstate.scan_batch_size);
 	if (range.has_data) {
 		// Advance position for next thread (critical for parallel scanning!)
 		gstate.position.store(range.position + range.to_read);
@@ -1608,7 +1652,7 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_r
 static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_offset_rows, idx_t rows_to_copy,
                                Vector &result_vector, idx_t result_offset_rows, LogicalType column_type,
                                idx_t elements_per_row) {
-	DispatchOnDuckDBType(column_type, [&](auto type_tag) {
+	DispatchOnNumericType(column_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
 		const auto &typed_cache = std::get<std::vector<T>>(cache);
 
@@ -1626,24 +1670,27 @@ static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_of
 static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
                           const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
                           idx_t total_rows, const RegularColumnSpec &spec, const string &filename) {
+	auto chunk_count = GetChunkCount(cache, total_rows);
 	idx_t max_end_row = 0;
-	for (Chunk &chunk : cache.chunks) {
-		auto end_row = chunk.end_row.load(std::memory_order_acquire);
+	for (idx_t i = 0; i < chunk_count; i++) {
+		auto &chunk = cache.chunks[i];
+		auto end_row = GetChunkLoadedEnd(chunk, valid_row_ranges);
 		max_end_row = end_row > max_end_row ? end_row : max_end_row;
 	}
-	for (Chunk &chunk : cache.chunks) {
-		if (chunk.end_row.load(std::memory_order_acquire) <= position_done.load(std::memory_order_acquire)) {
+	for (idx_t i = 0; i < chunk_count; i++) {
+		auto &chunk = cache.chunks[i];
+		if (GetChunkLoadedEnd(chunk, valid_row_ranges) <= position_done.load(std::memory_order_acquire)) {
 			// Chunk is finished
-			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
+			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row, chunk.chunk_size);
 			if (next_range.has_data) {
-				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
+				idx_t rows_to_load = std::min(next_range.to_read, total_rows - next_range.position);
 				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
 				                   filename);
 
 				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
 
-				max_end_row = new_end;
+				max_end_row = next_range.position + rows_to_load;
 			}
 		}
 	}
@@ -1713,8 +1760,7 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 	// Check if using cache
 	if (state.chunk_cache) {
 		auto &cache = *state.chunk_cache;
-		auto *chunk1 = &cache.chunks[0];
-		auto *chunk2 = &cache.chunks[1];
+		auto chunk_count = GetChunkCount(cache, bind_data.num_rows);
 		LogicalType base_type;
 		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
 
@@ -1723,15 +1769,12 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 
 			TryRefreshCache(gstate, bind_data);
 
-			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
-			idx_t end2 = chunk2->end_row.load(std::memory_order_acquire);
-
-			if (end1 > end2) {
-				std::swap(chunk1, chunk2);
-				std::swap(end1, end2);
+			idx_t max_end = 0;
+			for (idx_t i = 0; i < chunk_count; i++) {
+				auto end = GetChunkLoadedEnd(cache.chunks[i], gstate.valid_row_ranges);
+				max_end = MaxValue<idx_t>(max_end, end);
 			}
-
-			if (position + to_read <= end2) {
+			if (position + to_read <= max_end) {
 				break;
 			}
 
@@ -1741,9 +1784,10 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		}
 
 		// Copy data from chunks that overlap our read range [position, position + to_read)
-		for (Chunk *chunk : {chunk1, chunk2}) {
-			idx_t chunk_end = chunk->end_row.load(std::memory_order_acquire);
-			idx_t chunk_start = (chunk_end > chunk->chunk_size) ? (chunk_end - chunk->chunk_size) : 0;
+		for (idx_t i = 0; i < chunk_count; i++) {
+			auto *chunk = &cache.chunks[i];
+			idx_t chunk_start = GetChunkStart(*chunk);
+			idx_t chunk_end = GetChunkLoadedEnd(*chunk, gstate.valid_row_ranges);
 
 			// Check if chunk overlaps our range
 			if (chunk_start < position + to_read && chunk_end > position) {

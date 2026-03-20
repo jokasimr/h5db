@@ -43,6 +43,9 @@ To ensure test data exists (generate only if missing):
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
 | `nd_cache_test.h5` | `create_nd_cache_test.py` | 310 MB | N-D cache coverage with varied chunking |
+| `cache_boundaries.h5` | `create_cache_boundaries_test.py` | 8 KB | Regular cache row-count boundary coverage |
+| `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
+| `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
 
 ### Large Test Files (`test/data/large/`)
@@ -80,12 +83,18 @@ test/data/
 ├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
 ├── create_nd_cache_test.py            # Creates: nd_cache_test.h5
+├── create_cache_boundaries_test.py    # Creates: cache_boundaries.h5
+├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
+├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │
 ├── simple.h5                          # Generated files (in .gitignore)
 ├── types.h5
 ├── multidim.h5
 ├── nd_cache_test.h5
+├── cache_boundaries.h5
+├── sparse_pushdown_cache.h5
+├── wide_few_rows.h5
 ├── large_rse_test.h5
 ├── ... (other .h5 files)
 │

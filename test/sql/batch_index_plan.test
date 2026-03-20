@@ -15,3 +15,19 @@ EXPLAIN CREATE TEMP TABLE tmp_h5 AS
 SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 ----
 physical_plan	<REGEX>:.*BATCH_CREATE_TABLE_AS.*H5_READ.*
+
+statement ok
+CREATE TEMP TABLE tmp_insert(i INTEGER);
+
+query TT
+EXPLAIN INSERT INTO tmp_insert
+SELECT integers FROM h5_read('test/data/simple.h5', '/integers');
+----
+physical_plan	<REGEX>:.*BATCH_INSERT.*H5_READ.*
+
+query TT
+EXPLAIN COPY (
+    SELECT * FROM h5_read('test/data/simple.h5', '/integers')
+) TO 'tmp_h5_batch_index.csv';
+----
+physical_plan	<REGEX>:.*BATCH_COPY_TO_FILE.*H5_READ.*

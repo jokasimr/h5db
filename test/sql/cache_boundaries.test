@@ -1,0 +1,84 @@
+# name: test/sql/cache_boundaries.test
+# description: Regular chunk-cache row-count boundary coverage
+# group: [sql]
+
+require h5db
+
+statement ok
+SET h5db_batch_size='1KB';
+
+# One row: allocate a single cache chunk and read the only row.
+query II
+SELECT contig[1][1], chunked[4][4]
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_1/contig', '/rows_1/chunked');
+----
+0	10000
+
+# Just under one chunk: still a single cache chunk.
+query IIII
+SELECT COUNT(*), MIN(contig[1][1]), MAX(contig[1][1]), MAX(chunked[4][4])
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_15/contig', '/rows_15/chunked');
+----
+15	0	14	10014
+
+# Exactly one chunk.
+query IIII
+SELECT COUNT(*), MIN(contig[1][1]), MAX(contig[1][1]), MAX(chunked[4][4])
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_16/contig', '/rows_16/chunked');
+----
+16	0	15	10015
+
+# Chunk plus one row: second cache chunk exists but final loaded chunk is partial.
+query II
+SELECT contig[1][1], chunked[4][4]
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_17/contig', '/rows_17/chunked')
+ORDER BY contig[1][1]
+LIMIT 3 OFFSET 14;
+----
+14	10014
+15	10015
+16	10016
+
+# Just under two full chunks.
+query IIII
+SELECT COUNT(*), MIN(contig[1][1]), MAX(contig[1][1]), MAX(chunked[4][4])
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_31/contig', '/rows_31/chunked');
+----
+31	0	30	10030
+
+# Exactly two full chunks.
+query II
+SELECT contig[1][1], chunked[4][4]
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_32/contig', '/rows_32/chunked')
+ORDER BY contig[1][1]
+LIMIT 2 OFFSET 30;
+----
+30	10030
+31	10031
+
+# Two chunks plus one row: third logical batch with a one-row tail.
+query II
+SELECT contig[1][1], chunked[4][4]
+FROM h5_read('test/data/cache_boundaries.h5', '/rows_33/contig', '/rows_33/chunked')
+ORDER BY contig[1][1]
+LIMIT 3 OFFSET 30;
+----
+30	10030
+31	10031
+32	10032
+
+statement ok
+CREATE TEMP TABLE cache_boundary_tmp AS
+SELECT * FROM h5_read('test/data/cache_boundaries.h5', '/rows_33/contig', '/rows_33/chunked');
+
+query IIII
+SELECT COUNT(*), SUM(contig[1][1]), MIN(chunked[1][1]), MAX(chunked[1][1])
+FROM cache_boundary_tmp;
+----
+33	528	10000	10032
+
+statement ok
+DROP TABLE cache_boundary_tmp;
+
+statement ok
+RESET h5db_batch_size;

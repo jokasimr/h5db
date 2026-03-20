@@ -1,0 +1,95 @@
+# name: test/sql/sparse_pushdown_cache.test
+# description: Sparse pushdown ranges over cached regular columns
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+SET h5db_batch_size='1KB';
+
+# selector_values = 1 yields disjoint ranges [0,8), [16,24), [32,33)
+query III
+SELECT COUNT(*), SUM(regular_contig[1][1]), SUM(regular_chunked[1][1])
+FROM h5_read(
+    'test/data/sparse_pushdown_cache.h5',
+    '/regular_contig',
+    '/regular_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+----
+17	216	216
+
+query I
+SELECT regular_chunked[1][1]
+FROM h5_read(
+    'test/data/sparse_pushdown_cache.h5',
+    '/regular_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1
+ORDER BY 1;
+----
+0
+1
+2
+3
+4
+5
+6
+7
+16
+17
+18
+19
+20
+21
+22
+23
+32
+
+# Also exercise an uncached string column in the same tiny-batch scan.
+query II
+SELECT MIN(label), MAX(label)
+FROM h5_read(
+    'test/data/sparse_pushdown_cache.h5',
+    '/regular_contig',
+    '/label',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+----
+row_00	row_32
+
+# selector_values = 0 yields disjoint ranges [8,16), [24,32)
+query III
+SELECT COUNT(*), SUM(regular_contig[1][1]), SUM(regular_chunked[1][1])
+FROM h5_read(
+    'test/data/sparse_pushdown_cache.h5',
+    '/regular_contig',
+    '/regular_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 0;
+----
+16	312	312
+
+statement ok
+CREATE TEMP TABLE sparse_insert(value INTEGER, label VARCHAR);
+
+statement ok
+INSERT INTO sparse_insert
+SELECT regular_chunked[1][1], label
+FROM h5_read(
+    'test/data/sparse_pushdown_cache.h5',
+    '/regular_chunked',
+    '/label',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+
+query IIII
+SELECT COUNT(*), SUM(value), MIN(label), MAX(label) FROM sparse_insert;
+----
+17	216	row_00	row_32
+
+statement ok
+RESET h5db_batch_size;

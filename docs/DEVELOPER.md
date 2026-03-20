@@ -544,6 +544,7 @@ h5db/
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
 - **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner
+- **`src/h5_read.cpp`** also owns `get_partition_data` for ordered batch sinks (`CTAS`, `INSERT`, `COPY`)
 - **`src/h5_tree.cpp`**: Tree/metadata listing
 - **`src/h5_attributes.cpp`**: Attribute reader
 - **`src/h5_common.cpp`**: Shared HDF5 helpers

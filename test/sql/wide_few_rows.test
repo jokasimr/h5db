@@ -1,0 +1,71 @@
+# name: test/sql/wide_few_rows.test
+# description: Wide-row cache sizing and threading edge cases
+# group: [sql]
+
+require h5db
+
+# Default batch sizing should cap cache rows to the dataset row count and still return
+# correct values for wide multi-dimensional datasets.
+query IIII
+SELECT row_id, wide_contiguous[1][1], wide_chunked_row[2][3], wide_chunked_pair[64][64]
+FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/row_id',
+  '/wide_contiguous',
+  '/wide_chunked_row',
+  '/wide_chunked_pair'
+)
+ORDER BY row_id;
+----
+0	0.0	1000102.0	2006363.0
+1	100000.0	1100102.0	2106363.0
+2	200000.0	1200102.0	2206363.0
+3	300000.0	1300102.0	2306363.0
+4	400000.0	1400102.0	2406363.0
+
+# Force small cache chunks so the scan has to produce multiple sub-2048 batches.
+statement ok
+SET h5db_batch_size='64KB';
+
+query IIII
+SELECT row_id, wide_contiguous[64][64], wide_chunked_row[1][1], wide_chunked_pair[32][17]
+FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/row_id',
+  '/wide_contiguous',
+  '/wide_chunked_row',
+  '/wide_chunked_pair'
+)
+ORDER BY row_id;
+----
+0	6363.0	1000000.0	2003116.0
+1	106363.0	1100000.0	2103116.0
+2	206363.0	1200000.0	2203116.0
+3	306363.0	1300000.0	2303116.0
+4	406363.0	1400000.0	2403116.0
+
+statement ok
+RESET h5db_batch_size;
+
+# Ordered sink path should still work on the wide-row tiny-input shape.
+statement ok
+SET threads=8;
+
+statement ok
+CREATE TEMP TABLE wide_tmp AS
+SELECT * FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/row_id',
+  '/wide_contiguous',
+  '/wide_chunked_row',
+  '/wide_chunked_pair'
+);
+
+query IIII
+SELECT COUNT(*), SUM(row_id), MIN(wide_contiguous[1][1]), MAX(wide_chunked_pair[64][64])
+FROM wide_tmp;
+----
+5	10	0.0	2406363.0
+
+statement ok
+DROP TABLE wide_tmp;
