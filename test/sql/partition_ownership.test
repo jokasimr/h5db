@@ -1,0 +1,104 @@
+# name: test/sql/partition_ownership.test
+# description: Logical partition ownership regression coverage for h5_read batch indexes
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA threads=8;
+
+statement ok
+SET preserve_insertion_order=true;
+
+query III
+SELECT COUNT(*), MIN(rows_20479), MAX(rows_20479)
+FROM h5_read('test/data/partition_ownership.h5', '/rows_20479');
+----
+20479	0	20478
+
+query III
+SELECT COUNT(*), MIN(rows_20480), MAX(rows_20480)
+FROM h5_read('test/data/partition_ownership.h5', '/rows_20480');
+----
+20480	0	20479
+
+query III
+SELECT COUNT(*), MIN(rows_20481), MAX(rows_20481)
+FROM h5_read('test/data/partition_ownership.h5', '/rows_20481');
+----
+20481	0	20480
+
+query I
+SELECT rows_20481
+FROM h5_read('test/data/partition_ownership.h5', '/rows_20481')
+ORDER BY rows_20481
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+query IIIII
+SELECT COUNT(*), MIN(index), MAX(index), MIN(rows_40961), MAX(rows_40961)
+FROM h5_read('test/data/partition_ownership.h5', h5_index(), '/rows_40961')
+WHERE index >= 20478 AND index <= 20482;
+----
+5	20478	20482	20478	20482
+
+statement ok
+CREATE TEMP TABLE partition_ctas AS
+SELECT * FROM h5_read('test/data/partition_ownership.h5', '/rows_40961');
+
+query III
+SELECT COUNT(*), MIN(rows_40961), MAX(rows_40961)
+FROM partition_ctas;
+----
+40961	0	40960
+
+query I
+SELECT rows_40961
+FROM partition_ctas
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+statement ok
+DROP TABLE partition_ctas;
+
+statement ok
+CREATE TEMP TABLE partition_insert(val INTEGER);
+
+statement ok
+INSERT INTO partition_insert
+SELECT rows_20481 FROM h5_read('test/data/partition_ownership.h5', '/rows_20481');
+
+query III
+SELECT COUNT(*), MIN(val), MAX(val)
+FROM partition_insert;
+----
+20481	0	20480
+
+query I
+SELECT val
+FROM partition_insert
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+statement ok
+DROP TABLE partition_insert;
+
+statement ok
+COPY (
+    SELECT * FROM h5_read('test/data/partition_ownership.h5', '/rows_20481')
+) TO 'tmp_partition_ownership.csv' (FORMAT csv, HEADER false);
+
+query III
+SELECT COUNT(*), MIN(rows_20481), MAX(rows_20481)
+FROM read_csv('tmp_partition_ownership.csv', columns={'rows_20481': 'INTEGER'}, header=false);
+----
+20481	0	20480

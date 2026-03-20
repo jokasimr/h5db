@@ -1,0 +1,112 @@
+# name: test/sql/sparse_partition_pushdown.test
+# description: Sparse pushdown coverage across logical partition boundaries and empty partitions
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA threads=8;
+
+statement ok
+SET preserve_insertion_order=true;
+
+query IIII
+SELECT COUNT(*), SUM(value_contig), MIN(value_chunked), MAX(value_chunked)
+FROM h5_read(
+    'test/data/sparse_partition_pushdown.h5',
+    '/value_contig',
+    '/value_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+----
+14	675907	20478	81929
+
+query I
+SELECT value_chunked
+FROM h5_read(
+    'test/data/sparse_partition_pushdown.h5',
+    '/value_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1
+ORDER BY 1;
+----
+20478
+20479
+20480
+20481
+20482
+40965
+40966
+40970
+40971
+81925
+81926
+81927
+81928
+81929
+
+query II
+SELECT MIN(label), MAX(label)
+FROM h5_read(
+    'test/data/sparse_partition_pushdown.h5',
+    '/value_contig',
+    '/label',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+----
+row_20478	row_81929
+
+statement ok
+CREATE TEMP TABLE sparse_partition_ctas AS
+SELECT value_chunked
+FROM h5_read(
+    'test/data/sparse_partition_pushdown.h5',
+    '/value_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+
+query III
+SELECT COUNT(*), SUM(value_chunked), MAX(value_chunked)
+FROM sparse_partition_ctas;
+----
+14	675907	81929
+
+statement ok
+DROP TABLE sparse_partition_ctas;
+
+statement ok
+CREATE TEMP TABLE sparse_partition_insert(val INTEGER);
+
+statement ok
+INSERT INTO sparse_partition_insert
+SELECT value_chunked
+FROM h5_read(
+    'test/data/sparse_partition_pushdown.h5',
+    '/value_chunked',
+    h5_rse('/selector_starts', '/selector_values')
+) WHERE selector_values = 1;
+
+query III
+SELECT COUNT(*), SUM(val), MAX(val)
+FROM sparse_partition_insert;
+----
+14	675907	81929
+
+statement ok
+DROP TABLE sparse_partition_insert;
+
+statement ok
+COPY (
+    SELECT value_chunked
+    FROM h5_read(
+        'test/data/sparse_partition_pushdown.h5',
+        '/value_chunked',
+        h5_rse('/selector_starts', '/selector_values')
+    ) WHERE selector_values = 1
+) TO 'tmp_sparse_partition.csv' (FORMAT csv, HEADER false);
+
+query III
+SELECT COUNT(*), SUM(value_chunked), MAX(value_chunked)
+FROM read_csv('tmp_sparse_partition.csv', columns={'value_chunked': 'INTEGER'}, header=false);
+----
+14	675907	81929

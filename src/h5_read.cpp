@@ -28,6 +28,8 @@
 
 namespace duckdb {
 
+static constexpr idx_t H5_READ_LOGICAL_PARTITION_MULTIPLIER = 10;
+
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
 	return FormatRemoteFileError(prefix, filename);
 }
@@ -193,13 +195,15 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	vector<column_t> columns_to_scan;            // Global column indices (into bind_data.columns)
 	unordered_map<idx_t, idx_t> global_to_local; // Maps global column idx -> local column_states idx
 
-	// Position tracking (atomic for lock-free reads in chunk loading)
-	std::atomic<idx_t> position;      // This index and forward has not been started yet
+	// Position tracking
+	// position is the next globally unclaimed logical partition start.
+	std::atomic<idx_t> position;
 	std::atomic<idx_t> position_done; // All rows in [0, position_done) have been returned or filtered out
 
 	// Row range filtering (for predicate pushdown on RSE or index columns)
 	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
 	idx_t scan_batch_size = STANDARD_VECTOR_SIZE;
+	idx_t logical_partition_size = H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
 	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
 
 	// Mutex for thread-safe range selection (enables parallel scanning)
@@ -229,7 +233,8 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 };
 
 struct H5ReadLocalState : public LocalTableFunctionState {
-	idx_t last_range_start = 0;
+	idx_t position = 0;
+	idx_t position_end = 0;
 };
 
 // =============================================================================
@@ -1474,14 +1479,22 @@ struct RangeSelection {
 	idx_t to_read;  // Number of rows to read
 };
 
-static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position, idx_t batch_size) {
+static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position, idx_t position_end,
+                                    idx_t batch_size) {
 	auto it = FindRangeForPosition(valid_row_ranges, position);
 	if (it != valid_row_ranges.end()) {
 		idx_t start = position < it->start_row ? it->start_row : position;
-		idx_t remains = MinValue<idx_t>(batch_size, it->end_row - start);
+		if (start >= position_end) {
+			return {false, 0, 0};
+		}
+		idx_t remains = MinValue<idx_t>(batch_size, MinValue<idx_t>(it->end_row, position_end) - start);
 		return {true, start, remains};
 	}
 	return {false, 0, 0}; // no range after position
+}
+
+static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position, idx_t batch_size) {
+	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), batch_size);
 }
 
 static idx_t GetChunkStart(const Chunk &chunk) {
@@ -1510,14 +1523,41 @@ static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
 	return ChunkCache::MAX_CHUNKS;
 }
 
-// Helper function to determine the next data range to read
-static RangeSelection GetNextDataRange(H5ReadGlobalState &gstate) {
-	// Thread-safe range selection for parallel scanning
+static idx_t GetLogicalPartitionStart(idx_t position, idx_t logical_partition_size) {
+	return (position / logical_partition_size) * logical_partition_size;
+}
+
+static bool ClaimNextPartition(H5ReadGlobalState &gstate, H5ReadLocalState &lstate) {
 	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
-	auto range = NextRangeFrom(gstate.valid_row_ranges, gstate.position.load(), gstate.scan_batch_size);
-	if (range.has_data) {
-		// Advance position for next thread (critical for parallel scanning!)
-		gstate.position.store(range.position + range.to_read);
+	auto position = gstate.position.load();
+	auto next_range = NextRangeFrom(gstate.valid_row_ranges, position, 1);
+	if (!next_range.has_data) {
+		return false;
+	}
+
+	auto partition_start = GetLogicalPartitionStart(next_range.position, gstate.logical_partition_size);
+	D_ASSERT(partition_start >= position);
+	lstate.position = next_range.position;
+	lstate.position_end = partition_start + gstate.logical_partition_size;
+	gstate.position.store(lstate.position_end);
+	return true;
+}
+
+// Helper function to determine the next data range to read
+static RangeSelection GetNextDataRange(H5ReadGlobalState &gstate, H5ReadLocalState &lstate, idx_t num_rows) {
+	if (lstate.position == lstate.position_end) {
+		if (!ClaimNextPartition(gstate, lstate)) {
+			return {false, 0, 0};
+		}
+	}
+
+	auto partition_end = MinValue<idx_t>(lstate.position_end, num_rows);
+	auto range = NextRangeFrom(gstate.valid_row_ranges, lstate.position, partition_end, gstate.scan_batch_size);
+	D_ASSERT(range.has_data);
+
+	lstate.position = range.position + range.to_read;
+	if (!NextRangeFrom(gstate.valid_row_ranges, lstate.position, partition_end, 1).has_data) {
+		lstate.position = lstate.position_end;
 	}
 	return range;
 }
@@ -1877,7 +1917,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &lstate = data.local_state->Cast<H5ReadLocalState>();
 
 	// Step 2: Determine next data range to read
-	auto range_selection = GetNextDataRange(gstate);
+	auto range_selection = GetNextDataRange(gstate, lstate, bind_data.num_rows);
 	if (!range_selection.has_data) {
 		output.SetCardinality(0);
 		return;
@@ -1885,7 +1925,6 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	idx_t position = range_selection.position;
 	idx_t to_read = range_selection.to_read;
-	lstate.last_range_start = position;
 
 	// Process only scanned columns (projection pushdown)
 	// Uses LOCAL indexing - both output.data and column_states are indexed [0, 1, 2...]
@@ -2080,8 +2119,12 @@ static OperatorPartitionData H5ReadGetPartitionData(ClientContext &context, Tabl
 	if (input.partition_info.RequiresPartitionColumns()) {
 		throw InternalException("h5_read::GetPartitionData: partition columns not supported");
 	}
+	auto &gstate = input.global_state->Cast<H5ReadGlobalState>();
 	auto &lstate = input.local_state->Cast<H5ReadLocalState>();
-	return OperatorPartitionData(lstate.last_range_start);
+	D_ASSERT(gstate.logical_partition_size > 0);
+	D_ASSERT(lstate.position_end >= gstate.logical_partition_size);
+	D_ASSERT(lstate.position_end % gstate.logical_partition_size == 0);
+	return OperatorPartitionData(lstate.position_end / gstate.logical_partition_size - 1);
 }
 
 void RegisterH5ReadFunction(ExtensionLoader &loader) {
@@ -2106,9 +2149,6 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// Set cardinality function for query optimizer
 	h5_read.cardinality = H5ReadCardinality;
 	h5_read.init_local = H5ReadInitLocal;
-	// We use the chunk's starting row as its batch index. DuckDB requires batch indexes to stay below
-	// PipelineBuildState::BATCH_INCREMENT (currently 1e13) within a pipeline, so this limits h5_read scans
-	// participating in batch-indexed sink paths to fewer than 1e13 rows.
 	h5_read.get_partition_data = H5ReadGetPartitionData;
 
 	loader.RegisterFunction(h5_read);

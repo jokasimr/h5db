@@ -44,7 +44,9 @@ To ensure test data exists (generate only if missing):
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
 | `nd_cache_test.h5` | `create_nd_cache_test.py` | 310 MB | N-D cache coverage with varied chunking |
 | `cache_boundaries.h5` | `create_cache_boundaries_test.py` | 8 KB | Regular cache row-count boundary coverage |
+| `partition_ownership.h5` | `create_partition_ownership_test.py` | 400 KB | Logical partition ownership boundary coverage |
 | `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
+| `sparse_partition_pushdown.h5` | `create_sparse_partition_pushdown_test.py` | 1.5 MB | Sparse pushdown across logical partitions and empty partitions |
 | `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
 
@@ -84,7 +86,9 @@ test/data/
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
 ├── create_nd_cache_test.py            # Creates: nd_cache_test.h5
 ├── create_cache_boundaries_test.py    # Creates: cache_boundaries.h5
+├── create_partition_ownership_test.py # Creates: partition_ownership.h5
 ├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
+├── create_sparse_partition_pushdown_test.py # Creates: sparse_partition_pushdown.h5
 ├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │
@@ -93,7 +97,9 @@ test/data/
 ├── multidim.h5
 ├── nd_cache_test.h5
 ├── cache_boundaries.h5
+├── partition_ownership.h5
 ├── sparse_pushdown_cache.h5
+├── sparse_partition_pushdown.h5
 ├── wide_few_rows.h5
 ├── large_rse_test.h5
 ├── ... (other .h5 files)
