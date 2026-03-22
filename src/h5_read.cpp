@@ -1516,22 +1516,8 @@ static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_range
 	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), batch_size);
 }
 
-static idx_t GetChunkStart(const Chunk &chunk) {
-	auto chunk_end = chunk.end_row.load(std::memory_order_acquire);
-	if (chunk_end == 0) {
-		return 0;
-	}
-	return (chunk_end > chunk.chunk_size) ? (chunk_end - chunk.chunk_size) : 0;
-}
-
-static idx_t GetChunkLoadedEnd(const Chunk &chunk, const std::vector<RowRange> &valid_row_ranges) {
-	auto chunk_end = chunk.end_row.load(std::memory_order_acquire);
-	if (chunk_end == 0) {
-		return 0;
-	}
-	auto chunk_start = GetChunkStart(chunk);
-	auto loaded_range = NextRangeFrom(valid_row_ranges, chunk_start, chunk.chunk_size);
-	return loaded_range.has_data ? (chunk_start + loaded_range.to_read) : chunk_start;
+static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position) {
+	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), NumericLimits<idx_t>::Maximum());
 }
 
 static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
@@ -1683,9 +1669,9 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 // ==================== Chunk Caching Helpers ====================
 
 // Helper: Read data from HDF5 into typed cache buffer
-static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_rows, hid_t dataset_id,
-                               hid_t file_space_id, idx_t dataset_row_start, idx_t rows_to_read,
-                               const RegularColumnSpec &spec, const string &filename) {
+static void ReadIntoTypedCache(Chunk::CacheStorage &cache, hid_t dataset_id, hid_t file_space_id,
+                               idx_t dataset_row_start, idx_t rows_to_read, const RegularColumnSpec &spec,
+                               const string &filename) {
 	auto base_type = GetBaseType(spec.column_type);
 	DispatchOnNumericType(base_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
@@ -1696,11 +1682,9 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, idx_t buffer_offset_r
 
 		H5DataspaceHandle mem_space = CreateMemspaceAndSelect(file_space_id, spec, dataset_row_start, rows_to_read);
 
-		// Read into cache buffer at specified offset
-		idx_t buffer_offset = buffer_offset_rows * spec.elements_per_row;
 		H5ErrorSuppressor suppress;
-		herr_t status = H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space_id, H5P_DEFAULT,
-		                        typed_cache.data() + buffer_offset);
+		herr_t status =
+		    H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space_id, H5P_DEFAULT, typed_cache.data());
 		if (status < 0) {
 			throw IOException(FormatRemoteDatasetReadError(filename, spec.path));
 		}
@@ -1733,23 +1717,24 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 	idx_t max_end_row = 0;
 	for (idx_t i = 0; i < chunk_count; i++) {
 		auto &chunk = cache.chunks[i];
-		auto end_row = GetChunkLoadedEnd(chunk, valid_row_ranges);
+		auto end_row = chunk.end_row.load(std::memory_order_acquire);
 		max_end_row = end_row > max_end_row ? end_row : max_end_row;
 	}
+	auto position_done_value = position_done.load(std::memory_order_acquire);
 	for (idx_t i = 0; i < chunk_count; i++) {
 		auto &chunk = cache.chunks[i];
-		if (GetChunkLoadedEnd(chunk, valid_row_ranges) <= position_done.load(std::memory_order_acquire)) {
+		if (chunk.end_row.load(std::memory_order_acquire) <= position_done_value) {
 			// Chunk is finished
-			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row, chunk.chunk_size);
+			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
 			if (next_range.has_data) {
-				idx_t rows_to_load = std::min(next_range.to_read, total_rows - next_range.position);
-				ReadIntoTypedCache(chunk.cache, 0, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
+				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
+				ReadIntoTypedCache(chunk.cache, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
 				                   filename);
 
 				idx_t new_end = next_range.position + chunk.chunk_size;
 				chunk.end_row.store(new_end, std::memory_order_release);
 
-				max_end_row = next_range.position + rows_to_load;
+				max_end_row = new_end;
 			}
 		}
 	}
@@ -1783,22 +1768,19 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 				GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
 				const auto &col_spec = bind_data.columns[global_idx];
 				auto &col_state = gstate.column_states[local_idx];
+				if (!std::holds_alternative<RegularColumnSpec>(col_spec) ||
+				    !std::holds_alternative<RegularColumnState>(col_state)) {
+					continue;
+				}
 
-				std::visit(
-				    [&](auto &&spec, auto &&state) {
-					    using SpecT = std::decay_t<decltype(spec)>;
-					    using StateT = std::decay_t<decltype(state)>;
+				const auto &spec = std::get<RegularColumnSpec>(col_spec);
+				auto &state = std::get<RegularColumnState>(col_state);
+				if (!state.chunk_cache) {
+					continue;
+				}
 
-					    if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
-					                  std::is_same_v<StateT, RegularColumnState>) {
-						    if (state.chunk_cache) {
-							    TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(),
-							                  gstate.valid_row_ranges, gstate.position_done, bind_data.num_rows, spec,
-							                  bind_data.filename);
-						    }
-					    }
-				    },
-				    col_spec, col_state);
+				TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(), gstate.valid_row_ranges,
+				              gstate.position_done, bind_data.num_rows, spec, bind_data.filename);
 			}
 		} catch (...) {
 			gstate.someone_is_fetching.store(false);
@@ -1823,17 +1805,22 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		LogicalType base_type;
 		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
 
+		auto *chunk1 = &cache.chunks[0];
+		Chunk *chunk2 = chunk_count > 1 ? &cache.chunks[1] : nullptr;
 		for (;;) {
 			ThrowIfInterrupted(context);
 
 			TryRefreshCache(gstate, bind_data);
 
-			idx_t max_end = 0;
-			for (idx_t i = 0; i < chunk_count; i++) {
-				auto end = GetChunkLoadedEnd(cache.chunks[i], gstate.valid_row_ranges);
-				max_end = MaxValue<idx_t>(max_end, end);
+			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
+			idx_t end2 = chunk2 ? chunk2->end_row.load(std::memory_order_acquire) : end1;
+
+			if (chunk2 && end1 > end2) {
+				std::swap(chunk1, chunk2);
+				std::swap(end1, end2);
 			}
-			if (position + to_read <= max_end) {
+
+			if (position + to_read <= end2) {
 				break;
 			}
 
@@ -1843,10 +1830,12 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		}
 
 		// Copy data from chunks that overlap our read range [position, position + to_read)
-		for (idx_t i = 0; i < chunk_count; i++) {
-			auto *chunk = &cache.chunks[i];
-			idx_t chunk_start = GetChunkStart(*chunk);
-			idx_t chunk_end = GetChunkLoadedEnd(*chunk, gstate.valid_row_ranges);
+		for (auto *chunk : {chunk1, chunk2}) {
+			if (!chunk) {
+				continue;
+			}
+			idx_t chunk_end = chunk->end_row.load(std::memory_order_acquire);
+			idx_t chunk_start = (chunk_end > chunk->chunk_size) ? (chunk_end - chunk->chunk_size) : 0;
 
 			// Check if chunk overlaps our range
 			if (chunk_start < position + to_read && chunk_end > position) {
@@ -1856,6 +1845,7 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 
 				idx_t chunk_offset = overlap_start - chunk_start;
 				idx_t result_offset = overlap_start - position;
+				D_ASSERT(chunk_offset + overlap_size <= chunk->chunk_size);
 
 				CopyFromTypedCache(chunk->cache, chunk_offset, overlap_size, target_vector, result_offset, base_type,
 				                   spec.elements_per_row);
@@ -2075,7 +2065,6 @@ static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &res
 	auto &tag_child = GetStructChild(children[0]);
 	auto &name_child = GetStructChild(children[1]);
 	auto &definition_child = GetStructChild(children[2]);
-	name_child.Reference(name_vec);
 	definition_child.Reference(definition_vec);
 
 	UnifiedVectorFormat name_data;
