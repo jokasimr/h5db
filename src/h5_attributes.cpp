@@ -5,9 +5,13 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/complex_json.hpp"
+#if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#else
+#include "duckdb/common/types/vector.hpp"
+#endif
 #include <vector>
 #include <string>
 

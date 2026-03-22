@@ -3,9 +3,13 @@
 #include "h5_raii.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/exception.hpp"
+#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#else
+#include "duckdb/common/types/vector.hpp"
+#endif
 #include <vector>
 #include <string>
 

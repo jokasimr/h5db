@@ -5,11 +5,15 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/common/exception.hpp"
+#if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
+#else
+#include "duckdb/common/types/vector.hpp"
+#endif
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -32,6 +36,16 @@
 #include <map>
 
 namespace duckdb {
+
+template <class T>
+static T &GetStructChild(T &child) {
+	return child;
+}
+
+template <class T>
+static T &GetStructChild(unique_ptr<T> &child) {
+	return *child;
+}
 
 static constexpr idx_t H5_READ_LOGICAL_PARTITION_MULTIPLIER = 10;
 
@@ -2021,9 +2035,9 @@ static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &resul
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
-	auto &encoding_child = children[0];
-	auto &run_starts_child = children[1];
-	auto &values_child = children[2];
+	auto &encoding_child = GetStructChild(children[0]);
+	auto &run_starts_child = GetStructChild(children[1]);
+	auto &values_child = GetStructChild(children[2]);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto run_starts_idx = run_starts_data.sel->get_index(i);
@@ -2058,9 +2072,9 @@ static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &res
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
-	auto &tag_child = children[0];
-	auto &name_child = children[1];
-	auto &definition_child = children[2];
+	auto &tag_child = GetStructChild(children[0]);
+	auto &name_child = GetStructChild(children[1]);
+	auto &definition_child = GetStructChild(children[2]);
 	name_child.Reference(name_vec);
 	definition_child.Reference(definition_vec);
 
@@ -2105,7 +2119,7 @@ void RegisterH5AliasFunction(ExtensionLoader &loader) {
 static void H5IndexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 1);
-	auto &tag_child = children[0];
+	auto &tag_child = GetStructChild(children[0]);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__index__");
