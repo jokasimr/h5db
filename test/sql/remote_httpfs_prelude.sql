@@ -1,5 +1,5 @@
 statement ok
-INSTALL httpfs FROM '__LOCAL_EXTENSION_REPO__';
+INSTALL httpfs;
 
 statement ok
 LOAD httpfs;

@@ -45,7 +45,6 @@ bash "$PROJECT_ROOT/test/data/ensure_test_data.sh"
 TMP_ROOT="$(mktemp -d "$PROJECT_ROOT/test/.remote_sql.XXXXXX")"
 TMP_SQL="$TMP_ROOT/sql"
 SERVER_PID=""
-GENERATED_PREPEND="$TMP_ROOT/remote_httpfs_prelude.sql"
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" >/dev/null 2>&1 || true
@@ -102,19 +101,7 @@ REWRITE_ARGS=(
   --base-url "$BASE_URL"
 )
 if [[ -n "$PREPEND_FILE" ]]; then
-  python3 - "$PREPEND_FILE" "$GENERATED_PREPEND" "$PROJECT_ROOT/build/release/repository" <<'PY'
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-repo_path = sys.argv[3].replace("'", "''")
-
-text = src.read_text(encoding="utf-8")
-text = text.replace("__LOCAL_EXTENSION_REPO__", repo_path)
-dst.write_text(text, encoding="utf-8")
-PY
-  REWRITE_ARGS+=(--prepend-file "$GENERATED_PREPEND")
+  REWRITE_ARGS+=(--prepend-file "$PREPEND_FILE")
 fi
 
 python3 "$PROJECT_ROOT/test/scripts/rewrite_remote_sqllogictests.py" "${REWRITE_ARGS[@]}"
