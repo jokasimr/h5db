@@ -5,6 +5,11 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/vector/array_vector.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -2016,15 +2021,18 @@ static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &resul
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
+	auto &encoding_child = children[0];
+	auto &run_starts_child = children[1];
+	auto &values_child = children[2];
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto run_starts_idx = run_starts_data.sel->get_index(i);
 		auto values_idx = values_data.sel->get_index(i);
 
-		FlatVector::GetData<string_t>(*children[0])[i] = StringVector::AddString(*children[0], "rse");
-		FlatVector::GetData<string_t>(*children[1])[i] =
-		    StringVector::AddString(*children[1], run_starts_ptr[run_starts_idx]);
-		FlatVector::GetData<string_t>(*children[2])[i] = StringVector::AddString(*children[2], values_ptr[values_idx]);
+		FlatVector::GetData<string_t>(encoding_child)[i] = StringVector::AddString(encoding_child, "rse");
+		FlatVector::GetData<string_t>(run_starts_child)[i] =
+		    StringVector::AddString(run_starts_child, run_starts_ptr[run_starts_idx]);
+		FlatVector::GetData<string_t>(values_child)[i] = StringVector::AddString(values_child, values_ptr[values_idx]);
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
@@ -2050,8 +2058,11 @@ static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &res
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
-	children[1]->Reference(name_vec);
-	children[2]->Reference(definition_vec);
+	auto &tag_child = children[0];
+	auto &name_child = children[1];
+	auto &definition_child = children[2];
+	name_child.Reference(name_vec);
+	definition_child.Reference(definition_vec);
 
 	UnifiedVectorFormat name_data;
 	name_vec.ToUnifiedFormat(args.size(), name_data);
@@ -2059,8 +2070,8 @@ static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &res
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto name_idx = name_data.sel->get_index(i);
-		FlatVector::GetData<string_t>(*children[0])[i] = StringVector::AddString(*children[0], "__alias__");
-		FlatVector::GetData<string_t>(*children[1])[i] = StringVector::AddString(*children[1], name_ptr[name_idx]);
+		FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__alias__");
+		FlatVector::GetData<string_t>(name_child)[i] = StringVector::AddString(name_child, name_ptr[name_idx]);
 	}
 
 	bool all_const = definition_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
@@ -2094,9 +2105,10 @@ void RegisterH5AliasFunction(ExtensionLoader &loader) {
 static void H5IndexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 1);
+	auto &tag_child = children[0];
 
 	for (idx_t i = 0; i < args.size(); i++) {
-		FlatVector::GetData<string_t>(*children[0])[i] = StringVector::AddString(*children[0], "__index__");
+		FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__index__");
 	}
 
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);

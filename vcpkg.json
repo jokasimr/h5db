@@ -1,6 +1,8 @@
 {
         "dependencies": [
-                "hdf5"
+                "hdf5",
+                "openssl",
+                "curl"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [
