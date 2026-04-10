@@ -4,11 +4,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/complex_json.hpp"
 #if __has_include("duckdb/common/vector/array_vector.hpp")
-#include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
 #else
 #include "duckdb/common/types/vector.hpp"
 #endif
@@ -99,48 +96,11 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 	}
 	H5DataspaceHandle space = H5DataspaceHandle::TakeOwnershipOf(space_id);
 
-	H5S_class_t space_class = H5Sget_simple_extent_type(space);
-
-	int ndims = H5Sget_simple_extent_ndims(space);
-	hsize_t dims[H5S_MAX_RANK];
-	if (ndims > 0) {
-		H5Sget_simple_extent_dims(space, dims, nullptr);
-	}
-
-	// Support scalar and simple 1D array attributes.
-	if (space_class != H5S_SCALAR && space_class != H5S_SIMPLE) {
-		return fail("Attribute '" + std::string(attr_name) + "' has unsupported dataspace class");
-	}
-
-	if (space_class == H5S_SIMPLE && ndims > 1) {
-		return fail("Attribute '" + std::string(attr_name) +
-		            "' has unsupported multidimensional dataspace (only 1D arrays supported)");
-	}
-
 	LogicalType duckdb_type;
-	// If the dataspace is SIMPLE (1D), create an ARRAY type
-	if (space_class == H5S_SIMPLE && ndims == 1) {
-		try {
-			LogicalType element_type = H5TypeToDuckDBType(type);
-			duckdb_type = LogicalType::ARRAY(element_type, dims[0]);
-		} catch (const std::exception &e) {
-			return fail("Attribute '" + std::string(attr_name) +
-			            "' has unsupported type: " + NormalizeExceptionMessage(e.what()));
-		}
-	} else {
-		// For scalar dataspaces, use the normal converter (which handles H5T_ARRAY types)
-		try {
-			duckdb_type = H5AttributeTypeToDuckDBType(type);
-		} catch (const std::exception &e) {
-			return fail("Attribute '" + std::string(attr_name) +
-			            "' has unsupported type: " + NormalizeExceptionMessage(e.what()));
-		}
-	}
-
-	if (duckdb_type.id() == LogicalTypeId::ARRAY &&
-	    ArrayType::GetChildType(duckdb_type).id() == LogicalTypeId::VARCHAR) {
-		return fail("Attribute '" + std::string(attr_name) +
-		            "' has unsupported type: string array attributes are not supported");
+	try {
+		duckdb_type = H5ResolveAttributeLogicalType(type.get(), space.get(), attr_name);
+	} catch (const std::exception &ex) {
+		return fail(NormalizeExceptionMessage(ex.what()));
 	}
 
 	AttributeInfo info;
@@ -237,74 +197,11 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 			throw IOException(AppendRemoteError("Failed to open attribute: " + attr_info.name, bind_data.filename));
 		}
 
-		if (attr_info.type.id() == LogicalTypeId::ARRAY) {
-			auto array_child_type = ArrayType::GetChildType(attr_info.type);
-
-			auto &child_vector = ArrayVector::GetEntry(result_vector);
-
-			DispatchOnDuckDBType(array_child_type, [&](auto type_tag) {
-				using T = typename decltype(type_tag)::type;
-
-				auto child_data = FlatVector::GetData<T>(child_vector);
-
-				H5ErrorSuppressor suppress;
-				if (H5Aread(attr, attr_info.h5_type.get(), child_data) < 0) {
-					throw IOException(
-					    AppendRemoteError("Failed to read array attribute: " + attr_info.name, bind_data.filename));
-				}
-			});
-
-		} else if (attr_info.type.id() == LogicalTypeId::VARCHAR) {
-			htri_t is_variable = H5Tis_variable_str(attr_info.h5_type.get());
-
-			if (is_variable > 0) {
-				char *str_ptr = nullptr;
-				H5ErrorSuppressor suppress;
-				if (H5Aread(attr, attr_info.h5_type.get(), &str_ptr) < 0) {
-					throw IOException(AppendRemoteError(
-					    "Failed to read variable-length string attribute: " + attr_info.name, bind_data.filename));
-				}
-
-				if (str_ptr) {
-					FlatVector::GetData<string_t>(result_vector)[0] = StringVector::AddString(result_vector, str_ptr);
-					if (H5free_memory(str_ptr) < 0) {
-						throw IOException(
-						    AppendRemoteError("Failed to reclaim variable-length string attribute: " + attr_info.name,
-						                      bind_data.filename));
-					}
-				} else {
-					FlatVector::SetNull(result_vector, 0, true);
-				}
-
-			} else {
-				size_t str_len = H5Tget_size(attr_info.h5_type.get());
-				std::vector<char> buffer(str_len);
-
-				H5ErrorSuppressor suppress;
-				if (H5Aread(attr, attr_info.h5_type.get(), buffer.data()) < 0) {
-					throw IOException(AppendRemoteError(
-					    "Failed to read fixed-length string attribute: " + attr_info.name, bind_data.filename));
-				}
-
-				size_t actual_len = strnlen(buffer.data(), str_len);
-				FlatVector::GetData<string_t>(result_vector)[0] =
-				    StringVector::AddString(result_vector, buffer.data(), actual_len);
-			}
-
-		} else {
-			DispatchOnDuckDBType(attr_info.type, [&](auto type_tag) {
-				using T = typename decltype(type_tag)::type;
-
-				T value;
-				H5ErrorSuppressor suppress;
-				if (H5Aread(attr, attr_info.h5_type.get(), &value) < 0) {
-					throw IOException(
-					    AppendRemoteError("Failed to read attribute: " + attr_info.name, bind_data.filename));
-				}
-
-				auto data = FlatVector::GetData<T>(result_vector);
-				data[0] = value;
-			});
+		try {
+			auto value = H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.type, attr_info.name);
+			result_vector.SetValue(0, value);
+		} catch (const std::exception &ex) {
+			throw IOException(AppendRemoteError(ex.what(), bind_data.filename));
 		}
 	}
 

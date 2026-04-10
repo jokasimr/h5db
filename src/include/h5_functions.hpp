@@ -18,6 +18,13 @@ LogicalType H5TypeToDuckDBType(hid_t type_id);
 // Helper function to map HDF5 attribute type (including arrays) to DuckDB LogicalType
 LogicalType H5AttributeTypeToDuckDBType(hid_t type_id);
 
+// Resolve the DuckDB LogicalType for an HDF5 attribute from its type and dataspace.
+LogicalType H5ResolveAttributeLogicalType(hid_t type_id, hid_t space_id, const std::string &attribute_name);
+
+// Read an HDF5 attribute into a DuckDB Value using a previously resolved DuckDB type.
+Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &duckdb_type,
+                           const std::string &attribute_name);
+
 // Table function for listing HDF5 file contents
 void RegisterH5TreeFunction(ExtensionLoader &loader);
 
@@ -29,6 +36,9 @@ void RegisterH5RseFunction(ExtensionLoader &loader);
 
 // Scalar function for aliasing column specs with custom names
 void RegisterH5AliasFunction(ExtensionLoader &loader);
+
+// Scalar function for projecting HDF5 attributes in h5_tree
+void RegisterH5AttrFunction(ExtensionLoader &loader);
 
 // Scalar function for adding a virtual index column
 void RegisterH5IndexFunction(ExtensionLoader &loader);

@@ -8,13 +8,17 @@ This document describes all functions provided by the h5db extension.
 opened through the DuckDB-backed remote VFD as immutable snapshots served by `httpfs`, so `H5F_ACC_SWMR_READ` is not
 used there.
 
-### `h5_tree(filename)`
+### `h5_tree(filename, projected_attributes...)`
 
-Lists all groups and datasets in an HDF5 file.
+Lists all groups and datasets in an HDF5 file. Selected HDF5 attributes can be
+projected as additional columns with `h5_attr(...)`.
 
 **Parameters:**
 - `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
   (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr(name, default_value)`
+  - `h5_alias(alias_name, h5_attr(name, default_value))`
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
@@ -25,11 +29,47 @@ Lists all groups and datasets in an HDF5 file.
   - `NULL` for groups
   - `[]` for scalar datasets
   - `[d0, d1, ...]` for array datasets
+- one additional column per projected attribute
+  - column name = resolved attribute name, unless overridden by `h5_alias(...)`
+  - column type = type of `default_value`
+
+**Projected Attribute Semantics:**
+- `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
+- constant expressions such as `lower('STRING_ATTR')` are allowed
+- row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree`
+- `default_value` must be a bind-time constant expression with a concrete type
+- typed `NULL` defaults are allowed, e.g. `NULL::VARCHAR`
+- if an object has the projected attribute, `h5_tree` reads it using the same conversion rules as `h5_attributes()`
+  and casts it to the declared output type
+- if an object does not have the projected attribute, `h5_tree` emits `default_value`
+- projected output names must be unique; duplicate projected names or collisions with `path`, `type`, `dtype`, or
+  `shape` fail at bind time with DuckDB's duplicate-column error
+
+**Projected Attribute Limitations:**
+- scalar numeric attributes and scalar string attributes are supported
+- simple 1D numeric arrays are supported
+- multidimensional attribute dataspaces are not supported
+- string array attributes are not supported
+- other unsupported HDF5 attribute forms follow the same behavior as `h5_attributes()`
 
 **Example:**
 ```sql
 SELECT * FROM h5_tree('data.h5');
 SELECT * FROM h5_tree('data.h5', swmr := true);
+
+-- Project an attribute as an extra column
+SELECT path, type, NX_class
+FROM h5_tree(
+    'data.h5',
+    h5_attr('NX_class', NULL::VARCHAR)
+);
+
+-- Rename a projected attribute column
+SELECT path, type, time
+FROM h5_tree(
+    'data.h5',
+    h5_alias('time', h5_attr('count_time', 0::DOUBLE))
+);
 ```
 
 ---
@@ -185,15 +225,44 @@ reduce I/O when the bounds are static constants.
 
 ---
 
+### `h5_attr(name, default_value)`
+
+Creates a projected-attribute definition for use with `h5_tree()`.
+
+**Parameters:**
+- `name` (VARCHAR): Attribute name to read. Any non-`NULL` bind-time-resolved `VARCHAR` expression is allowed.
+- `default_value` (ANY): Bind-time constant default value. Its type becomes the output type of the projected column.
+
+**Returns:** STRUCT wrapper used by `h5_tree()`
+
+**Notes:**
+- typed `NULL` defaults such as `NULL::VARCHAR` are allowed
+- untyped `NULL` defaults are rejected
+- missing attributes use `default_value`
+- present attributes are converted like `h5_attributes()` and then cast to the type of `default_value`
+
+**Example:**
+```sql
+SELECT path, type, NX_class
+FROM h5_tree(
+    'data.h5',
+    h5_attr('NX_class', NULL::VARCHAR)
+);
+```
+
+---
+
 ### `h5_alias(name, definition)`
 
-Renames a column definition when used with `h5_read()`.
+Renames a column definition when used with `h5_read()` or a projected attribute
+definition when used with `h5_tree()`.
 
 **Parameters:**
 - `name` (VARCHAR): Column name to use in the output
-- `definition` (VARCHAR or STRUCT): A dataset path or a column definition like `h5_rse()` or `h5_index()`
+- `definition` (VARCHAR or STRUCT): A dataset path, a column definition like `h5_rse()` or `h5_index()`, or a
+  projected attribute definition from `h5_attr()`
 
-**Returns:** STRUCT wrapper used by `h5_read()`
+**Returns:** STRUCT wrapper used by `h5_read()` and `h5_tree()`
 
 **Example:**
 ```sql
@@ -201,6 +270,12 @@ SELECT * FROM h5_read(
     'data.h5',
     h5_alias('idx', h5_index()),
     h5_alias('temp_c', '/temperature')
+);
+
+SELECT path, time
+FROM h5_tree(
+    'data.h5',
+    h5_alias('time', h5_attr('count_time', 0::DOUBLE))
 );
 ```
 

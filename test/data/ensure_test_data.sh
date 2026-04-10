@@ -31,6 +31,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/sparse_partition_pushdown.h5"
   "$PROJECT_ROOT/test/data/wide_few_rows.h5"
   "$PROJECT_ROOT/test/data/links.h5"
+  "$PROJECT_ROOT/test/data/links_external_target.h5"
   "$PROJECT_ROOT/test/data/swmr_enabled.h5"
   "$PROJECT_ROOT/test/data/swmr_disabled.h5"
   "$PROJECT_ROOT/test/data/large_rse_test.h5"

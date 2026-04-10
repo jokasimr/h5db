@@ -12,14 +12,16 @@ file structure, read datasets as columns, read attributes, and work with remote 
 - Supports projection pushdown.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
 - Supports reading HDF5 attributes on groups and datasets.
+- Supports projecting selected HDF5 attributes as extra columns in `h5_tree(...)`.
 
 ## Core Functions
 
 - `h5_read(filename, datasets_or_definitions...)`
   Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
   "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`).
-- `h5_tree(filename)`
-  Lists groups and datasets with `path`, `type`, `dtype`, and `shape`.
+- `h5_tree(filename, projected_attributes...)`
+  Lists groups and datasets with `path`, `type`, `dtype`, and `shape`, and can append selected attributes as extra
+  columns with `h5_attr(...)`.
 - `h5_attributes(filename, object_path)`
   Reads attributes from a dataset or group as a single wide row.
 
@@ -39,6 +41,13 @@ Then run queries such as:
 ```sql
 -- Inspect the file structure
 SELECT * FROM h5_tree('data.h5');
+
+-- Inspect the file structure and project selected attributes
+SELECT path, type, NX_class
+FROM h5_tree(
+    'data.h5',
+    h5_attr('NX_class', NULL::VARCHAR)
+);
 
 -- Read one dataset
 SELECT * FROM h5_read('data.h5', '/measurements');
@@ -65,6 +74,13 @@ SELECT * FROM h5_read(
 
 -- Read attributes
 SELECT * FROM h5_attributes('data.h5', '/measurements');
+
+-- Rename a projected h5_tree attribute column
+SELECT path, time
+FROM h5_tree(
+    'data.h5',
+    h5_alias('time', h5_attr('count_time', 0::DOUBLE))
+);
 
 -- Read a remote file
 SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
@@ -115,6 +131,9 @@ If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a re
 - If multiple non-scalar regular datasets are read together, `h5_read()` uses the minimum outer dimension as the output
   row count.
 - If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
+- In `h5_tree(...)`, projected attributes use the declared default when an object does not have the attribute.
+- In `h5_tree(...)`, projected output names must be unique; duplicate projected names or collisions with `path`,
+  `type`, `dtype`, or `shape` fail at bind time.
 
 ## Current Limitations
 
@@ -123,6 +142,7 @@ If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a re
 - Multi-dimensional string datasets are not supported.
 - Attribute string arrays are not supported.
 - Attribute multidimensional dataspaces are not supported.
+- Projected `h5_tree(...)` attributes follow the same attribute type/limitation rules as `h5_attributes()`.
 
 See [API.md](API.md) for full type-mapping details and error behavior.
 
@@ -153,3 +173,5 @@ For targeted test runs, test-data generation, and debugging workflows, see [docs
 - [API.md](API.md): function reference, settings, type mapping, and limitations
 - [RSE_USAGE.md](RSE_USAGE.md): detailed guide to run-start encoding support
 - [docs/DEVELOPER.md](docs/DEVELOPER.md): building, testing, debugging, and project layout
+- [docs/H5_TREE_ATTRIBUTES_SPEC.md](docs/H5_TREE_ATTRIBUTES_SPEC.md): design/spec for projected attributes in `h5_tree`
+- [docs/H5_TREE_TRAVERSAL_AND_PUSHDOWN_SPEC.md](docs/H5_TREE_TRAVERSAL_AND_PUSHDOWN_SPEC.md): proposed refactor for link-oriented `h5_tree` semantics and selective-query pushdown

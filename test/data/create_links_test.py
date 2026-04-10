@@ -5,6 +5,12 @@ import numpy as np
 
 def main():
     base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, "links_external_target.h5")
+    with h5py.File(target_path, "w") as target:
+        ext_grp = target.create_group("external_group")
+        ext_dset = ext_grp.create_dataset("external_data", data=np.arange(3, dtype=np.int16))
+        ext_dset.attrs["attr"] = np.int32(11)
+
     path = os.path.join(base_dir, "links.h5")
     with h5py.File(path, "w") as f:
         grp = f.create_group("group")
@@ -21,7 +27,13 @@ def main():
         # Soft link to a group (for h5_tree coverage)
         f["soft_group"] = h5py.SoftLink("/group")
 
-    print("Created links.h5 successfully!")
+        # Dangling soft link for reader behavior checks
+        f["dangling_link"] = h5py.SoftLink("/missing_dataset")
+
+        # External link for reader behavior checks
+        f["external_link"] = h5py.ExternalLink("links_external_target.h5", "/external_group/external_data")
+
+    print("Created links_external_target.h5 and links.h5 successfully!")
 
 
 if __name__ == "__main__":

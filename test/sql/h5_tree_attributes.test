@@ -1,0 +1,176 @@
+# name: test/sql/h5_tree_attributes.test
+# description: h5_tree projected attribute columns
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# Happy-path projected attributes
+# =============================================================================
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE string_attr = 'Hello HDF5!'),
+    COUNT(*) FILTER (WHERE string_attr IS NULL)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR)
+);
+----
+1	2
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE group_int_attr = 999),
+    COUNT(*) FILTER (WHERE group_int_attr = -1)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('group_int_attr', -1::BIGINT)
+);
+----
+1	2
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE int_array_attr = [1, 2, 3, 4, 5]),
+    COUNT(*) FILTER (WHERE int_array_attr = [0, 0, 0, 0, 0])
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('int_array_attr', [0, 0, 0, 0, 0]::INTEGER[5])
+);
+----
+1	2
+
+query I
+SELECT time
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('time', h5_attr('group_int_attr', NULL::BIGINT))
+)
+WHERE path = '/group_with_attrs';
+----
+999
+
+query I
+SELECT string_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr(lower('STRING_ATTR'), NULL::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!
+
+query I
+SELECT COUNT(*) FILTER (WHERE missing_attr = 'missing')
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('missing_attr', 'missing'::VARCHAR)
+);
+----
+3
+
+query IIIIII
+SELECT
+    COUNT(*) FILTER (WHERE string_attr = 'Hello HDF5!'),
+    COUNT(*) FILTER (WHERE string_attr IS NULL),
+    COUNT(*) FILTER (WHERE group_int_attr = 999),
+    COUNT(*) FILTER (WHERE group_int_attr = -1),
+    COUNT(*) FILTER (WHERE missing_attr = 'fallback'),
+    COUNT(*) FILTER (WHERE missing_attr IS NULL)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+);
+----
+1	2	1	2	3	0
+
+# Duplicate projected names are rejected by DuckDB table binding.
+statement error
+SELECT * FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('dup', h5_attr('group_int_attr', NULL::BIGINT)),
+    h5_alias('dup', h5_attr('group_string_attr', NULL::VARCHAR))
+);
+----
+Binder Error: table "h5_tree" has duplicate column name "dup"
+
+statement error
+SELECT * FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('string_attr', h5_attr('group_int_attr', NULL::BIGINT)),
+    h5_attr('string_attr', NULL::VARCHAR)
+);
+----
+Binder Error: table "h5_tree" has duplicate column name "string_attr"
+
+# Collisions with existing h5_tree column names are also rejected by DuckDB table binding.
+statement error
+SELECT * FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('path', h5_attr('group_int_attr', NULL::BIGINT))
+);
+----
+Binder Error: table "h5_tree" has duplicate column name "path"
+
+# =============================================================================
+# Binder / argument validation
+# =============================================================================
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', 'string_attr');
+----
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', 42);
+----
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', random()));
+----
+Invalid Input Error: h5_attr default_value must be a constant expression
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', NULL));
+----
+Invalid Input Error: h5_attr default_value must have a concrete type; use an explicit cast such as NULL::VARCHAR
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr(NULL::VARCHAR, NULL::VARCHAR));
+----
+Invalid Input Error: h5_attr name must not be NULL
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_alias('renamed', 42));
+----
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr(42, NULL::VARCHAR));
+----
+Binder Error: No function matches the given name and argument types 'h5_attr(INTEGER_LITERAL, VARCHAR)'. You might need to add explicit type casts.
+
+statement error
+SELECT *
+FROM (SELECT 'string_attr' AS attr_name) t,
+     h5_tree('test/data/with_attrs.h5', h5_attr(attr_name, NULL::VARCHAR)) ht;
+----
+Binder Error: Table function "h5_tree" does not support lateral join column parameters - cannot use column "attr_name" in this context.
+
+# =============================================================================
+# Conversion / unsupported-type failures
+# =============================================================================
+
+statement error
+SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', 0::INTEGER));
+----
+IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER
+
+statement error
+SELECT * FROM h5_tree('test/data/attrs_edge_cases.h5', h5_attr('attr_2d', [0, 0, 0]::INTEGER[3]));
+----
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)

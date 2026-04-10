@@ -42,3 +42,24 @@ exercise the rewritten remote coverage.
 `test/sql/remote/*.test` contains remote HTTP-specific checks (auth, retries, redirects, timeout, truncation,
 corruption, caching, and simulated server/drop errors).
 These are included in `make test` through the remote runner and can also be executed via `make test_remote_http`.
+
+## TSAN Stress Harness
+
+For race hunting beyond the normal SQLLogicTest coverage, use the dedicated TSAN stress runner:
+
+```bash
+GEN=ninja THREADSAN=1 make reldebug
+./venv/bin/python test/scripts/tsan_stress.py --duckdb-binary ./build/reldebug/duckdb
+```
+
+The harness repeatedly exercises:
+- projection/filter mismatches
+- index and RSE pushdown intersections
+- chunk-cache boundary cases
+- sparse pushdown on cached columns
+- logical partition ownership / batch-index plans
+- large parallel `UNION ALL` scans
+- randomized query interrupts
+
+On this Linux host, TSAN binaries currently need ASLR disabled at launch time. The script applies `setarch x86_64 -R`
+by default for that reason. Use `--allow-aslr` only if your environment does not need that workaround.

@@ -3,12 +3,46 @@
 #include "h5_raii.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/config.hpp"
 #include <vector>
 #include <string>
 #include <mutex>
+#include <cstring>
 
 namespace duckdb {
+
+static std::string NormalizeAttributeTypeError(const std::exception &ex) {
+	auto message = std::string(ex.what());
+	if (message.empty() || message.front() != '{') {
+		return message;
+	}
+	try {
+		auto info = StringUtil::ParseJSONMap(message, true)->Flatten();
+		for (const auto &entry : info) {
+			if (entry.first == "exception_message") {
+				return entry.second;
+			}
+		}
+	} catch (...) {
+	}
+	return message;
+}
+
+template <typename T>
+static Value CreateDuckDBValue(T value) {
+	if constexpr (std::is_same_v<T, uint8_t>) {
+		return Value::UTINYINT(value);
+	} else if constexpr (std::is_same_v<T, uint16_t>) {
+		return Value::USMALLINT(value);
+	} else if constexpr (std::is_same_v<T, uint32_t>) {
+		return Value::UINTEGER(value);
+	} else if constexpr (std::is_same_v<T, uint64_t>) {
+		return Value::UBIGINT(value);
+	} else {
+		return Value(value);
+	}
+}
 
 // Global mutex for all HDF5 operations (definition)
 std::recursive_mutex hdf5_global_mutex;
@@ -254,6 +288,115 @@ LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
 	}
 
 	return H5TypeToDuckDBType(type_id);
+}
+
+LogicalType H5ResolveAttributeLogicalType(hid_t type_id, hid_t space_id, const std::string &attribute_name) {
+	auto space_class = H5Sget_simple_extent_type(space_id);
+	auto ndims = H5Sget_simple_extent_ndims(space_id);
+	hsize_t dims[H5S_MAX_RANK];
+	if (ndims > 0) {
+		H5Sget_simple_extent_dims(space_id, dims, nullptr);
+	}
+
+	if (space_class != H5S_SCALAR && space_class != H5S_SIMPLE) {
+		throw IOException("Attribute '" + attribute_name + "' has unsupported dataspace class");
+	}
+	if (space_class == H5S_SIMPLE && ndims > 1) {
+		throw IOException("Attribute '" + attribute_name +
+		                  "' has unsupported multidimensional dataspace (only 1D arrays supported)");
+	}
+
+	LogicalType duckdb_type;
+	if (space_class == H5S_SIMPLE && ndims == 1) {
+		try {
+			LogicalType element_type = H5TypeToDuckDBType(type_id);
+			duckdb_type = LogicalType::ARRAY(element_type, dims[0]);
+		} catch (const std::exception &ex) {
+			throw IOException("Attribute '" + attribute_name +
+			                  "' has unsupported type: " + NormalizeAttributeTypeError(ex));
+		}
+	} else {
+		try {
+			duckdb_type = H5AttributeTypeToDuckDBType(type_id);
+		} catch (const std::exception &ex) {
+			throw IOException("Attribute '" + attribute_name +
+			                  "' has unsupported type: " + NormalizeAttributeTypeError(ex));
+		}
+	}
+
+	if (duckdb_type.id() == LogicalTypeId::ARRAY &&
+	    ArrayType::GetChildType(duckdb_type).id() == LogicalTypeId::VARCHAR) {
+		throw IOException("Attribute '" + attribute_name +
+		                  "' has unsupported type: string array attributes are not supported");
+	}
+
+	return duckdb_type;
+}
+
+Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &duckdb_type,
+                           const std::string &attribute_name) {
+	if (duckdb_type.id() == LogicalTypeId::ARRAY) {
+		auto &child_type = ArrayType::GetChildType(duckdb_type);
+		auto array_size = ArrayType::GetSize(duckdb_type);
+		return DispatchOnDuckDBType(child_type, [&](auto type_tag) -> Value {
+			using T = typename decltype(type_tag)::type;
+			std::vector<Value> values;
+			values.reserve(array_size);
+
+			if constexpr (std::is_same_v<T, string>) {
+				throw IOException("Attribute '" + attribute_name +
+				                  "' has unsupported type: string array attributes are not supported");
+			} else {
+				std::vector<T> raw_values(array_size);
+				H5ErrorSuppressor suppress;
+				if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
+					throw IOException("Failed to read array attribute: " + attribute_name);
+				}
+				for (auto &value : raw_values) {
+					values.push_back(CreateDuckDBValue(value));
+				}
+			}
+			return Value::ARRAY(child_type, std::move(values));
+		});
+	}
+
+	if (duckdb_type.id() == LogicalTypeId::VARCHAR) {
+		htri_t is_variable = H5Tis_variable_str(h5_type_id);
+		if (is_variable > 0) {
+			char *str_ptr = nullptr;
+			H5ErrorSuppressor suppress;
+			if (H5Aread(attr_id, h5_type_id, &str_ptr) < 0) {
+				throw IOException("Failed to read variable-length string attribute: " + attribute_name);
+			}
+			if (!str_ptr) {
+				return Value(LogicalType::VARCHAR);
+			}
+			std::string result(str_ptr);
+			if (H5free_memory(str_ptr) < 0) {
+				throw IOException("Failed to reclaim variable-length string attribute: " + attribute_name);
+			}
+			return Value(result);
+		}
+
+		size_t str_len = H5Tget_size(h5_type_id);
+		std::vector<char> buffer(str_len);
+		H5ErrorSuppressor suppress;
+		if (H5Aread(attr_id, h5_type_id, buffer.data()) < 0) {
+			throw IOException("Failed to read fixed-length string attribute: " + attribute_name);
+		}
+		size_t actual_len = strnlen(buffer.data(), str_len);
+		return Value(std::string(buffer.data(), actual_len));
+	}
+
+	return DispatchOnDuckDBType(duckdb_type, [&](auto type_tag) -> Value {
+		using T = typename decltype(type_tag)::type;
+		T value;
+		H5ErrorSuppressor suppress;
+		if (H5Aread(attr_id, h5_type_id, &value) < 0) {
+			throw IOException("Failed to read attribute: " + attribute_name);
+		}
+		return CreateDuckDBValue(value);
+	});
 }
 
 } // namespace duckdb
