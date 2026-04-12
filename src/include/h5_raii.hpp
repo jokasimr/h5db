@@ -101,6 +101,7 @@ public:
 	H5TypeHandle &operator=(H5TypeHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Tclose(id);
 			}
 			id = other.id;
@@ -262,6 +263,7 @@ public:
 	H5DatasetHandle &operator=(H5DatasetHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Dclose(id);
 			}
 			id = other.id;
@@ -334,6 +336,7 @@ public:
 	H5DataspaceHandle &operator=(H5DataspaceHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Sclose(id);
 			}
 			id = other.id;
@@ -388,6 +391,7 @@ public:
 	H5AttributeHandle &operator=(H5AttributeHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Aclose(id);
 			}
 			id = other.id;
@@ -402,6 +406,10 @@ public:
 class H5ObjectHandle {
 	hid_t id;
 
+	struct TakeOwnership {};
+	H5ObjectHandle(hid_t object_id, TakeOwnership) : id(object_id) {
+	}
+
 public:
 	H5ObjectHandle() : id(-1) {
 	}
@@ -409,6 +417,10 @@ public:
 	H5ObjectHandle(hid_t loc_id, const char *path) {
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		id = H5Oopen(loc_id, path, H5P_DEFAULT);
+	}
+
+	static H5ObjectHandle TakeOwnershipOf(hid_t object_id) {
+		return H5ObjectHandle(object_id, TakeOwnership {});
 	}
 
 	~H5ObjectHandle() {
@@ -442,6 +454,7 @@ public:
 	H5ObjectHandle &operator=(H5ObjectHandle &&other) noexcept {
 		if (this != &other) {
 			if (id >= 0) {
+				std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 				H5Oclose(id);
 			}
 			id = other.id;

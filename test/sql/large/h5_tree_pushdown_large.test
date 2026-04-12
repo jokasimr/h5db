@@ -1,0 +1,168 @@
+# name: test/sql/large/h5_tree_pushdown_large.test
+# description: large-file pushdown coverage for h5_tree using exact and rootable-prefix paths
+# group: [large]
+
+require h5db
+
+# These queries are chosen so that the pushed path predicate maps to an actual
+# HDF5 path that H5Lvisit_by_name2() can start from. That means they exercise
+# the real traversal-pruning paths rather than merely scanning the whole file
+# and applying residual filters afterward.
+
+# =============================================================================
+# Streaming full scan regression
+# =============================================================================
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5');
+----
+200001
+
+# Early-stop scans must not affect later scans on the same file.
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_tree('test/data/many_groups.h5') LIMIT 1);
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5');
+----
+200001
+
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_tree('test/data/many_groups.h5') LIMIT 10);
+----
+10
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5');
+----
+200001
+
+# =============================================================================
+# Exact-path pushdown
+# =============================================================================
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path = '/g054321/scalar';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path IN ('/g054321/scalar');
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path = '/g054321/scalar' AND shape = [];
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path = '/g054321/scalar' AND (shape = [] OR dtype = 'float64');
+----
+1
+
+# =============================================================================
+# Rootable-prefix pushdown
+# =============================================================================
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054321');
+----
+2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path LIKE '/g054321%';
+----
+2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path LIKE '/g054323%/mat';
+----
+1
+
+# =============================================================================
+# Pushed path filters combined with non-pushed filters
+# =============================================================================
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054321') AND dtype = 'int32';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054322') AND shape = [1];
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path LIKE '/g054323%' AND shape = [1, 2];
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054321') AND (shape = [] OR shape IS NULL);
+----
+2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054321') AND (dtype = 'int32' OR shape IS NULL);
+----
+2
+
+# =============================================================================
+# Hidden filter columns on large files
+# =============================================================================
+
+query T
+SELECT type
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path = '/g054321/scalar';
+----
+dataset
+
+query T
+SELECT path
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054323') AND shape = [1, 2]
+ORDER BY path;
+----
+/g054323/mat
+
+query TT
+SELECT path, dtype
+FROM h5_tree('test/data/many_groups.h5')
+WHERE prefix(path, '/g054321') AND type = 'dataset'
+ORDER BY path;
+----
+/g054321/scalar	int32

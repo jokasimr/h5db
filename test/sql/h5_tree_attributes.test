@@ -174,3 +174,55 @@ statement error
 SELECT * FROM h5_tree('test/data/attrs_edge_cases.h5', h5_attr('attr_2d', [0, 0, 0]::INTEGER[3]));
 ----
 IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+
+# A failed projected-attribute scan must not poison a subsequent h5_tree scan.
+query T
+SELECT path
+FROM h5_tree('test/data/attrs_edge_cases.h5')
+WHERE path = '/';
+----
+/
+
+# Repeated projected-attribute scans should be stable across runs.
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', NULL::VARCHAR))
+     WHERE string_attr = 'Hello HDF5!'),
+    (SELECT COUNT(*) FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', NULL::VARCHAR))
+     WHERE string_attr = 'Hello HDF5!');
+----
+1	1
+
+# A failed multi-attribute projected scan must not poison a subsequent
+# multi-attribute projected scan.
+query TT
+SELECT string_attr, missing_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!	fallback
+
+statement error
+SELECT *
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', [0, 0, 0]::INTEGER[3]),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+);
+----
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+
+query T
+SELECT safe_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('safe_attr', h5_attr('string_attr', NULL::VARCHAR)),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!

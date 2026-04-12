@@ -31,3 +31,78 @@ query I
 SELECT attr FROM h5_attributes('test/data/links.h5', '/soft_link');
 ----
 7
+
+# =============================================================================
+# h5_tree namespace traversal via links
+# =============================================================================
+
+query IIIIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group'),
+    COUNT(*) FILTER (WHERE type = 'dataset'),
+    COUNT(*) FILTER (WHERE type = 'datatype'),
+    COUNT(*) FILTER (WHERE type = 'link'),
+    COUNT(*) FILTER (WHERE type = 'external')
+FROM h5_tree('test/data/links.h5');
+----
+14	5	5	1	1	2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/hard_link';
+----
+1
+
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_group/data';
+----
+/soft_group/data
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE path = '/named_int32' AND dtype IS NULL),
+    COUNT(*) FILTER (WHERE path = '/named_int32' AND shape IS NULL)
+FROM h5_tree('test/data/links.h5');
+----
+1	1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE prefix(path, '/soft_group');
+----
+2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/external_group_link/nested/leaf';
+----
+0
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/cycle_root/loop/cycle_data';
+----
+0
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE attr = 7),
+    COUNT(*) FILTER (WHERE attr IS NULL)
+FROM h5_tree('test/data/links.h5', h5_attr('attr', NULL::INTEGER))
+WHERE path IN (
+    '/group/data',
+    '/hard_link',
+    '/soft_link',
+    '/soft_group/data',
+    '/external_link',
+    '/external_group_link'
+);
+----
+4	2

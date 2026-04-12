@@ -1,0 +1,415 @@
+# name: test/sql/h5_tree_pushdown.test
+# description: projection and predicate pushdown coverage for h5_tree
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+# =============================================================================
+# EXPLAIN pushdown proof
+# =============================================================================
+
+# Root exact-path pushdown should stay inside H5_TREE as an exact path filter.
+query TT
+EXPLAIN SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/';
+----
+physical_plan	<REGEX>:[\s\S]*Function: H5_TREE[\s\S]*Projections:[\s\S]*type[\s\S]*Filters:[\s\S]*path='/'[\s\S]*
+
+# Exact path pushdown should land in the H5_TREE scan, while the scan still
+# projects the hidden path column needed to apply the pushed filter.
+query TT
+EXPLAIN SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link';
+----
+physical_plan	<REGEX>:[\s\S]*Function: H5_TREE[\s\S]*Projections:[\s\S]*type[\s\S]*Filters:[\s\S]*path='/soft_link'[\s\S]*
+
+# Anchored LIKE plus type = dataset should push the rootable path range and
+# type filter into H5_TREE, while keeping the original LIKE as a residual FILTER.
+query TT
+EXPLAIN SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path LIKE '/soft_group/%' AND type = 'dataset';
+----
+physical_plan	<REGEX>:[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*path[\s\S]*Filters:[\s\S]*path>='/soft'[\s\S]*type='dataset'[\s\S]*
+
+# With projected attributes, H5_TREE should project only path/type/attr and keep
+# an attribute predicate as a residual FILTER above the scan.
+query TT
+EXPLAIN SELECT attr
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND type = 'dataset' AND attr = 7;
+----
+physical_plan	<REGEX>:[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*attr[\s\S]*Filters:[\s\S]*path='/soft_link'[\s\S]*type='dataset'[\s\S]*
+
+# A residual dtype filter should force dtype into the scan projection, but only
+# the exact path filter should be pushed into H5_TREE.
+query TT
+EXPLAIN SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link' AND dtype = 'int32';
+----
+physical_plan	<REGEX>:[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*path[\s\S]*dtype[\s\S]*Filters:[\s\S]*path='/soft_link'[\s\S]*
+
+# Exact path plus pushed type plus residual dtype should keep only path/type in
+# H5_TREE filters and project dtype for the residual FILTER.
+query TT
+EXPLAIN SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link' AND type = 'dataset' AND dtype = 'int32';
+----
+physical_plan	<REGEX>:[\s\S]*PROJECTION[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*path[\s\S]*dtype[\s\S]*Filters:[\s\S]*path='/soft_link'[\s\S]*type='dataset'[\s\S]*
+
+# Prefix + pushed type + residual projected attribute should keep the attribute
+# predicate above H5_TREE while pushing the path range and type filter.
+query TT
+EXPLAIN SELECT attr
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE prefix(path, '/soft') AND type = 'dataset' AND attr = 7;
+----
+physical_plan	<REGEX>:[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*attr[\s\S]*Filters:[\s\S]*path>='/soft'[\s\S]*type='dataset'[\s\S]*
+
+# With multiple projected attributes, H5_TREE should only project the selected
+# and filter-referenced attributes, not the completely unused one.
+query TT
+EXPLAIN SELECT string_attr, missing_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs' AND group_int_attr = -1 AND missing_attr = 'fallback';
+----
+physical_plan	<REGEX>:[\s\S]*PROJECTION[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*missing_attr[\s\S]*string_attr[\s\S]*group_int_attr[\s\S]*Filters:[\s\S]*path='/dataset_with_attrs'[\s\S]*
+
+# Mixed built-in and projected residual filters should both appear above the
+# scan, while H5_TREE only projects the needed hidden columns.
+query TT
+EXPLAIN SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND (dtype = 'int32' OR attr = 7);
+----
+physical_plan	<REGEX>:[\s\S]*PROJECTION[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*path[\s\S]*dtype[\s\S]*attr[\s\S]*Filters:[\s\S]*path='/soft_link'[\s\S]*
+
+# Alias-only residual filtering should still project only the aliased column
+# plus the selected output column.
+query TT
+EXPLAIN SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('renamed_int', h5_attr('group_int_attr', -1::BIGINT)),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path = '/group_with_attrs' AND renamed_int = 999;
+----
+physical_plan	<REGEX>:[\s\S]*PROJECTION[\s\S]*FILTER[\s\S]*H5_TREE[\s\S]*Projections:[\s\S]*path[\s\S]*renamed_int[\s\S]*Filters:[\s\S]*path='/group_with_attrs'[\s\S]*
+
+# =============================================================================
+# Projection pushdown
+# =============================================================================
+
+# Project only type, while filtering on the hidden path column.
+query T
+SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link';
+----
+dataset
+
+# Project only path, while filtering on the hidden type column.
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE type = 'external'
+ORDER BY path;
+----
+/external_group_link
+/external_link
+
+# Project only the attribute column, while filtering on hidden path/type columns.
+query I
+SELECT attr
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND type = 'dataset';
+----
+7
+
+# Project a small subset of built-in columns while combining path and type filters.
+query TT
+SELECT path, dtype
+FROM h5_tree('test/data/links.h5')
+WHERE prefix(path, '/soft') AND type = 'dataset'
+ORDER BY path;
+----
+/soft_group/data	int32
+/soft_link	int32
+
+# Hidden built-in and hidden attribute residual filters should coexist correctly.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND dtype = 'int32' AND attr = 7;
+----
+/soft_link
+
+# With multiple projected attributes, selected-only, filter-only, selected-and-
+# filtered, and unused attributes should all coexist correctly.
+query TT
+SELECT string_attr, missing_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs' AND group_int_attr = -1 AND missing_attr = 'fallback';
+----
+Hello HDF5!	fallback
+
+query TI
+SELECT group_string_attr, group_int_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path = '/group_with_attrs' AND group_int_attr = 999 AND missing_attr = 'fallback';
+----
+I am a group	999
+
+# Two filter-only projected attributes plus one selected attribute should work.
+query T
+SELECT string_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs' AND group_int_attr = -1 AND missing_attr = 'fallback';
+----
+Hello HDF5!
+
+# Reusing the same projected attribute in multiple residual predicates must not
+# duplicate or mis-wire its hidden column slot.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND attr = 7 AND attr IS NOT NULL;
+----
+/soft_link
+
+# No projected attributes selected: only the filtered attribute should matter,
+# unused projected attributes must not be read.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::VARCHAR),
+    h5_alias('safe_attr', h5_attr('missing_attr', 'ok'::VARCHAR)),
+    h5_attr('other_missing', 0::INTEGER)
+)
+WHERE path = '/multidim_attr_dataset' AND safe_attr = 'ok';
+----
+/multidim_attr_dataset
+
+# NULL checks on projected attributes with defaults must behave correctly.
+query II
+SELECT
+    COUNT(*) FILTER (WHERE string_attr IS NULL),
+    COUNT(*) FILTER (WHERE missing_attr IS NOT NULL)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+);
+----
+2	3
+
+# Alias-wrapped unsupported-but-unused attributes must not be read.
+query T
+SELECT safe_attr
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_alias('bad_alias', h5_attr('attr_2d', NULL::VARCHAR)),
+    h5_alias('safe_attr', h5_attr('missing_attr', 'ok'::VARCHAR))
+)
+WHERE path = '/multidim_attr_dataset' AND safe_attr = 'ok';
+----
+ok
+
+# OR over projected attributes should keep residual filter wiring correct.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs' AND (string_attr = 'Hello HDF5!' OR missing_attr = 'fallback');
+----
+/dataset_with_attrs
+
+# OR combining a built-in residual and a projected residual must stay correct.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND (dtype = 'int32' OR attr = 7);
+----
+/soft_link
+
+# An unsupported projected attribute that is completely unused must not be read,
+# even on a row where that attribute exists.
+query T
+SELECT safe_attr
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::VARCHAR),
+    h5_alias('safe_attr', h5_attr('missing_attr', 'ok'::VARCHAR)),
+    h5_attr('other_missing', 0::INTEGER)
+)
+WHERE path = '/multidim_attr_dataset' AND other_missing = 0;
+----
+ok
+
+# Unsupported projected attributes must not be read when they are not selected.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::VARCHAR)
+)
+WHERE path = '/';
+----
+/
+
+# Root-path filtering edge cases.
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE prefix(path, '/');
+----
+14
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path LIKE '/%';
+----
+14
+
+# =============================================================================
+# Predicate pushdown correctness
+# =============================================================================
+
+# Exact-path lookup on a dangling link.
+query T
+SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/dangling_link';
+----
+link
+
+# Exact-path lookup on a committed datatype.
+query T
+SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/named_int32';
+----
+datatype
+
+# Prefix filtering should keep the soft-link alias row and its descendants.
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE prefix(path, '/soft_group')
+ORDER BY path;
+----
+/soft_group
+/soft_group/data
+
+# Pushed path/type filters combined with a residual dtype filter.
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link' AND type = 'dataset' AND dtype = 'int32';
+----
+/soft_link
+
+# Pushed path/type filters combined with a residual projected attribute filter.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE prefix(path, '/soft') AND type = 'dataset' AND attr = 7
+ORDER BY path;
+----
+/soft_group/data
+/soft_link
+
+# Anchored LIKE plus type filtering should keep only matching dataset rows.
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE type = 'dataset' AND path LIKE '/soft_%'
+ORDER BY path;
+----
+/soft_group/data
+/soft_link
+
+# Anchored LIKE with an additional residual pattern must stay correct.
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path LIKE '/soft_group/%ata%'
+ORDER BY path;
+----
+/soft_group/data
+
+# Paths below external-link aliases are not part of h5_tree output.
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/external_group_link/nested/leaf';
+----
+0
