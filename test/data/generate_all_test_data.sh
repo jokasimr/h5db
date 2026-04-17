@@ -153,11 +153,15 @@ echo -e "${GREEN}[21/27] Generating links.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_links_test.py)
 
 echo ""
-echo -e "${GREEN}[22/27] Generating h5_tree_traversal_hint_bug.h5${NC}"
+echo -e "${GREEN}[22/28] Generating complex_links.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_complex_links_test.py)
+
+echo ""
+echo -e "${GREEN}[23/28] Generating h5_tree_traversal_hint_bug.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_h5_tree_traversal_hint_bug.py)
 
 echo ""
-echo -e "${GREEN}[23/27] Generating swmr test files${NC}"
+echo -e "${GREEN}[24/28] Generating swmr test files${NC}"
 (cd test/data && "$PYTHON_BIN" create_swmr_test.py)
 
 # ====================================================================
@@ -165,23 +169,23 @@ echo -e "${GREEN}[23/27] Generating swmr test files${NC}"
 # ====================================================================
 mkdir -p "$LARGE_DATA_DIR"
 echo ""
-echo -e "${GREEN}[24/27] Generating large_rse_test.h5 (16 MB)${NC}"
+echo -e "${GREEN}[25/28] Generating large_rse_test.h5 (16 MB)${NC}"
 (cd test/data && "$PYTHON_BIN" create_large_rse_test.py)
 
 echo ""
-echo -e "${GREEN}[25/27] Generating large_simple.h5 (1.3 GB)${NC}"
+echo -e "${GREEN}[26/28] Generating large_simple.h5 (1.3 GB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_simple.py")
 
 echo ""
-echo -e "${GREEN}[26/27] Generating large_multithreading.h5 (153 MB)${NC}"
+echo -e "${GREEN}[27/28] Generating large_multithreading.h5 (153 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_multithreading.py")
 
 echo ""
-echo -e "${GREEN}[27/27] Generating large_pushdown_test.h5 (115 MB)${NC}"
+echo -e "${GREEN}[28/28] Generating large_pushdown_test.h5 (115 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_pushdown.py")
 
 echo ""
-echo -e "${GREEN}[28/27] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
+echo -e "${GREEN}[29/28] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
 # ====================================================================
@@ -216,6 +220,7 @@ echo "    - sparse_pushdown_cache.h5 (sparse pushdown cache coverage)"
 echo "    - sparse_partition_pushdown.h5 (sparse pushdown across logical partitions)"
 echo "    - wide_few_rows.h5        (wide-row cache/threading coverage)"
 echo "    - links.h5                (hard/soft/external link coverage)"
+echo "    - complex_links.h5        (complicated link graph coverage)"
 echo "    - h5_tree_traversal_hint_bug.h5 (h5_tree prefix-root regression fixture)"
 echo "    - links_external_target.h5 (external-link target)"
 echo "    - swmr_enabled.h5         (SWMR flag enabled)"

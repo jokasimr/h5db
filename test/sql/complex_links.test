@@ -1,0 +1,79 @@
+# name: test/sql/complex_links.test
+# description: complicated hard/soft link traversal
+# group: [sql]
+
+require h5db
+
+query TT
+SELECT path, type
+FROM h5_ls('test/data/complex_links.h5')
+ORDER BY path;
+----
+/anchor	group
+/anchor_alias	group
+/chain1	group
+/chain2	group
+/chain3	group
+/messy	group
+
+query TT
+SELECT path, type
+FROM h5_ls('test/data/complex_links.h5', '/chain2')
+ORDER BY path;
+----
+/chain2/c2_data	dataset
+/chain2/to_anchor	group
+/chain2/to_chain3	group
+
+query TT
+SELECT child.path, child.type
+FROM UNNEST(map_values(h5_ls('test/data/complex_links.h5', '/chain3'))) AS t(child)
+ORDER BY child.path;
+----
+/chain3/c3_data	dataset
+/chain3/hard_anchor	group
+/chain3/to_leaf_data	dataset
+
+query III
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group'),
+    COUNT(*) FILTER (WHERE type = 'dataset')
+FROM h5_tree('test/data/complex_links.h5')
+WHERE prefix(path, '/anchor') OR prefix(path, '/anchor_alias');
+----
+10	6	4
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/complex_links.h5')
+WHERE path = '/anchor/leaf/up_to_anchor/a_data';
+----
+0
+
+query III
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group'),
+    COUNT(*) FILTER (WHERE type = 'dataset')
+FROM h5_tree('test/data/complex_links.h5')
+WHERE path LIKE '/chain1/%';
+----
+16	8	8
+
+query TI
+SELECT path, missing_attr
+FROM h5_tree(
+    'test/data/complex_links.h5',
+    h5_attr('missing_attr', -1::INTEGER)
+)
+WHERE path IN (
+    '/messy/dangling',
+    '/messy/hard_c3_data',
+    '/messy/soft_anchor_alias/leaf/leaf_data'
+)
+ORDER BY path;
+----
+/messy/dangling	-1
+/messy/hard_c3_data	-1
+/messy/soft_anchor_alias/leaf/leaf_data	-1
