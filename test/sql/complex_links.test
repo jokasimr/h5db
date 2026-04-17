@@ -4,6 +4,12 @@
 
 require h5db
 
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/complex_links.h5');
+----
+74
+
 query TT
 SELECT path, type
 FROM h5_ls('test/data/complex_links.h5')
