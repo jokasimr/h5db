@@ -797,7 +797,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		    "h5_read requires at least 2 arguments: filename and dataset path(s), h5_rse(), h5_index(), or h5_alias()");
 	}
 
-	result->filename = input.inputs[0].GetValue<string>();
+	result->filename = GetRequiredStringArgument(input.inputs[0], "h5_read", "filename");
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 	size_t num_columns = input.inputs.size() - 1;
 
@@ -877,8 +877,12 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 		} else {
 			// Regular column (may be scalar)
+			if (column_val.type().id() != LogicalTypeId::VARCHAR) {
+				throw InvalidInputException("h5_read dataset path arguments must be VARCHAR, h5_rse(), h5_index(), or "
+				                            "h5_alias(...)");
+			}
 			RegularColumnSpec ds_info;
-			ds_info.path = column_val.GetValue<string>();
+			ds_info.path = GetRequiredStringArgument(column_val, "h5_read", "dataset path");
 			ds_info.column_name = alias_name ? *alias_name : GetColumnName(ds_info.path);
 			num_regular_columns++;
 

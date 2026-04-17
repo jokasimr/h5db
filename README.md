@@ -7,12 +7,14 @@ file structure, read datasets as columns, read attributes, and work with remote 
 
 - Reads local or remote (`https://`, `s3://`, ...) HDF5 files directly from SQL.
 - Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
-- Multiple dataset can be stacked horizontally to make a table.
+- Multiple datasets can be stacked horizontally to make a table.
 - Scalar datasets are treated as constant columns.
-- Supports projection pushdown.
+- Supports projection pushdown in `h5_read(...)`.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
-- Supports reading HDF5 attributes on groups and datasets.
-- Supports projecting selected HDF5 attributes as extra columns in `h5_tree(...)`.
+- Supports reading HDF5 attributes on objects and the file root.
+- Supports path-complete namespace listing with `h5_tree(...)`.
+- Supports shallow group listing with table and scalar `h5_ls(...)`.
+- Supports projecting selected HDF5 attributes as extra columns in `h5_tree(...)` and `h5_ls(...)`.
 
 ## Core Functions
 
@@ -20,12 +22,15 @@ file structure, read datasets as columns, read attributes, and work with remote 
   Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
   "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`).
 - `h5_tree(filename, projected_attributes...)`
-  Lists groups and datasets with `path`, `type`, `dtype`, and `shape`, and can append selected attributes as extra
-  columns with `h5_attr(...)`.
+  Recursively lists namespace entries with `path`, `type`, `dtype`, and `shape`. Output is path-oriented: if multiple
+  paths resolve to the same object, each path appears as its own row.
+- `h5_ls(filename[, group_path], projected_attributes...)`
+  Lists only the immediate children of a group. The table form returns the same row shape as `h5_tree`; the scalar
+  form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
 - `h5_attributes(filename, object_path)`
-  Reads attributes from a dataset or group as a single wide row.
+  Reads attributes from an object or the file root as a single wide row.
 
-For the full API, see [API.md](API.md).
+For the full API, see [docs/API.md](docs/API.md).
 
 ## Quick Start
 
@@ -48,6 +53,15 @@ FROM h5_tree(
     'data.h5',
     h5_attr('NX_class', NULL::VARCHAR)
 );
+
+-- List only the root group's immediate children
+SELECT * FROM h5_ls('data.h5');
+
+-- List the immediate children of a specific group
+SELECT * FROM h5_ls('data.h5', '/entry/instrument');
+
+-- Return a map of immediate children keyed by child name
+SELECT h5_ls('data.h5', '/entry/instrument');
 
 -- Read one dataset
 SELECT * FROM h5_read('data.h5', '/measurements');
@@ -112,7 +126,7 @@ make -j8
 ```
 
 If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a repo-root `.env` file instead. See
-[docs/DEVELOPER.md](docs/DEVELOPER.md) for the full setup and troubleshooting guide.
+[docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) for the full setup and troubleshooting guide.
 
 ### Build Outputs
 
@@ -132,6 +146,13 @@ If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a re
   row count.
 - If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
 - In `h5_tree(...)`, projected attributes use the declared default when an object does not have the attribute.
+- In `h5_tree(...)`, rows are path-oriented and recursive: alias paths, dangling links, and external links can all
+  appear as separate rows.
+- In `h5_ls(...)`, only the immediate children of the requested group are returned.
+- Table `h5_ls(...)` defaults the path to `/` if omitted.
+- Scalar `h5_ls(...)` requires an explicit path and returns `NULL` for `NULL` path inputs.
+- Scalar `h5_ls(...)` does not accept named parameters such as `swmr := true`; use `h5_ls_swmr(...)` or
+  `SET h5db_swmr_default = true`.
 - In `h5_tree(...)`, projected output names must be unique; duplicate projected names or collisions with `path`,
   `type`, `dtype`, or `shape` fail at bind time.
 
@@ -142,9 +163,10 @@ If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a re
 - Multi-dimensional string datasets are not supported.
 - Attribute string arrays are not supported.
 - Attribute multidimensional dataspaces are not supported.
-- Projected `h5_tree(...)` attributes follow the same attribute type/limitation rules as `h5_attributes()`.
+- Projected `h5_tree(...)` and `h5_ls(...)` attributes follow the same attribute type/limitation rules as
+  `h5_attributes()`.
 
-See [API.md](API.md) for full type-mapping details and error behavior.
+See [docs/API.md](docs/API.md) for full type-mapping details and error behavior.
 
 ## Testing
 
@@ -165,13 +187,14 @@ Notes:
 - On macOS, the Makefile currently skips the remote HTTP portion of `make test`; use Linux to exercise the rewritten
   remote suite.
 
-For targeted test runs, test-data generation, and debugging workflows, see [docs/DEVELOPER.md](docs/DEVELOPER.md) and
+For targeted test runs, test-data generation, and debugging workflows, see [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) and
 [test/README.md](test/README.md).
 
 ## Documentation
 
-- [API.md](API.md): function reference, settings, type mapping, and limitations
-- [RSE_USAGE.md](RSE_USAGE.md): detailed guide to run-start encoding support
-- [docs/DEVELOPER.md](docs/DEVELOPER.md): building, testing, debugging, and project layout
-- [docs/H5_TREE_ATTRIBUTES_SPEC.md](docs/H5_TREE_ATTRIBUTES_SPEC.md): design/spec for projected attributes in `h5_tree`
-- [docs/H5_TREE_TRAVERSAL_AND_PUSHDOWN_SPEC.md](docs/H5_TREE_TRAVERSAL_AND_PUSHDOWN_SPEC.md): proposed refactor for link-oriented `h5_tree` semantics and selective-query pushdown
+- [docs/README.md](docs/README.md): documentation index
+- [docs/API.md](docs/API.md): function reference, settings, type mapping, and limitations
+- [docs/RSE_USAGE.md](docs/RSE_USAGE.md): detailed guide to run-start encoding support
+- [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md): building, testing, debugging, and project layout
+- [docs/internals/H5_TREE_ATTRIBUTES_SPEC.md](docs/internals/H5_TREE_ATTRIBUTES_SPEC.md): internal design note for
+  projected attributes in `h5_tree` and `h5_ls`

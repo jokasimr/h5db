@@ -118,8 +118,8 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	ThrowIfInterrupted(context);
 	auto result = make_uniq<H5AttributesBindData>();
 
-	result->filename = input.inputs[0].GetValue<string>();
-	result->object_path = NormalizeObjectPath(input.inputs[1].GetValue<string>());
+	result->filename = GetRequiredStringArgument(input.inputs[0], "h5_attributes", "filename");
+	result->object_path = NormalizeObjectPath(GetRequiredStringArgument(input.inputs[1], "h5_attributes", "path"));
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);

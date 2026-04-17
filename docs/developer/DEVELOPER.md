@@ -378,6 +378,7 @@ deactivate
    ```bash
    ./build/release/duckdb
    D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
+   D SELECT * FROM h5_ls('test/data/links.h5');
    ```
 
 ### Code Formatting
@@ -430,13 +431,11 @@ make tidy-check
    hid_t file_id = H5Fopen(...);
    ```
 
-2. **Protected locations** (as of 2024-12-22):
-   - `H5TreeInit`: File opening and tree traversal
-   - `H5ReadBind`: Schema determination
-   - `H5ReadInit`: Dataset opening during initialization
-   - `H5ReadScan`: Data reading (including RSE expansion)
-   - `H5AttributesBind`: Attribute metadata reading
-   - `H5AttributesScan`: Attribute value reading
+2. **Protected locations** (current shape):
+   - `h5_tree`: file opens, namespace traversal, object inspection, and dataset metadata reads
+   - `h5_ls`: file opens and immediate-child inspection
+   - `h5_read`: schema determination, dataset opens, and scan-time HDF5 reads
+   - `h5_attributes`: attribute schema reads and attribute value reads
 
 3. **Performance implications**:
    - The mutex serializes all HDF5 operations across threads
@@ -483,6 +482,7 @@ D .timer on
 
 # Run queries and inspect results
 D SELECT * FROM h5_tree('test/data/simple.h5');
+D SELECT * FROM h5_ls('test/data/links.h5');
 D SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 ```
 
@@ -501,6 +501,9 @@ gdb --args ./build/debug/test/unittest "test/sql/*" "~test/sql/remote/*"
 ```bash
 # Check what's in an HDF5 file
 ./build/release/duckdb -c "SELECT * FROM h5_tree('test/data/simple.h5');"
+
+# Check one group's immediate children
+./build/release/duckdb -c "SELECT * FROM h5_ls('test/data/links.h5');"
 
 # Check structure
 ./build/release/duckdb -c "SELECT path, type, dtype, shape FROM h5_tree('test/data/simple.h5');"
@@ -522,6 +525,8 @@ h5db/
 │   ├── h5db_extension.cpp   # Extension entry point
 │   ├── h5_read.cpp          # h5_read implementation
 │   ├── h5_tree.cpp          # h5_tree implementation
+│   ├── h5_ls.cpp            # h5_ls table/scalar implementations
+│   ├── h5_tree_shared.cpp   # shared h5_tree/h5_ls metadata helpers
 │   ├── h5_attributes.cpp    # h5_attributes implementation
 │   └── h5_common.cpp        # Shared HDF5 helpers
 │
@@ -545,7 +550,9 @@ h5db/
 - **`.env`**: Environment configuration (VCPKG path, build settings)
 - **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner
 - **`src/h5_read.cpp`** also owns `get_partition_data` for ordered batch sinks (`CTAS`, `INSERT`, `COPY`)
-- **`src/h5_tree.cpp`**: Tree/metadata listing
+- **`src/h5_tree.cpp`**: recursive namespace listing
+- **`src/h5_ls.cpp`**: immediate-child listing (`h5_ls` table and scalar forms)
+- **`src/h5_tree_shared.cpp`**: shared row resolution, metadata, and projected-attribute helpers for `h5_tree`/`h5_ls`
 - **`src/h5_attributes.cpp`**: Attribute reader
 - **`src/h5_common.cpp`**: Shared HDF5 helpers
 - **`test/sql/*.test`**: SQLLogicTest test files (regular)
@@ -706,7 +713,7 @@ make clean        # Clean build artifacts
 ## Additional Resources
 
 - **Main README**: `README.md` - Project overview and usage
-- **API Reference**: `API.md` - Complete function reference
-- **RSE Documentation**: `RSE_USAGE.md` - Run-Start Encoding guide
+- **API Reference**: `../API.md` - Complete function reference
+- **RSE Documentation**: `../RSE_USAGE.md` - Run-Start Encoding guide
 
 For questions or issues, please check existing documentation or open an issue on GitHub.

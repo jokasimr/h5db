@@ -10,8 +10,10 @@ used there.
 
 ### `h5_tree(filename, projected_attributes...)`
 
-Lists all groups and datasets in an HDF5 file. Selected HDF5 attributes can be
-projected as additional columns with `h5_attr(...)`.
+Recursively lists namespace entries in an HDF5 file. The result is path-oriented:
+each absolute namespace path is emitted as its own row, even when multiple paths
+resolve to the same underlying object. Selected HDF5 attributes can be projected
+as additional columns with `h5_attr(...)`.
 
 **Parameters:**
 - `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
@@ -22,16 +24,31 @@ projected as additional columns with `h5_attr(...)`.
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
-- `path` (VARCHAR): Object name/path
-- `type` (VARCHAR): Object type (`group` or `dataset`)
+- `path` (VARCHAR): Absolute namespace path for the emitted row
+- `type` (VARCHAR): Entry type:
+  - `group`
+  - `dataset`
+  - `datatype`
+  - `link` for dangling or otherwise unresolved local links
+  - `external` for external links
 - `dtype` (VARCHAR): Data type for datasets (e.g., `int32`, `float64`, `string`)
 - `shape` (LIST<UBIGINT>): Dataset dimensions
-  - `NULL` for groups
+  - `NULL` for non-dataset rows
   - `[]` for scalar datasets
   - `[d0, d1, ...]` for array datasets
 - one additional column per projected attribute
   - column name = resolved attribute name, unless overridden by `h5_alias(...)`
   - column type = type of `default_value`
+
+**Traversal Semantics:**
+- `/` is returned as a `group` row.
+- Hard-link aliases, soft-link aliases, and other namespace aliases are path-complete:
+  if two paths resolve to the same local object, both paths appear.
+- Resolved group aliases are traversed recursively in a cycle-safe way.
+- Dangling links are returned as `type = 'link'` leaf rows.
+- External links are returned as `type = 'external'` leaf rows and are not traversed.
+- Projected attributes and dataset metadata are populated only for resolved local
+  rows. Unresolved and external rows use projected defaults.
 
 **Projected Attribute Semantics:**
 - `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
@@ -69,6 +86,57 @@ SELECT path, type, time
 FROM h5_tree(
     'data.h5',
     h5_alias('time', h5_attr('count_time', 0::DOUBLE))
+);
+```
+
+---
+
+### `h5_ls(filename[, group_path], projected_attributes...)`
+
+Lists the immediate children of a group. This is the shallow counterpart to
+`h5_tree()`. The scalar form is documented below.
+
+The table form:
+
+```sql
+SELECT * FROM h5_ls('data.h5');
+SELECT * FROM h5_ls('data.h5', '/entry/instrument');
+```
+
+returns the same row shape as `h5_tree()`, but only for the immediate children of
+the requested group.
+
+**Parameters:**
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
+  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
+- `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr(name, default_value)`
+  - `h5_alias(alias_name, h5_attr(name, default_value))`
+- `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
+
+**Returns:** Table with the same columns and projected-attribute semantics as `h5_tree()`
+
+**Semantics:**
+- the path must resolve to a group, otherwise the function errors
+- only immediate children are returned; the requested group itself is not returned
+- external groups can be listed if the external target resolves successfully
+- row typing, `dtype`, `shape`, and projected-attribute rules are the same as `h5_tree()`
+
+**Examples:**
+```sql
+-- List the root group's immediate children
+SELECT * FROM h5_ls('data.h5');
+
+-- List one specific group
+SELECT * FROM h5_ls('data.h5', '/entry/instrument');
+
+-- Project attributes on the immediate children
+SELECT path, NX_class
+FROM h5_ls(
+    'data.h5',
+    '/entry/instrument',
+    h5_attr('NX_class', NULL::VARCHAR)
 );
 ```
 
@@ -134,12 +202,12 @@ SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 
 ### `h5_attributes(filename, object_path)`
 
-Reads attributes from a dataset or group.
+Reads attributes from an object or the file root.
 
 **Parameters:**
 - `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
   (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
-- `object_path` (VARCHAR): Path to the dataset or group (use empty string or '/' for root)
+- `object_path` (VARCHAR): Path to the target object, or `/` for root
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Single-row table where each column represents one attribute
@@ -173,6 +241,49 @@ SELECT * FROM h5_attributes('data.h5', '/measurements', swmr := true);
 ---
 
 ## Scalar Functions
+
+### `h5_ls(filename, group_path[, projected_attributes...])`
+
+Returns the immediate children of a group as a `MAP(VARCHAR, STRUCT(...))` keyed
+by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
+
+**Parameters:**
+- `filename` (VARCHAR): File path or URL. Must be a constant expression.
+- `group_path` (VARCHAR): Group path to list. May vary per row.
+- `projected_attributes` (variadic, optional): Zero or more `h5_attr(...)` or
+  `h5_alias(..., h5_attr(...))` expressions. These must be constant expressions.
+
+**Returns:** `MAP(VARCHAR, STRUCT(path, type, dtype, shape, ...projected attrs...))`
+
+**Semantics:**
+- `group_path` must resolve to a group or the function errors
+- `NULL` `group_path` yields `NULL`
+- named parameters such as `swmr := true` are not supported in the scalar form
+- projected attribute semantics match table `h5_ls()` and `h5_tree()`
+
+**Examples:**
+```sql
+SELECT h5_ls('data.h5', '/entry/instrument');
+
+WITH groups(path) AS (
+    VALUES ('/'), ('/entry/instrument')
+)
+SELECT path, cardinality(h5_ls('data.h5', path))
+FROM groups;
+```
+
+### `h5_ls_swmr(filename, group_path[, projected_attributes...])`
+
+Scalar variant of `h5_ls()` that forces `swmr = true`.
+
+**Parameters:** Same as scalar `h5_ls()`
+
+**Returns:** Same as scalar `h5_ls()`
+
+**Example:**
+```sql
+SELECT h5_ls_swmr('data.h5', '/entry/instrument');
+```
 
 ### `h5_rse(run_starts_path, values_path)`
 
@@ -227,13 +338,13 @@ reduce I/O when the bounds are static constants.
 
 ### `h5_attr(name, default_value)`
 
-Creates a projected-attribute definition for use with `h5_tree()`.
+Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 
 **Parameters:**
 - `name` (VARCHAR): Attribute name to read. Any non-`NULL` bind-time-resolved `VARCHAR` expression is allowed.
 - `default_value` (ANY): Bind-time constant default value. Its type becomes the output type of the projected column.
 
-**Returns:** STRUCT wrapper used by `h5_tree()`
+**Returns:** STRUCT wrapper used by `h5_tree()` and `h5_ls()`
 
 **Notes:**
 - typed `NULL` defaults such as `NULL::VARCHAR` are allowed
@@ -254,15 +365,15 @@ FROM h5_tree(
 
 ### `h5_alias(name, definition)`
 
-Renames a column definition when used with `h5_read()` or a projected attribute
-definition when used with `h5_tree()`.
+Renames a column definition when used with `h5_read()` or a projected-attribute
+definition when used with `h5_tree()` or `h5_ls()`.
 
 **Parameters:**
 - `name` (VARCHAR): Column name to use in the output
 - `definition` (VARCHAR or STRUCT): A dataset path, a column definition like `h5_rse()` or `h5_index()`, or a
   projected attribute definition from `h5_attr()`
 
-**Returns:** STRUCT wrapper used by `h5_read()` and `h5_tree()`
+**Returns:** STRUCT wrapper used by `h5_read()`, `h5_tree()`, and `h5_ls()`
 
 **Example:**
 ```sql
@@ -293,7 +404,8 @@ Returns the HDF5 library version being used.
 ## Settings
 
 ### `h5db_swmr_default` (BOOLEAN)
-Default SWMR read mode for h5db table functions. Defaults to `false`.
+Default SWMR read mode for h5db functions when no explicit `swmr := ...` named
+parameter is provided. Defaults to `false`.
 
 **Example:**
 ```sql
@@ -362,14 +474,15 @@ All functions provide clear error messages for common issues:
 
 ## Performance Notes
 
-- **Projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely for significant performance gains
-- **Predicate pushdown**: Range-like filters with static constants are applied during scan for RSE and `h5_index()` columns
+- **`h5_read` projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely
+  for significant performance gains
+- **`h5_read` predicate pushdown**: Range-like filters with static constants are applied during scan for RSE and `h5_index()` columns
   to reduce I/O (supported: `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`; not supported: `!=`, `IS DISTINCT FROM`, or expressions
   like `index + 1 > 10`)
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row
-- **Parallel scanning**: Multiple threads can read different row ranges simultaneously for improved throughput
+- **Parallel scanning**: `h5_read` can scan different row ranges in parallel where the dataset layout and query allow it
 
 ---
 
@@ -387,6 +500,6 @@ All functions provide clear error messages for common issues:
 
 ## See Also
 
-- [README.md](README.md) - Project overview and quick start
+- [../README.md](../README.md) - Project overview and quick start
 - [RSE_USAGE.md](RSE_USAGE.md) - Detailed guide to run-start encoding
-- [docs/DEVELOPER.md](docs/DEVELOPER.md) - Development and building guide
+- [developer/DEVELOPER.md](developer/DEVELOPER.md) - Development and building guide

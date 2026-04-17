@@ -8,6 +8,19 @@ require h5db
 # h5_tree on many_groups.h5 (100k groups + 100k datasets)
 # =============================================================================
 
+query II
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group')
+FROM h5_ls('test/data/many_groups.h5');
+----
+100000	100000
+
+query I
+SELECT cardinality(h5_ls('test/data/many_groups.h5', '/'));
+----
+100000
+
 query III
 SELECT
     COUNT(*) FILTER (WHERE type = 'group' AND shape IS NULL),
@@ -26,3 +39,31 @@ SELECT
 FROM h5_tree('test/data/many_groups.h5');
 ----
 33334	33333	33333	100001
+
+# Early-stop scans must not affect later scans on the same file.
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_tree('test/data/many_groups.h5') LIMIT 1);
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5');
+----
+200001
+
+# Large-file smoke checks for residual filtering.
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path = '/g054321/scalar';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/many_groups.h5')
+WHERE path IN ('/g054321/scalar', '/g054322/vec') AND dtype = 'int32';
+----
+2

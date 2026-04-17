@@ -11,6 +11,21 @@ SELECT h5db_version('test') ILIKE 'H5db test, HDF5 version 1.%';
 ----
 true
 
+statement error
+SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR);
+----
+Invalid Input Error: h5_tree filename must not be NULL
+
+statement error
+SELECT * FROM h5_read('test/data/simple.h5', NULL::VARCHAR);
+----
+Invalid Input Error: h5_read dataset path must not be NULL
+
+statement error
+SELECT * FROM h5_read('test/data/simple.h5', 42);
+----
+Invalid Input Error: h5_read dataset path arguments must be VARCHAR, h5_rse(), h5_index(), or h5_alias(...)
+
 # =============================================================================
 # h5_tree() Tests
 # =============================================================================

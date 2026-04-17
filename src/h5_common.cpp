@@ -61,6 +61,14 @@ bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &name
 	return false;
 }
 
+std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,
+                                      const std::string &argument_name) {
+	if (value.IsNull()) {
+		throw InvalidInputException("%s %s must not be NULL", function_name, argument_name);
+	}
+	return value.GetValue<string>();
+}
+
 idx_t ParseBatchSizeSetting(const Value &setting_value) {
 	auto input = setting_value.ToString();
 	idx_t parsed;

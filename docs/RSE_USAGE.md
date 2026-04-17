@@ -420,4 +420,4 @@ See `test/data/run_encoded.h5` for complete working examples:
 
 - [README.md](README.md) - Main h5db documentation
 - [API.md](API.md) - Complete API reference
-- [docs/DEVELOPER.md](docs/DEVELOPER.md) - Developer guide
+- [developer/DEVELOPER.md](developer/DEVELOPER.md) - Developer guide

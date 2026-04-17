@@ -18,6 +18,11 @@ SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/empty_group');
 ----
 IO Error: Object has no attributes: /empty_group
 
+statement error
+SELECT * FROM h5_attributes('test/data/root_attrs.h5', NULL::VARCHAR);
+----
+Invalid Input Error: h5_attributes path must not be NULL
+
 # =============================================================================
 # String attribute handling (vlen + fixed)
 # =============================================================================

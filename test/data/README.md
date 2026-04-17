@@ -48,6 +48,7 @@ To ensure test data exists (generate only if missing):
 | `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
 | `sparse_partition_pushdown.h5` | `create_sparse_partition_pushdown_test.py` | 1.5 MB | Sparse pushdown across logical partitions and empty partitions |
 | `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
+| `h5_tree_traversal_hint_bug.h5` | `create_h5_tree_traversal_hint_bug.py` | 5 KB | `h5_tree` prefix traversal-root regression coverage |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
 
 ### Large Test Files (`test/data/large/`)
@@ -90,6 +91,7 @@ test/data/
 ├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
 ├── create_sparse_partition_pushdown_test.py # Creates: sparse_partition_pushdown.h5
 ├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
+├── create_h5_tree_traversal_hint_bug.py # Creates: h5_tree_traversal_hint_bug.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │
 ├── simple.h5                          # Generated files (in .gitignore)

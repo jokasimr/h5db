@@ -1,0 +1,198 @@
+# name: test/sql/h5_ls.test
+# description: h5_ls scalar and table functions
+# group: [sql]
+
+require h5db
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'dataset')
+FROM h5_ls('test/data/links.h5', '/');
+----
+10	2
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'dataset')
+FROM h5_ls('test/data/links.h5');
+----
+10	2
+
+query TI
+SELECT path, attr
+FROM h5_ls('test/data/links.h5', '/group', h5_attr('attr', -1::INTEGER))
+ORDER BY path;
+----
+/group/data	7
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE attr = 13)
+FROM h5_ls('test/data/links.h5', h5_attr('attr', -1::INTEGER));
+----
+10	1
+
+query I
+SELECT cardinality(h5_ls('test/data/links.h5', '/'));
+----
+10
+
+query TTI
+SELECT
+    struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/'), 'named_int32'), 'path'),
+    struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/'), 'named_int32'), 'type'),
+    struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/', h5_attr('attr', -1::INTEGER)), 'named_int32'), 'attr');
+----
+/named_int32	datatype	13
+
+query I
+SELECT struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/', h5_attr('attr', -1::INTEGER)), 'external_link'), 'attr');
+----
+-1
+
+query TI
+WITH paths(path) AS (
+    VALUES ('/'), ('/group')
+)
+SELECT
+    path,
+    cardinality(h5_ls('test/data/links.h5', path))
+FROM paths
+ORDER BY path;
+----
+/	10
+/group	1
+
+query TII
+WITH paths(path) AS (
+    VALUES ('/'), ('/group')
+)
+SELECT
+    path,
+    struct_extract(map_extract_value(h5_ls('test/data/links.h5', path, h5_attr('attr', -1::INTEGER)), 'named_int32'), 'attr'),
+    struct_extract(map_extract_value(h5_ls('test/data/links.h5', path, h5_attr('attr', -1::INTEGER)), 'data'), 'attr')
+FROM paths
+ORDER BY path;
+----
+/	13	NULL
+/group	NULL	7
+
+query TIIII
+WITH roots AS (
+    SELECT
+        path AS root_path,
+        regexp_extract(path, '^/([^/]+)$', 1) AS root_name,
+        CASE
+            WHEN path LIKE '/type_%' THEN 'typed'
+            WHEN path LIKE '%chunk%' THEN 'chunk'
+            ELSE 'other'
+        END AS category
+    FROM h5_ls('test/data/rse_edge_cases.h5')
+),
+descendants AS (
+    SELECT
+        regexp_extract(path, '^/([^/]+)', 1) AS root_name,
+        COUNT(*) FILTER (WHERE type = 'dataset') AS dataset_count,
+        COUNT(*) FILTER (WHERE dtype = 'string') AS string_dataset_count,
+        COUNT(*) FILTER (WHERE path LIKE '%/values') AS values_leaf_count
+    FROM h5_tree('test/data/rse_edge_cases.h5')
+    WHERE path <> '/'
+    GROUP BY 1
+)
+SELECT
+    category,
+    COUNT(*),
+    SUM(dataset_count),
+    SUM(string_dataset_count),
+    SUM(values_leaf_count)
+FROM roots
+JOIN descendants USING (root_name)
+GROUP BY category
+ORDER BY category;
+----
+chunk	10	30	0	10
+other	8	24	2	8
+typed	5	15	1	5
+
+query TIIII
+WITH roots AS (
+    SELECT
+        path,
+        CASE
+            WHEN path LIKE '/type_%' THEN 'typed'
+            WHEN path LIKE '%chunk%' THEN 'chunk'
+            ELSE 'other'
+        END AS category,
+        cardinality(h5_ls('test/data/rse_edge_cases.h5', path)) AS child_count
+    FROM h5_ls('test/data/rse_edge_cases.h5')
+),
+tree_rollup AS (
+    SELECT
+        CASE
+            WHEN regexp_extract(path, '^/([^/]+)', 1) LIKE 'type_%' THEN 'typed'
+            WHEN regexp_extract(path, '^/([^/]+)', 1) LIKE '%chunk%' THEN 'chunk'
+            ELSE 'other'
+        END AS category,
+        COUNT(*) FILTER (WHERE path LIKE '%/run_starts') AS run_starts_count,
+        COUNT(*) FILTER (WHERE path LIKE '%/values') AS values_count
+    FROM h5_tree('test/data/rse_edge_cases.h5')
+    WHERE path LIKE '/%/%'
+    GROUP BY 1
+)
+SELECT
+    roots.category,
+    COUNT(*),
+    SUM(child_count),
+    MAX(run_starts_count),
+    MAX(values_count)
+FROM roots
+JOIN tree_rollup USING (category)
+GROUP BY roots.category
+ORDER BY roots.category;
+----
+chunk	10	30	10	10
+other	8	24	8	8
+typed	5	15	5	5
+
+query I
+SELECT COUNT(*)
+FROM h5_ls('test/data/attrs_edge_cases.h5', '/empty_group');
+----
+0
+
+query I
+SELECT cardinality(h5_ls('test/data/attrs_edge_cases.h5', '/empty_group'));
+----
+0
+
+statement error
+SELECT * FROM h5_ls('test/data/links.h5', '/does_not_exist');
+----
+IO Error: Failed to open object: /does_not_exist
+
+statement error
+SELECT * FROM h5_ls('test/data/links.h5', NULL);
+----
+Invalid Input Error: h5_ls path must not be NULL
+
+statement error
+SELECT * FROM h5_ls('test/data/links.h5', NULL::VARCHAR);
+----
+Invalid Input Error: h5_ls path must not be NULL
+
+statement error
+SELECT h5_ls('test/data/links.h5', '/does_not_exist');
+----
+IO Error: Failed to open object: /does_not_exist
+
+statement error
+SELECT h5_ls('test/data/swmr_enabled.h5', '/', swmr := true);
+----
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
+
+statement error
+SELECT * FROM h5_ls('test/data/links.h5', '/group/data');
+----
+IO Error: Object is not a group: /group/data
+
+statement error
+SELECT h5_ls('test/data/links.h5', '/group/data');
+----
+IO Error: Object is not a group: /group/data

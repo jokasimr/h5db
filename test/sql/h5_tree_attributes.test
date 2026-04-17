@@ -70,6 +70,26 @@ FROM h5_tree(
 ----
 3
 
+query TI
+SELECT path, attr
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/named_int32';
+----
+/named_int32	13
+
+query TI
+SELECT path, root_number
+FROM h5_tree(
+    'test/data/root_attrs.h5',
+    h5_attr('root_number', NULL::INTEGER)
+)
+WHERE path = '/';
+----
+/	7
+
 query IIIIII
 SELECT
     COUNT(*) FILTER (WHERE string_attr = 'Hello HDF5!'),

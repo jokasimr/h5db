@@ -72,6 +72,16 @@ SELECT attr FROM h5_attributes('test/data/swmr_disabled.h5', '/data', swmr := tr
 ----
 42
 
+query I
+SELECT COUNT(*) FROM h5_ls('test/data/swmr_enabled.h5', swmr := true);
+----
+1
+
+query I
+SELECT COUNT(*) FROM h5_ls('test/data/swmr_disabled.h5', swmr := true);
+----
+1
+
 # =============================================================================
 # Default setting
 # =============================================================================
@@ -108,3 +118,33 @@ query I
 SELECT attr FROM h5_attributes('test/data/swmr_disabled.h5', '/data');
 ----
 42
+
+query I
+SELECT COUNT(*) FROM h5_ls('test/data/swmr_enabled.h5');
+----
+1
+
+query I
+SELECT COUNT(*) FROM h5_ls('test/data/swmr_disabled.h5');
+----
+1
+
+query I
+SELECT cardinality(h5_ls('test/data/swmr_enabled.h5', '/'));
+----
+1
+
+query I
+SELECT cardinality(h5_ls('test/data/swmr_disabled.h5', '/'));
+----
+1
+
+query I
+SELECT cardinality(h5_ls_swmr('test/data/swmr_enabled.h5', '/'));
+----
+1
+
+query I
+SELECT cardinality(h5_ls_swmr('test/data/swmr_disabled.h5', '/'));
+----
+1

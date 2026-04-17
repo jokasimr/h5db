@@ -28,6 +28,9 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &d
 // Table function for listing HDF5 file contents
 void RegisterH5TreeFunction(ExtensionLoader &loader);
 
+// Scalar and table functions for listing immediate HDF5 group contents
+void RegisterH5LsFunctions(ExtensionLoader &loader);
+
 // Table function for reading HDF5 datasets
 void RegisterH5ReadFunction(ExtensionLoader &loader);
 

@@ -1,0 +1,154 @@
+# name: test/sql/h5_tree_filters.test
+# description: filter coverage for h5_tree
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# Residual filters over projected attributes
+# =============================================================================
+
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('renamed_int', h5_attr('group_int_attr', -1::BIGINT))
+)
+WHERE path = '/group_with_attrs' AND renamed_int = 999;
+----
+/group_with_attrs
+
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND attr = 7 AND attr IS NOT NULL;
+----
+/soft_link
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE string_attr IS NULL),
+    COUNT(*) FILTER (WHERE missing_attr IS NOT NULL)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+);
+----
+2	3
+
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs' AND (string_attr = 'Hello HDF5!' OR missing_attr = 'fallback');
+----
+/dataset_with_attrs
+
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE path = '/soft_link' AND (dtype = 'int32' OR attr = 7);
+----
+/soft_link
+
+# =============================================================================
+# Built-in residual filters
+# =============================================================================
+
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE dtype = 'int32'
+ORDER BY path;
+----
+/cycle_root/cycle_data
+/group/data
+/hard_group/data
+/hard_link
+/soft_group/data
+/soft_link
+
+query T
+SELECT type
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/dangling_link';
+----
+link
+
+query T
+SELECT path
+FROM h5_tree('test/data/links.h5')
+WHERE path = '/soft_link' AND type = 'dataset' AND dtype = 'int32';
+----
+/soft_link
+
+# =============================================================================
+# Residual filters composed with larger queries
+# =============================================================================
+
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr('attr', NULL::INTEGER)
+)
+WHERE prefix(path, '/soft') AND type = 'dataset' AND attr = 7
+ORDER BY path;
+----
+/soft_group/data
+/soft_link
+
+query TI
+SELECT group_int_attr, COUNT(*)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+)
+WHERE missing_attr = 'fallback'
+GROUP BY group_int_attr
+ORDER BY group_int_attr;
+----
+-1	2
+999	1
+
+query T
+SELECT t.path
+FROM h5_tree('test/data/links.h5') t
+JOIN (
+    SELECT '/soft_link' AS path
+    UNION ALL
+    SELECT '/external_link' AS path
+) wanted USING (path)
+WHERE dtype = 'int32'
+ORDER BY t.path;
+----
+/soft_link
+
+query TT
+SELECT t.path, t.group_string_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('missing_attr', 'fallback'::VARCHAR),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+) t
+JOIN (
+    SELECT '/dataset_with_attrs' AS path
+    UNION ALL
+    SELECT '/group_with_attrs' AS path
+) wanted USING (path)
+WHERE missing_attr = 'fallback'
+ORDER BY t.path;
+----
+/dataset_with_attrs	unused
+/group_with_attrs	I am a group

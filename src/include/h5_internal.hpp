@@ -25,6 +25,8 @@ static constexpr const char *H5DB_MAX_BATCH_SIZE_SETTING = "1GB";
 // Resolve SWMR read mode from named parameters or default setting.
 // Named parameter "swmr" takes precedence over h5db_swmr_default.
 bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters);
+std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,
+                                      const std::string &argument_name);
 
 // Parse and validate h5db batch size from a VARCHAR setting value.
 // Invalid inputs throw InvalidInputException.
