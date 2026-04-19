@@ -31,6 +31,12 @@ def main():
         f.create_dataset('/float_rse_starts', data=run_starts)
         f.create_dataset('/float_rse_values', data=values_float)
 
+        # RSE with float values including NaN
+        # Rows 0-199: 1.5, 200-399: 2.5, 400-599: NaN, 600-799: 4.5, 800-999: 5.5
+        values_float_nan = np.array([1.5, 2.5, np.nan, 4.5, 5.5], dtype=np.float32)
+        f.create_dataset('/float_nan_rse_starts', data=run_starts)
+        f.create_dataset('/float_nan_rse_values', data=values_float_nan)
+
         # RSE with int64 values (sorted)
         values_int64 = np.array([100, 200, 300, 400, 500], dtype=np.int64)
         f.create_dataset('/int64_rse_starts', data=run_starts)
@@ -60,6 +66,7 @@ def main():
     print("  - Sorted int32 RSE column (values: 10, 20, 30, 40, 50)")
     print("  - Unsorted int32 RSE column (values: 50, 10, 30, 20, 40)")
     print("  - Sorted float32 RSE column (values: 1.5, 2.5, 3.5, 4.5, 5.5)")
+    print("  - Float32 RSE column with NaN (values: 1.5, 2.5, NaN, 4.5, 5.5)")
     print("  - Sorted int64 RSE column (values: 100, 200, 300, 400, 500)")
     print("  - String RSE column (not optimized)")
     print("  - Leading NULL int32 RSE column (rows 0-99 NULL, 100-299:10, 300-699:20, 700-999:30)")

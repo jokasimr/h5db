@@ -19,6 +19,7 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/common/value_operations/value_operations.hpp"
@@ -195,6 +196,7 @@ struct ClaimedFilter {
 	idx_t column_index;        // Which column (index into bind_data.columns)
 	ExpressionType comparison; // Comparison type (>, <, =, >=, <=)
 	Value constant;            // The constant value to compare against
+	LogicalType comparison_type;
 };
 
 // Data for h5_read table function
@@ -509,135 +511,116 @@ static idx_t AdjustPositionDoneForRanges(const std::vector<RowRange> &ranges, id
 	return position_done;
 }
 
-static vector<RowRange> BuildIndexRanges(const vector<pair<ExpressionType, Value>> &filters, idx_t num_rows) {
-	int64_t start = 0;
-	int64_t end = static_cast<int64_t>(num_rows);
+static bool EvaluateValueComparison(const Value &value, ExpressionType comparison, const Value &filter_val,
+                                    const LogicalType &comparison_type);
+static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vector<RowRange> &b);
 
-	for (const auto &filter : filters) {
-		auto comparison = filter.first;
-		int64_t value = filter.second.GetValue<int64_t>();
-		int64_t value_plus_one = (value == std::numeric_limits<int64_t>::max()) ? value : value + 1;
+static vector<RowRange> BuildIndexRanges(const vector<ClaimedFilter> &filters, idx_t num_rows) {
+	auto evaluate_index_filter = [](idx_t index, const ClaimedFilter &filter) {
+		return EvaluateValueComparison(Value::BIGINT(static_cast<int64_t>(index)), filter.comparison, filter.constant,
+		                               filter.comparison_type);
+	};
 
-		switch (comparison) {
-		case ExpressionType::COMPARE_EQUAL:
-			start = std::max(start, value);
-			end = std::min(end, value_plus_one);
-			break;
+	auto build_single_filter_ranges = [&](const ClaimedFilter &filter) -> vector<RowRange> {
+		auto find_first_true = [&](ExpressionType comparison) -> idx_t {
+			idx_t lo = 0;
+			idx_t hi = num_rows;
+			ClaimedFilter temp_filter = filter;
+			temp_filter.comparison = comparison;
+			while (lo < hi) {
+				idx_t mid = lo + (hi - lo) / 2;
+				if (evaluate_index_filter(mid, temp_filter)) {
+					hi = mid;
+				} else {
+					lo = mid + 1;
+				}
+			}
+			return lo;
+		};
+
+		auto find_first_false = [&](ExpressionType comparison) -> idx_t {
+			idx_t lo = 0;
+			idx_t hi = num_rows;
+			ClaimedFilter temp_filter = filter;
+			temp_filter.comparison = comparison;
+			while (lo < hi) {
+				idx_t mid = lo + (hi - lo) / 2;
+				if (evaluate_index_filter(mid, temp_filter)) {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			return lo;
+		};
+
+		switch (filter.comparison) {
+		case ExpressionType::COMPARE_EQUAL: {
+			auto start = find_first_true(ExpressionType::COMPARE_GREATERTHANOREQUALTO);
+			auto end = find_first_false(ExpressionType::COMPARE_LESSTHANOREQUALTO);
+			if (start >= end) {
+				return {};
+			}
+			return {{start, end}};
+		}
 		case ExpressionType::COMPARE_GREATERTHAN:
-			start = std::max(start, value_plus_one);
-			break;
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			start = std::max(start, value);
-			break;
+		case ExpressionType::COMPARE_GREATERTHANOREQUALTO: {
+			auto start = find_first_true(filter.comparison);
+			if (start >= num_rows) {
+				return {};
+			}
+			return {{start, num_rows}};
+		}
 		case ExpressionType::COMPARE_LESSTHAN:
-			end = std::min(end, value);
-			break;
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			end = std::min(end, value_plus_one);
-			break;
+		case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
+			auto end = find_first_false(filter.comparison);
+			if (end == 0) {
+				return {};
+			}
+			return {{0, end}};
+		}
 		default:
+			return {};
+		}
+	};
+
+	vector<RowRange> result = {{0, num_rows}};
+	for (const auto &filter : filters) {
+		result = IntersectRowRanges(result, build_single_filter_ranges(filter));
+		if (result.empty()) {
 			break;
 		}
 	}
-
-	start = std::max<int64_t>(0, start);
-	end = std::min<int64_t>(end, static_cast<int64_t>(num_rows));
-
-	if (end <= start) {
-		return {};
-	}
-
-	return {{static_cast<idx_t>(start), static_cast<idx_t>(end)}};
+	return result;
 }
 
-static bool EvaluateValueComparison(const Value &value, ExpressionType comparison, const Value &filter_val) {
+static bool EvaluateValueComparison(const Value &value, ExpressionType comparison, const Value &filter_val,
+                                    const LogicalType &comparison_type) {
+	Value lhs = value;
+	Value rhs = filter_val;
+	if (comparison_type.IsValid()) {
+		if (!lhs.DefaultTryCastAs(comparison_type, true) || !rhs.DefaultTryCastAs(comparison_type, true)) {
+			return false;
+		}
+	}
 	switch (comparison) {
 	case ExpressionType::COMPARE_EQUAL:
-		return ValueOperations::Equals(value, filter_val);
+		return ValueOperations::Equals(lhs, rhs);
 	case ExpressionType::COMPARE_GREATERTHAN:
-		return ValueOperations::GreaterThan(value, filter_val);
+		return ValueOperations::GreaterThan(lhs, rhs);
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return ValueOperations::GreaterThanEquals(value, filter_val);
+		return ValueOperations::GreaterThanEquals(lhs, rhs);
 	case ExpressionType::COMPARE_LESSTHAN:
-		return ValueOperations::LessThan(value, filter_val);
+		return ValueOperations::LessThan(lhs, rhs);
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return ValueOperations::LessThanEquals(value, filter_val);
-	default:
-		return false;
-	}
-}
-
-static bool TryGetIndexFilterValue(const Value &value, int64_t &out) {
-	if (value.IsNull()) {
-		return false;
-	}
-	switch (value.type().id()) {
-	case LogicalTypeId::FLOAT: {
-		auto val = value.GetValue<float>();
-		if (!std::isfinite(val)) {
-			return false;
-		}
-		double integral = 0.0;
-		if (std::modf(static_cast<double>(val), &integral) != 0.0) {
-			return false;
-		}
-		if (integral < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
-		    integral > static_cast<double>(std::numeric_limits<int64_t>::max())) {
-			return false;
-		}
-		out = static_cast<int64_t>(integral);
-		return true;
-	}
-	case LogicalTypeId::DOUBLE: {
-		auto val = value.GetValue<double>();
-		if (!std::isfinite(val)) {
-			return false;
-		}
-		double integral = 0.0;
-		if (std::modf(val, &integral) != 0.0) {
-			return false;
-		}
-		if (integral < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
-		    integral > static_cast<double>(std::numeric_limits<int64_t>::max())) {
-			return false;
-		}
-		out = static_cast<int64_t>(integral);
-		return true;
-	}
-	case LogicalTypeId::TINYINT:
-	case LogicalTypeId::SMALLINT:
-	case LogicalTypeId::INTEGER:
-	case LogicalTypeId::BIGINT:
-	case LogicalTypeId::UTINYINT:
-	case LogicalTypeId::USMALLINT:
-	case LogicalTypeId::UINTEGER:
-	case LogicalTypeId::UBIGINT: {
-		Value cast_value = value;
-		if (!cast_value.DefaultTryCastAs(LogicalType::BIGINT, true)) {
-			return false;
-		}
-		out = cast_value.GetValue<int64_t>();
-		return true;
-	}
-	case LogicalTypeId::HUGEINT:
-	case LogicalTypeId::UHUGEINT:
-	case LogicalTypeId::DECIMAL:
-	case LogicalTypeId::INTEGER_LITERAL: {
-		Value cast_value = value;
-		if (!cast_value.DefaultTryCastAs(LogicalType::BIGINT, true)) {
-			return false;
-		}
-		out = cast_value.GetValue<int64_t>();
-		return true;
-	}
+		return ValueOperations::LessThanEquals(lhs, rhs);
 	default:
 		return false;
 	}
 }
 
 static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, const RSEColumnState &rse_state,
-                                                const vector<pair<ExpressionType, Value>> &col_filters,
-                                                hsize_t num_rows) {
+                                                const vector<ClaimedFilter> &col_filters, hsize_t num_rows) {
 	return DispatchOnDuckDBType(rse_spec.column_type, [&](auto type_tag) -> vector<RowRange> {
 		using T = typename decltype(type_tag)::type;
 		auto &typed_values = std::get<std::vector<T>>(rse_state.values);
@@ -659,8 +642,8 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 
 			// Check if this run's value satisfies ALL filters
 			bool satisfies_all = true;
-			for (const auto &[comparison, filter_val] : col_filters) {
-				if (!EvaluateValueComparison(run_value, comparison, filter_val)) {
+			for (const auto &filter : col_filters) {
+				if (!EvaluateValueComparison(run_value, filter.comparison, filter.constant, filter.comparison_type)) {
 					satisfies_all = false;
 					break;
 				}
@@ -1010,8 +993,7 @@ static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vect
 	return result;
 }
 
-static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx,
-                                             const vector<pair<ExpressionType, Value>> &col_filters,
+static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx, const vector<ClaimedFilter> &col_filters,
                                              const H5ReadBindData &bind_data, const H5ReadGlobalState &gstate) {
 	if (std::holds_alternative<RSEColumnSpec>(bind_data.columns[global_idx])) {
 		LocalColumnIdx local_idx = GlobalToLocal(gstate, global_idx);
@@ -1251,9 +1233,9 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
 	// Group claimed filters by column
-	unordered_map<idx_t, vector<pair<ExpressionType, Value>>> filters_by_column;
+	unordered_map<idx_t, vector<ClaimedFilter>> filters_by_column;
 	for (const auto &filter : bind_data.claimed_filters) {
-		filters_by_column[filter.column_index].push_back({filter.comparison, filter.constant});
+		filters_by_column[filter.column_index].push_back(filter);
 	}
 
 	// If we have filters on RSE or index columns, compute row ranges
@@ -1302,6 +1284,22 @@ static ExpressionType FlipComparison(ExpressionType type) {
 	}
 }
 
+static const BoundColumnRefExpression *ExtractPushdownColumnRef(const Expression &expr, LogicalType &comparison_type) {
+	comparison_type = expr.return_type;
+	const Expression *current = &expr;
+	while (current->expression_class == ExpressionClass::BOUND_CAST) {
+		auto &cast = current->Cast<BoundCastExpression>();
+		if (cast.try_cast) {
+			return nullptr;
+		}
+		current = cast.child.get();
+	}
+	if (current->expression_class != ExpressionClass::BOUND_COLUMN_REF) {
+		return nullptr;
+	}
+	return &current->Cast<BoundColumnRefExpression>();
+}
+
 // Helper: Try to claim a filter on an RSE or index column
 template <typename TableIndexT>
 static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const TableIndexT &table_index,
@@ -1314,17 +1312,16 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 
 		const BoundColumnRefExpression *colref = nullptr;
 		const BoundConstantExpression *constant = nullptr;
+		LogicalType comparison_type;
 		bool need_flip = false;
 
 		// Determine which side is the column and which is the constant
-		if (comp.left->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
-		    comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			colref = &comp.left->Cast<BoundColumnRefExpression>();
+		if (comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
+			colref = ExtractPushdownColumnRef(*comp.left, comparison_type);
 			constant = &comp.right->Cast<BoundConstantExpression>();
 			need_flip = false; // col > 10 is already in correct order
-		} else if (comp.left->expression_class == ExpressionClass::BOUND_CONSTANT &&
-		           comp.right->expression_class == ExpressionClass::BOUND_COLUMN_REF) {
-			colref = &comp.right->Cast<BoundColumnRefExpression>();
+		} else if (comp.left->expression_class == ExpressionClass::BOUND_CONSTANT) {
+			colref = ExtractPushdownColumnRef(*comp.right, comparison_type);
 			constant = &comp.left->Cast<BoundConstantExpression>();
 			need_flip = true; // 10 < col needs to become col > 10
 		}
@@ -1350,18 +1347,15 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 					case ExpressionType::COMPARE_LESSTHAN:
 					case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
 						Value constant_value = constant->value;
-						if (is_index) {
-							int64_t index_value = 0;
-							if (!TryGetIndexFilterValue(constant->value, index_value)) {
-								return false;
-							}
-							constant_value = Value::BIGINT(index_value);
+						if (is_index && constant->value.IsNull()) {
+							return false;
 						}
 						// These we can optimize - claim the filter
 						ClaimedFilter filter;
 						filter.column_index = bind_data_col_idx;
 						filter.comparison = comparison;
 						filter.constant = std::move(constant_value);
+						filter.comparison_type = comparison_type;
 						claimed.push_back(filter);
 						return true;
 					}
@@ -1378,18 +1372,18 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 	// Handle BETWEEN: col BETWEEN lower AND upper
 	if (expr->expression_class == ExpressionClass::BOUND_BETWEEN) {
 		auto &between = expr->Cast<BoundBetweenExpression>();
+		LogicalType comparison_type;
+		auto *colref = ExtractPushdownColumnRef(*between.input, comparison_type);
 
 		// Check if input is an RSE column reference
-		if (between.input->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
-		    between.lower->expression_class == ExpressionClass::BOUND_CONSTANT &&
+		if (colref && between.lower->expression_class == ExpressionClass::BOUND_CONSTANT &&
 		    between.upper->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			auto &colref = between.input->Cast<BoundColumnRefExpression>();
 			auto &lower_const = between.lower->Cast<BoundConstantExpression>();
 			auto &upper_const = between.upper->Cast<BoundConstantExpression>();
 
-			if (colref.binding.table_index == table_index) {
+			if (colref->binding.table_index == table_index) {
 				// Map from LogicalGet column index to bind_data column index
-				auto it = get_to_bind_map.find(colref.binding.column_index);
+				auto it = get_to_bind_map.find(colref->binding.column_index);
 				if (it != get_to_bind_map.end()) {
 					idx_t bind_data_col_idx = it->second;
 
@@ -1398,27 +1392,22 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 						const bool is_index = std::holds_alternative<IndexColumnSpec>(columns[bind_data_col_idx]);
 						Value lower_value = lower_const.value;
 						Value upper_value = upper_const.value;
-						if (is_index) {
-							int64_t lower_index = 0;
-							int64_t upper_index = 0;
-							if (!TryGetIndexFilterValue(lower_const.value, lower_index) ||
-							    !TryGetIndexFilterValue(upper_const.value, upper_index)) {
-								return false;
-							}
-							lower_value = Value::BIGINT(lower_index);
-							upper_value = Value::BIGINT(upper_index);
+						if (is_index && (lower_const.value.IsNull() || upper_const.value.IsNull())) {
+							return false;
 						}
 						// Claim BETWEEN as two filters: col >= lower AND col <= upper
 						ClaimedFilter lower_filter;
 						lower_filter.column_index = bind_data_col_idx;
 						lower_filter.comparison = ExpressionType::COMPARE_GREATERTHANOREQUALTO;
 						lower_filter.constant = std::move(lower_value);
+						lower_filter.comparison_type = comparison_type;
 						claimed.push_back(lower_filter);
 
 						ClaimedFilter upper_filter;
 						upper_filter.column_index = bind_data_col_idx;
 						upper_filter.comparison = ExpressionType::COMPARE_LESSTHANOREQUALTO;
 						upper_filter.constant = std::move(upper_value);
+						upper_filter.comparison_type = comparison_type;
 						claimed.push_back(upper_filter);
 
 						return true; // Indicate we claimed this filter
