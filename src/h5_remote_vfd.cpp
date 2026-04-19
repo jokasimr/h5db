@@ -1,21 +1,16 @@
 #include "h5_remote_vfd.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/file_open_flags.hpp"
-#include "duckdb/common/file_system.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/storage/caching_file_system.hpp"
-#include "duckdb/storage/buffer/block_handle.hpp"
-#include "duckdb/storage/buffer/buffer_handle.hpp"
-#include "duckdb/storage/buffer_manager.hpp"
 #include "h5_internal.hpp"
+#include "h5_remote_backend.hpp"
 
 #include <hdf5.h>
 #include <H5FDdevelop.h>
 #include <cstring>
+#include <list>
 #include <mutex>
 #include <unordered_map>
-#include <list>
+#include <vector>
 
 namespace duckdb {
 
@@ -34,15 +29,13 @@ struct DuckDBVFDConfig {
 
 struct H5FD_duckdb_t : public H5FD_t {
 	struct CachedBlock {
-		shared_ptr<BlockHandle> block_handle;
-		idx_t buffer_offset = 0;
+		std::vector<char> data;
 		idx_t valid_bytes = 0;
 		std::list<idx_t>::iterator lru_it;
 	};
 	using CachedBlockMap = std::unordered_map<idx_t, CachedBlock>;
 
-	unique_ptr<CachingFileSystem> caching_fs;
-	unique_ptr<CachingFileHandle> handle;
+	unique_ptr<H5RemoteBackend> backend;
 	ClientContext *context = nullptr;
 	std::string path;
 	haddr_t eof;
@@ -115,35 +108,21 @@ static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t bl
 	if (bytes_to_read == 0) {
 		throw IOException("Failed to load remote cache block: zero bytes available");
 	}
-	if (!file.handle) {
-		throw IOException("Failed to load remote cache block: no readable file handle");
+	if (!file.backend) {
+		throw IOException("Failed to load remote cache block: no readable backend");
 	}
 
 	ThrowIfContextInterrupted(file.context);
-	data_ptr_t buffer = nullptr;
-	auto pinned_buffer = file.handle->Read(buffer, bytes_to_read, block_offset);
-	ThrowIfContextInterrupted(file.context);
 	H5FD_duckdb_t::CachedBlock block;
-	block.block_handle = pinned_buffer.GetBlockHandle();
-	if (!block.block_handle) {
-		throw IOException("Failed to load remote cache block: invalid block handle");
-	}
-	block.buffer_offset = UnsafeNumericCast<idx_t>(buffer - pinned_buffer.Ptr());
+	block.data.resize(bytes_to_read);
+	file.backend->Read(block_offset, bytes_to_read, block.data.data());
+	ThrowIfContextInterrupted(file.context);
 	block.valid_bytes = bytes_to_read;
 	file.cache_lru.push_front(block_id);
 	block.lru_it = file.cache_lru.begin();
 
 	auto inserted = file.cached_blocks.emplace(block_id, std::move(block));
 	return inserted.first->second;
-}
-
-static void CopyFromCachedBlock(H5FD_duckdb_t &file, H5FD_duckdb_t::CachedBlock &block, idx_t offset_in_block,
-                                char *out, idx_t to_copy) {
-	if (!block.block_handle) {
-		throw IOException("Failed to read remote cache block: invalid block handle");
-	}
-	auto pinned_block = block.block_handle->GetMemory().GetBufferManager().Pin(block.block_handle);
-	std::memcpy(out, pinned_block.Ptr() + block.buffer_offset + offset_in_block, to_copy);
 }
 
 static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
@@ -161,7 +140,7 @@ static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t rea
 		}
 		auto bytes_in_block = block.valid_bytes - offset_in_block;
 		auto to_copy = MinValue<idx_t>(remaining, bytes_in_block);
-		CopyFromCachedBlock(file, block, offset_in_block, out, to_copy);
+		std::memcpy(out, block.data.data() + offset_in_block, to_copy);
 		out += to_copy;
 		current_offset += to_copy;
 		remaining -= to_copy;
@@ -170,17 +149,12 @@ static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t rea
 }
 
 static void ReadExact(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
-	if (!file.handle) {
-		throw IOException("Failed to read remote data: no readable file handle");
+	if (!file.backend) {
+		throw IOException("Failed to read remote data: no readable backend");
 	}
 	ThrowIfContextInterrupted(file.context);
-	data_ptr_t buffer = nullptr;
-	auto pinned_buffer = file.handle->Read(buffer, read_size, read_offset);
+	file.backend->Read(read_offset, read_size, buf);
 	ThrowIfContextInterrupted(file.context);
-	if (!pinned_buffer.IsValid() || !buffer) {
-		throw IOException("Failed to read remote data: invalid cached buffer");
-	}
-	std::memcpy(buf, buffer, read_size);
 }
 
 static void *DuckDBFAPLCopy(const void *fapl) {
@@ -217,13 +191,10 @@ static H5FD_t *DuckDBOpen(const char *name, unsigned flags, hid_t fapl_id, haddr
 	try {
 		ThrowIfContextInterrupted(context);
 		auto file = make_uniq<H5FD_duckdb_t>();
-		file->caching_fs = make_uniq<CachingFileSystem>(CachingFileSystem::Get(*context));
-		OpenFileInfo open_info(name);
-		file->handle = file->caching_fs->OpenFile(QueryContext(*context), open_info,
-		                                          FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+		file->backend = OpenH5RemoteBackend(*context, name);
 		file->context = context;
 		file->path = name;
-		file->eof = static_cast<haddr_t>(file->handle->GetFileSize());
+		file->eof = static_cast<haddr_t>(file->backend->GetFileSize());
 		file->eoa = file->eof;
 		ClearLastErrorInternal();
 		return reinterpret_cast<H5FD_t *>(file.release());
@@ -237,7 +208,7 @@ static H5FD_t *DuckDBOpen(const char *name, unsigned flags, hid_t fapl_id, haddr
 		SetLastError(ex.what());
 		return nullptr;
 	} catch (...) {
-		SetLastError("Unknown error opening remote file through DuckDB httpfs");
+		SetLastError("Unknown error opening remote file through h5db remote backend");
 		return nullptr;
 	}
 }
@@ -282,7 +253,7 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 	}
 
 	auto *f = GetFile(file);
-	if (!f || !f->handle || !buf) {
+	if (!f || !f->backend || !buf) {
 		return -1;
 	}
 
@@ -313,7 +284,7 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 		SetLastError(ex.what());
 		return -1;
 	} catch (...) {
-		SetLastError("Unknown error reading remote file through DuckDB httpfs");
+		SetLastError("Unknown error reading remote file through h5db remote backend");
 		return -1;
 	}
 }
@@ -341,7 +312,7 @@ static const H5FD_class_t &DuckDBVFDClass() {
 		memset(&cls, 0, sizeof(cls));
 		cls.version = H5FD_CLASS_VERSION;
 		cls.value = DUCKDB_VFD_VALUE;
-		cls.name = "duckdb_httpfs";
+		cls.name = "h5db_remote";
 		cls.maxaddr = HADDR_MAX;
 		cls.fc_degree = H5F_CLOSE_WEAK;
 		cls.fapl_size = sizeof(DuckDBVFDConfig);
@@ -370,19 +341,21 @@ static hid_t GetDriver() {
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		duckdb_vfd_driver_id = H5FDregister(&DuckDBVFDClass());
 		if (duckdb_vfd_driver_id < 0) {
-			throw IOException("Failed to register DuckDB HTTPFS HDF5 VFD");
+			throw IOException("Failed to register h5db remote HDF5 VFD");
 		}
 	});
 	return duckdb_vfd_driver_id;
 }
 
 bool H5RemoteVFD::IsRemotePath(const std::string &path) {
-	auto lower_path = StringUtil::Lower(path);
-	return StringUtil::StartsWith(lower_path, "http://") || StringUtil::StartsWith(lower_path, "https://") ||
-	       StringUtil::StartsWith(lower_path, "s3://") || StringUtil::StartsWith(lower_path, "s3a://") ||
-	       StringUtil::StartsWith(lower_path, "s3n://") || StringUtil::StartsWith(lower_path, "r2://") ||
-	       StringUtil::StartsWith(lower_path, "gcs://") || StringUtil::StartsWith(lower_path, "gs://") ||
-	       StringUtil::StartsWith(lower_path, "hf://");
+	return IsH5RemotePath(path);
+}
+
+std::string H5RemoteVFD::GetRequiredExtension(const std::string &path) {
+	if (!IsRemotePath(path)) {
+		return "";
+	}
+	return DescribeH5RemotePath(path).required_extension;
 }
 
 void H5RemoteVFD::ConfigureFAPL(ClientContext &context, hid_t fapl_id) {
@@ -390,7 +363,7 @@ void H5RemoteVFD::ConfigureFAPL(ClientContext &context, hid_t fapl_id) {
 	config.context = &context;
 
 	if (H5Pset_driver(fapl_id, GetDriver(), &config) < 0) {
-		throw IOException("Failed to configure DuckDB HTTPFS HDF5 VFD");
+		throw IOException("Failed to configure h5db remote HDF5 VFD");
 	}
 }
 

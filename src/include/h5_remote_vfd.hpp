@@ -13,6 +13,7 @@ struct H5RemoteErrorInfo {
 class H5RemoteVFD {
 public:
 	static bool IsRemotePath(const std::string &path);
+	static std::string GetRequiredExtension(const std::string &path);
 	static void ConfigureFAPL(ClientContext &context, hid_t fapl_id);
 	static void SetOpenContext(ClientContext *context);
 	static ClientContext *GetOpenContext();

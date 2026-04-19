@@ -49,4 +49,7 @@ void RegisterH5IndexFunction(ExtensionLoader &loader);
 // Table function for reading HDF5 attributes
 void RegisterH5AttributesFunction(ExtensionLoader &loader);
 
+// Secret type/provider registration for native sftp support
+void RegisterH5SftpSecrets(ExtensionLoader &loader);
+
 } // namespace duckdb

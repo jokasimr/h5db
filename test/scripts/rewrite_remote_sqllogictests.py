@@ -9,11 +9,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", required=True, help="Output root for rewritten tests")
     p.add_argument("--base-url", required=True, help="Remote base URL that replaces test/data")
     p.add_argument(
+        "--exclude-subdir",
+        action="append",
+        default=[],
+        help="Optional subdirectory under the input root to exclude from rewriting (repeatable)",
+    )
+    p.add_argument(
         "--prepend-file",
         default="",
         help="Optional SQL file whose contents are prepended to each test file",
     )
+    p.add_argument(
+        "--prepend-after-require",
+        action="store_true",
+        help="Insert the prepend file after the first require statement instead of at the top of the file",
+    )
     return p.parse_args()
+
+
+def insert_after_first_require(text: str, prepend: str) -> str:
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip().startswith("require "):
+            return "".join(lines[: i + 1]) + "\n\n" + prepend + "".join(lines[i + 1 :])
+    return prepend + text
 
 
 def main() -> None:
@@ -21,6 +40,7 @@ def main() -> None:
     input_root = Path(args.input_root).resolve()
     output_root = Path(args.output_root).resolve()
     base = args.base_url.rstrip("/")
+    excluded_subdirs = {entry.strip("/\\") for entry in args.exclude_subdir if entry.strip("/\\")}
 
     prepend = ""
     if args.prepend_file:
@@ -28,6 +48,8 @@ def main() -> None:
 
     for src in sorted(input_root.rglob("*.test")):
         rel = src.relative_to(input_root)
+        if rel.parts and rel.parts[0] in excluded_subdirs:
+            continue
         dst = output_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -36,7 +58,10 @@ def main() -> None:
         text = text.replace("test/data/", f"{base}/")
 
         if prepend:
-            text = prepend + text
+            if args.prepend_after_require:
+                text = insert_after_first_require(text, prepend)
+            else:
+                text = prepend + text
 
         dst.write_text(text, encoding="utf-8")
 

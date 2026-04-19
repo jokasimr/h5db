@@ -13,6 +13,8 @@ else()
     find_package(HDF5 REQUIRED COMPONENTS C)
 endif()
 
+find_package(libssh2 CONFIG REQUIRED)
+
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -29,6 +31,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(EXTENSION_SOURCES
     src/h5db_extension.cpp
     src/h5_common.cpp
+    src/h5_sftp_secrets.cpp
+    src/h5_remote_backend.cpp
     src/h5_remote_vfd.cpp
     src/h5_tree_shared.cpp
     src/h5_tree.cpp
@@ -45,6 +49,8 @@ if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME} ${HDF5_C_LIBRARIES})
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${HDF5_C_LIBRARIES})
 endif()
+target_link_libraries(${EXTENSION_NAME} libssh2::libssh2)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} libssh2::libssh2)
 
 install(
   TARGETS ${EXTENSION_NAME}

@@ -1,6 +1,7 @@
 {
         "dependencies": [
-                "hdf5"
+                "hdf5",
+                "libssh2"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [

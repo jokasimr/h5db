@@ -126,7 +126,10 @@ public:
 			if (!context) {
 				throw IOException("Remote HDF5 paths require an active DuckDB context");
 			}
-			ExtensionHelper::AutoLoadExtension(*context, "httpfs");
+			auto required_extension = H5RemoteVFD::GetRequiredExtension(filename);
+			if (!required_extension.empty()) {
+				ExtensionHelper::AutoLoadExtension(*context, required_extension);
+			}
 		}
 
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);

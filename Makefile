@@ -15,6 +15,7 @@ test_release_internal:
 		echo "Skipping remote HTTP tests on macOS"; \
 	else \
 		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH); \
+		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/release/$(TEST_PATH); \
 	fi
 
 test_debug_internal:
@@ -24,6 +25,7 @@ test_debug_internal:
 		echo "Skipping remote HTTP tests on macOS"; \
 	else \
 		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH); \
+		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/debug/$(TEST_PATH); \
 	fi
 
 test_reldebug_internal:
@@ -33,7 +35,11 @@ test_reldebug_internal:
 		echo "Skipping remote HTTP tests on macOS"; \
 	else \
 		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH); \
+		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH); \
 	fi
 
 test_remote_http:
 	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh
+
+test_remote_sftp:
+	bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh

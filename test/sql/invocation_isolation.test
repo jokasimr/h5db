@@ -1,0 +1,36 @@
+# name: test/sql/invocation_isolation.test
+# description: Smoke tests for isolation between concurrent h5_* invocations
+# group: [sql]
+
+require h5db
+
+statement ok
+SET threads=4;
+
+# Same large file accessed through two separate h5_read scans in one statement.
+# This is intended as a smoke test for accidental shared state between concurrent
+# scans of the same remote/local file.
+query IR
+SELECT COUNT(*), SUM(v)
+FROM (
+  SELECT regular::DOUBLE AS v
+  FROM h5_read('test/data/large/large_pushdown_test.h5', '/regular')
+  UNION ALL
+  SELECT regular_float AS v
+  FROM h5_read('test/data/large/large_pushdown_test.h5', '/regular_float')
+);
+----
+20000000	54999994500000.0
+
+# Mixed h5_* calls on separate files in the same statement. This exercises
+# h5_read, h5_tree, h5_ls, and h5_attributes together while the large scans are
+# still active.
+query IIIII
+SELECT
+  (SELECT SUM(data2) FROM h5_read('test/data/large/large_simple.h5', '/group1/data2')) AS sum_data2,
+  (SELECT SUM(time_offset) FROM h5_read('test/data/large/large_multithreading.h5', '/detector_1/time_offset')) AS sum_time,
+  (SELECT COUNT(*) FROM h5_tree('test/data/links.h5')) AS tree_cnt,
+  (SELECT COUNT(*) FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs')) AS attr_cnt,
+  (SELECT COUNT(*) FROM UNNEST(map_values(h5_ls('test/data/links.h5', '/'))) AS t(child)) AS ls_cnt;
+----
+49999995000000	1999999200000000	17	1	10

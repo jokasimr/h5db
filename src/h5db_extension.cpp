@@ -59,6 +59,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterH5AttrFunction(loader);
 	RegisterH5IndexFunction(loader);
 	RegisterH5AttributesFunction(loader);
+	RegisterH5SftpSecrets(loader);
 }
 
 void H5dbExtension::Load(ExtensionLoader &loader) {
