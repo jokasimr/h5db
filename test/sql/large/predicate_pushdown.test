@@ -79,6 +79,224 @@ EXPLAIN ANALYZE SELECT COUNT(*) FROM h5_read(
     h5_rse('/int_rse_starts', '/int_rse_values')
 ) WHERE NOT (int_rse_values = 30);
 
+# Test: Flattened AND with two claimable RSE filters plus one regular filter
+# should push down the claimable RSE portion and scan 6,000,000 rows.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_three_and_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values > 10 AND int_rse_values < 50 AND regular > -1;
+----
+6000000
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_three_and_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 6000000'
+);
+----
+1
+
+# Test: Chained AND on one RSE column mixing BETWEEN and strict comparisons
+# BETWEEN [20,40] plus > 20 and < 40 narrows to the single 30 run.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_chain_same_rse_profile.json';
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values BETWEEN 20 AND 40
+  AND int_rse_values > 20
+  AND int_rse_values < 40
+  AND regular > -1;
+----
+2000000	4000000	5999999
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_chain_same_rse_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 2000000'
+);
+----
+1
+
+# Test: Chained AND across multiple RSE columns with mixed operators
+# int 30-40, float 3.5-4.5, int64 300-400 align to rows 4,000,000-7,999,999.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_chain_multi_rse_profile.json';
+
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values'),
+    h5_rse('/int64_rse_starts', '/int64_rse_values')
+)
+WHERE int_rse_values >= 30
+  AND int_rse_values <= 40
+  AND float_rse_values BETWEEN 3.5 AND 4.5
+  AND int64_rse_values > 250
+  AND int64_rse_values < 450
+  AND regular > -1;
+----
+4000000	4000000	7999999
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_chain_multi_rse_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 4000000'
+);
+----
+1
+
+# Test: Chained AND across RSE and index columns
+# RSE rows 2,000,000-9,999,999 intersected with index [3,500,000, 6,499,999].
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_chain_rse_index_profile.json';
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    h5_index(),
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values BETWEEN 20 AND 50
+  AND index >= 3500000
+  AND index < 6500000
+  AND regular > -1;
+----
+3000000	3500000	6499999
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_chain_rse_index_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 3000000'
+);
+----
+1
+
+# Test: Tight chained AND with equality, BETWEEN and index bounds
+# Intersection is rows 4,500,000-5,000,000 inclusive.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_chain_tight_profile.json';
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    h5_index(),
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+)
+WHERE int_rse_values = 30
+  AND float_rse_values BETWEEN 3.5 AND 3.5
+  AND index >= 4500000
+  AND index <= 5000000
+  AND regular BETWEEN 4500000 AND 5000000;
+----
+500001	4500000	5000000
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_chain_tight_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 500001'
+);
+----
+1
+
+# Test: Empty intersection from chained AND across RSE, index and regular filters
+# int=20 and float=3.5 have no overlapping rows, so H5_READ should produce zero rows.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='/tmp/h5db_large_chain_empty_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/large/large_pushdown_test.h5',
+    h5_index(),
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+)
+WHERE int_rse_values = 20
+  AND float_rse_values = 3.5
+  AND index >= 2000000
+  AND index < 4000000
+  AND regular > -1;
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('/tmp/h5db_large_chain_empty_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 0'
+);
+----
+1
+
 # =============================================================================
 # Basic comparison operators on sorted RSE columns
 # =============================================================================

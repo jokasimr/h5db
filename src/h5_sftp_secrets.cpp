@@ -35,6 +35,12 @@ static unique_ptr<BaseSecret> CreateH5SftpSecretFromConfig(ClientContext &, Crea
 	if (!has_known_hosts && !has_host_key_fingerprint) {
 		throw InvalidInputException("sftp secret requires either KNOWN_HOSTS_PATH or HOST_KEY_FINGERPRINT");
 	}
+	if (secret->TryGetValue("port", value)) {
+		auto port = value.GetValue<int32_t>();
+		if (port < 1 || port > 65535) {
+			throw InvalidInputException("sftp secret PORT must be between 1 and 65535");
+		}
+	}
 
 	secret->redact_keys = {"password", "key_passphrase"};
 	return std::move(secret);

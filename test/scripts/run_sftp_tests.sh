@@ -10,6 +10,7 @@ USERNAME="h5db"
 PASSWORD="h5db"
 UNITTEST_BIN="$PROJECT_ROOT/build/release/test/unittest"
 TEST_GLOB="*"
+RUN_INTERACTION_TESTS=1
 
 usage() {
   cat <<USAGE
@@ -22,6 +23,7 @@ Options:
   --password <pass>         Password for SFTP auth (default: h5db).
   --unittest-bin <path>     unittest binary path (default: build/release/test/unittest).
   --test-glob <glob>        SQLLogicTest glob (default: *).
+  --skip-interaction-tests  Skip dedicated SFTP interaction tests.
 USAGE
 }
 
@@ -39,6 +41,8 @@ while [[ $# -gt 0 ]]; do
       UNITTEST_BIN="$2"; shift 2 ;;
     --test-glob)
       TEST_GLOB="$2"; shift 2 ;;
+    --skip-interaction-tests)
+      RUN_INTERACTION_TESTS=0; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -131,3 +135,8 @@ python3 "$PROJECT_ROOT/test/scripts/rewrite_remote_sqllogictests.py" \
 
 TMP_SQL_REL="${TMP_SQL#$PROJECT_ROOT/}"
 "$UNITTEST_BIN" "$TMP_SQL_REL/${TEST_GLOB}"
+
+if [[ "$RUN_INTERACTION_TESTS" -eq 1 ]]; then
+  ./venv/bin/python "$PROJECT_ROOT/test/scripts/run_sftp_interaction_tests.py" \
+    --duckdb-bin "${UNITTEST_BIN%/test/unittest}/duckdb"
+fi

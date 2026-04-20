@@ -1,6 +1,7 @@
 #include "h5_remote_vfd.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "h5_internal.hpp"
 #include "h5_remote_backend.hpp"
 
@@ -17,6 +18,7 @@ namespace duckdb {
 static constexpr H5FD_class_value_t DUCKDB_VFD_VALUE = 600;
 static constexpr idx_t REMOTE_CACHE_BLOCK_SIZE = 1048576;
 static constexpr idx_t REMOTE_CACHE_MAX_BLOCKS = 128;
+static constexpr idx_t REMOTE_LARGE_DATA_CACHE_BUDGET = 200ULL * 1024ULL * 1024ULL;
 static hid_t duckdb_vfd_driver_id = -1;
 static std::once_flag duckdb_vfd_register_once;
 static thread_local ClientContext *duckdb_vfd_open_context = nullptr;
@@ -40,6 +42,7 @@ struct H5FD_duckdb_t : public H5FD_t {
 	std::string path;
 	haddr_t eof;
 	haddr_t eoa;
+	idx_t remaining_large_data_cache_budget = REMOTE_LARGE_DATA_CACHE_BUDGET;
 	CachedBlockMap cached_blocks;
 	std::list<idx_t> cache_lru;
 };
@@ -115,7 +118,7 @@ static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t bl
 	ThrowIfContextInterrupted(file.context);
 	H5FD_duckdb_t::CachedBlock block;
 	block.data.resize(bytes_to_read);
-	file.backend->Read(block_offset, bytes_to_read, block.data.data());
+	file.backend->ReadCached(block_offset, bytes_to_read, block.data.data());
 	ThrowIfContextInterrupted(file.context);
 	block.valid_bytes = bytes_to_read;
 	file.cache_lru.push_front(block_id);
@@ -153,7 +156,16 @@ static void ReadExact(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, v
 		throw IOException("Failed to read remote data: no readable backend");
 	}
 	ThrowIfContextInterrupted(file.context);
-	file.backend->Read(read_offset, read_size, buf);
+	file.backend->ReadDirect(read_offset, read_size, buf);
+	ThrowIfContextInterrupted(file.context);
+}
+
+static void ReadExactCached(H5FD_duckdb_t &file, idx_t read_offset, idx_t read_size, void *buf) {
+	if (!file.backend) {
+		throw IOException("Failed to read remote data: no readable backend");
+	}
+	ThrowIfContextInterrupted(file.context);
+	file.backend->ReadCached(read_offset, read_size, buf);
 	ThrowIfContextInterrupted(file.context);
 }
 
@@ -258,6 +270,10 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 	}
 
 	if (addr > f->eof || size > static_cast<size_t>(f->eof - addr)) {
+		SetLastError(
+		    StringUtil::Format("Attempted to read beyond end of remote file (offset=%llu, size=%llu, eof=%llu)",
+		                       static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size),
+		                       static_cast<unsigned long long>(f->eof)));
 		return -1;
 	}
 
@@ -266,9 +282,16 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 		auto read_size = static_cast<idx_t>(size);
 		auto read_offset = static_cast<idx_t>(addr);
 		// HDF5 can issue tiny chunk-sized raw reads even when the application requested a large hyperslab. Use the
-		// block cache for small reads to collapse those requests, but keep large raw reads exact.
+		// VFD block cache for small reads to collapse those requests. For large raw reads, route only a limited number
+		// of requested bytes through ReadExactCached before falling back to ReadExact. This budget controls the VFD's
+		// routing decision, not the exact number of bytes DuckDB's external file cache may admit.
 		if (mem_type == H5FD_MEM_DRAW && read_size >= REMOTE_CACHE_BLOCK_SIZE) {
-			ReadExact(*f, read_offset, read_size, buf);
+			if (f->remaining_large_data_cache_budget >= read_size) {
+				ReadExactCached(*f, read_offset, read_size, buf);
+				f->remaining_large_data_cache_budget -= read_size;
+			} else {
+				ReadExact(*f, read_offset, read_size, buf);
+			}
 		} else {
 			ReadFromBlockCache(*f, read_offset, read_size, buf);
 		}

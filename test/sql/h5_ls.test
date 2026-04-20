@@ -42,6 +42,12 @@ SELECT
 ----
 /named_int32	datatype	13
 
+query T
+SELECT
+    variant_typeof(struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/', h5_attr('attr')), 'named_int32'), 'attr'));
+----
+INT32
+
 query I
 SELECT struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/', h5_attr('attr', -1::INTEGER)), 'external_link'), 'attr');
 ----
@@ -185,7 +191,12 @@ IO Error: Failed to open object: /does_not_exist
 statement error
 SELECT h5_ls('test/data/swmr_enabled.h5', '/', swmr := true);
 ----
-Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
+
+statement error
+SELECT h5_ls('test/data/links.h5', '/', 42);
+----
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
 
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', '/group/data');

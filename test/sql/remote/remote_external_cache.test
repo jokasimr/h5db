@@ -70,12 +70,12 @@ SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/arra
 ----
 10
 
-query II
-SELECT
-  (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='HEAD'),
-  (SELECT COUNT(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
+query I
+SELECT COUNT(*) > 0
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type='GET';
 ----
-true	true
+true
 
 statement ok
 PRAGMA enable_external_file_cache=true;
@@ -105,3 +105,63 @@ SELECT
   (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
 ----
 true	true
+
+# =============================================================================
+# Large raw scans should use a bounded per-query cache budget
+# =============================================================================
+
+statement ok
+PRAGMA enable_external_file_cache=true;
+
+statement ok
+SET enable_http_metadata_cache=true;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT SUM(regular) FROM h5_read('test/data/large/large_pushdown_test.h5', '/regular');
+----
+49999995000000
+
+query I
+SELECT COUNT(*) > 0
+FROM duckdb_external_file_cache()
+WHERE path LIKE '%large_pushdown_test.h5';
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT SUM(regular) FROM h5_read('test/data/large/large_pushdown_test.h5', '/regular');
+----
+49999995000000
+
+query II
+SELECT
+  (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='HEAD'),
+  (SELECT COUNT(*) = 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET');
+----
+true	true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT SUM(array_2d[1]) FROM h5_read('test/data/large/large_simple.h5', '/array_2d');
+----
+199999980000000
+
+query I
+SELECT SUM(array_2d[1]) FROM h5_read('test/data/large/large_simple.h5', '/array_2d');
+----
+199999980000000
+
+query I
+SELECT COUNT(*) > 0
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type='GET';
+----
+true

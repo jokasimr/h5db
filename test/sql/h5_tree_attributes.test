@@ -70,6 +70,17 @@ FROM h5_tree(
 ----
 3
 
+query II
+SELECT
+    COUNT(*) FILTER (WHERE variant_typeof(string_attr) = 'VARCHAR'),
+    COUNT(*) FILTER (WHERE string_attr IS NULL)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr')
+);
+----
+1	2
+
 query TI
 SELECT path, attr
 FROM h5_tree(
@@ -142,12 +153,12 @@ Binder Error: table "h5_tree" has duplicate column name "path"
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', 'string_attr');
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', 42);
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', random()));
@@ -167,7 +178,7 @@ Invalid Input Error: h5_attr name must not be NULL
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_alias('renamed', 42));
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr(42, NULL::VARCHAR));

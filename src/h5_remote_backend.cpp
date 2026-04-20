@@ -2,16 +2,19 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/storage/caching_file_system.hpp"
 
 #ifndef _WIN32
 #include <libssh2.h>
 #include <libssh2_sftp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
@@ -22,7 +25,6 @@
 
 #include <cstring>
 #include <cstdlib>
-#include <iostream>
 #include <array>
 #include <map>
 #include <mutex>
@@ -39,48 +41,69 @@ static bool StartsWithCI(const std::string &path, const char *prefix) {
 	return StringUtil::StartsWith(StringUtil::Lower(path), prefix);
 }
 
-static bool IsDuckDBFsRemotePath(const std::string &path) {
-	auto lower_path = StringUtil::Lower(path);
-	return StringUtil::StartsWith(lower_path, "http://") || StringUtil::StartsWith(lower_path, "https://") ||
-	       StringUtil::StartsWith(lower_path, "s3://") || StringUtil::StartsWith(lower_path, "s3a://") ||
-	       StringUtil::StartsWith(lower_path, "s3n://") || StringUtil::StartsWith(lower_path, "r2://") ||
-	       StringUtil::StartsWith(lower_path, "gcs://") || StringUtil::StartsWith(lower_path, "gs://") ||
-	       StringUtil::StartsWith(lower_path, "hf://");
-}
-
 static bool IsSftpPath(const std::string &path) {
 	return StartsWithCI(path, "sftp://");
+}
+
+static bool TryGetDuckDBFsRemoteExtension(const std::string &path, std::string &required_extension) {
+	return !IsSftpPath(path) && FileSystem::IsRemoteFile(path, required_extension);
 }
 
 class DuckDBFsRemoteBackend : public H5RemoteBackend {
 public:
 	explicit DuckDBFsRemoteBackend(ClientContext &context, const std::string &path)
-	    : caching_fs(CachingFileSystem::Get(context)) {
+	    : file_system(FileSystem::GetFileSystem(context)), caching_fs(CachingFileSystem::Get(context)), path(path),
+	      read_flags(FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO) {
 		OpenFileInfo open_info(path);
-		handle = caching_fs.OpenFile(QueryContext(context), open_info,
-		                             FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-		file_size = handle->GetFileSize();
+		cached_handle = caching_fs.OpenFile(QueryContext(context), open_info, read_flags);
+		if (!cached_handle) {
+			throw IOException("Failed to open remote file '%s'", path);
+		}
+		file_size = cached_handle->GetFileSize();
 	}
 
 	idx_t GetFileSize() const override {
 		return file_size;
 	}
 
-	void Read(idx_t offset, idx_t size, void *buf) override {
-		if (!handle) {
+	void ReadCached(idx_t offset, idx_t size, void *buf) override {
+		if (!cached_handle) {
 			throw IOException("Failed to read remote data: no readable file handle");
 		}
 		data_ptr_t buffer = nullptr;
-		auto pinned_buffer = handle->Read(buffer, size, offset);
+		auto pinned_buffer = cached_handle->Read(buffer, size, offset);
 		if (!pinned_buffer.IsValid() || !buffer) {
 			throw IOException("Failed to read remote data: invalid cached buffer");
 		}
 		std::memcpy(buf, buffer, size);
 	}
 
+	void ReadDirect(idx_t offset, idx_t size, void *buf) override {
+		OpenDirectHandleIfNeeded();
+		if (!direct_handle) {
+			throw IOException("Failed to read remote data: no readable direct file handle");
+		}
+		direct_handle->Read(buf, size, offset);
+	}
+
 private:
+	void OpenDirectHandleIfNeeded() {
+		if (direct_handle) {
+			return;
+		}
+		OpenFileInfo open_info(path);
+		direct_handle = file_system.OpenFile(open_info, read_flags);
+		if (!direct_handle) {
+			throw IOException("Failed to open remote file '%s' for direct reads", path);
+		}
+	}
+
+	FileSystem &file_system;
 	CachingFileSystem caching_fs;
-	unique_ptr<CachingFileHandle> handle;
+	std::string path;
+	FileOpenFlags read_flags;
+	unique_ptr<CachingFileHandle> cached_handle;
+	unique_ptr<FileHandle> direct_handle;
 	idx_t file_size = 0;
 };
 
@@ -205,6 +228,20 @@ static std::string JoinPathSegments(const Path &path) {
 	return result;
 }
 
+static int ParseSftpPort(const std::string &port_text, const std::string &url) {
+	size_t parsed_chars = 0;
+	int64_t port = 0;
+	try {
+		port = std::stoll(port_text, &parsed_chars, 10);
+	} catch (...) {
+		throw InvalidInputException("Invalid port in sftp URL: %s", url);
+	}
+	if (parsed_chars != port_text.size() || port < 1 || port > 65535) {
+		throw InvalidInputException("Invalid port in sftp URL: %s", url);
+	}
+	return UnsafeNumericCast<int>(port);
+}
+
 static H5SftpUrl ParseSftpUrl(const std::string &url) {
 	auto parsed = Path::FromString(url);
 	auto scheme = StringUtil::Lower(parsed.GetScheme());
@@ -241,13 +278,13 @@ static H5SftpUrl ParseSftpUrl(const std::string &url) {
 			if (host_port[closing + 1] != ':') {
 				throw InvalidInputException("Invalid host/port in sftp URL: %s", url);
 			}
-			result.port = std::stoi(host_port.substr(closing + 2));
+			result.port = ParseSftpPort(host_port.substr(closing + 2), url);
 		}
 	} else {
 		auto colon = host_port.rfind(':');
 		if (colon != std::string::npos) {
 			result.host = host_port.substr(0, colon);
-			result.port = std::stoi(host_port.substr(colon + 1));
+			result.port = ParseSftpPort(host_port.substr(colon + 1), url);
 		} else {
 			result.host = host_port;
 		}
@@ -350,10 +387,10 @@ private:
 	int fd;
 };
 
-class H5SftpRemoteBackend : public H5RemoteBackend {
+class H5SftpFileEngine {
 public:
-	H5SftpRemoteBackend(ClientContext &context, const H5SftpUrl &url_p) : url(url_p) {
-		config = ResolveSftpConfig(context, url);
+	H5SftpFileEngine(ClientContext &context_p, const H5SftpUrl &url_p) : context(&context_p), url(url_p) {
+		config = ResolveSftpConfig(context_p, url);
 		InitializeLibssh2();
 		OpenVerifiedSession();
 		Authenticate();
@@ -361,11 +398,20 @@ public:
 		StatFile();
 	}
 
-	idx_t GetFileSize() const override {
+	idx_t GetFileSize() const {
 		return file_size;
 	}
 
-	void Read(idx_t offset, idx_t size, void *buf) override {
+	timestamp_t GetLastModifiedTime() const {
+		return last_modified;
+	}
+
+	void Read(idx_t offset, idx_t size, void *buf) {
+		ReadInternal(offset, size, buf);
+	}
+
+private:
+	void ReadInternal(idx_t offset, idx_t size, void *buf) {
 		auto &handle_slot = SelectReadHandle(offset);
 		if (profiling_enabled) {
 			stats.RecordRead(offset, size, handle_slot.index);
@@ -377,7 +423,12 @@ public:
 		auto *out = static_cast<char *>(buf);
 		idx_t remaining = size;
 		while (remaining > 0) {
+			ThrowIfInterrupted();
 			auto nread = libssh2_sftp_read(handle_slot.handle, out, remaining);
+			if (nread == LIBSSH2_ERROR_EAGAIN) {
+				WaitForSessionIO();
+				continue;
+			}
 			if (nread < 0) {
 				throw IOException("Failed to read SFTP data: %s", LastSessionError());
 			}
@@ -394,7 +445,8 @@ public:
 		}
 	}
 
-	~H5SftpRemoteBackend() override {
+public:
+	~H5SftpFileEngine() {
 		if (profiling_enabled) {
 			stats.Print(config.remote_path);
 		}
@@ -404,6 +456,7 @@ public:
 private:
 	static constexpr idx_t SFTP_HANDLE_POOL_SIZE = 4;
 	static constexpr idx_t SFTP_HANDLE_LOCALITY_THRESHOLD = 2 * 1024 * 1024;
+	static constexpr int IO_WAIT_SLICE_MS = 100;
 
 	struct SftpReadHandle {
 		LIBSSH2_SFTP_HANDLE *handle = nullptr;
@@ -510,8 +563,6 @@ private:
 	struct HostVerificationResult {
 		bool success = false;
 		bool retryable = false;
-		int known_hosts_check = LIBSSH2_KNOWNHOST_CHECK_MATCH;
-		bool fingerprint_match = true;
 		std::string negotiated_algorithm;
 		std::string error_message;
 	};
@@ -588,6 +639,13 @@ private:
 	}
 
 	void ResetConnectionState() {
+		auto abortive = context && context->interrupted.load(std::memory_order_relaxed);
+		if (session) {
+			libssh2_session_set_blocking(session, 1);
+		}
+		if (abortive) {
+			socket_fd.reset();
+		}
 		for (auto &handle_slot : sftp_handles) {
 			if (handle_slot.handle) {
 				libssh2_sftp_close_handle(handle_slot.handle);
@@ -600,14 +658,62 @@ private:
 			sftp_session = nullptr;
 		}
 		if (session) {
-			libssh2_session_disconnect(session, "Normal Shutdown");
+			if (!abortive) {
+				libssh2_session_disconnect(session, "Normal Shutdown");
+			}
 			libssh2_session_free(session);
 			session = nullptr;
 		}
 		socket_fd.reset();
 	}
 
+	void ThrowIfInterrupted() const {
+		if (context && context->interrupted.load(std::memory_order_relaxed)) {
+			throw InterruptException();
+		}
+	}
+
+	void WaitForSocketEvents(short events) {
+		D_ASSERT(socket_fd);
+		struct pollfd pfd;
+		pfd.fd = socket_fd->Get();
+		pfd.events = events;
+		pfd.revents = 0;
+
+		while (true) {
+			ThrowIfInterrupted();
+			auto rc = poll(&pfd, 1, IO_WAIT_SLICE_MS);
+			if (rc > 0) {
+				return;
+			}
+			if (rc == 0) {
+				continue;
+			}
+			if (errno == EINTR) {
+				continue;
+			}
+			throw IOException("Polling SFTP socket failed: %s", std::strerror(errno));
+		}
+	}
+
+	void WaitForSessionIO() {
+		D_ASSERT(session);
+		auto directions = libssh2_session_block_directions(session);
+		short events = 0;
+		if (directions & LIBSSH2_SESSION_BLOCK_INBOUND) {
+			events |= POLLIN;
+		}
+		if (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) {
+			events |= POLLOUT;
+		}
+		if (events == 0) {
+			events = POLLIN | POLLOUT;
+		}
+		WaitForSocketEvents(events);
+	}
+
 	void ConnectSocket() {
+		ThrowIfInterrupted();
 		struct addrinfo hints;
 		std::memset(&hints, 0, sizeof(hints));
 		hints.ai_socktype = SOCK_STREAM;
@@ -623,13 +729,39 @@ private:
 		std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> addrinfo_guard(result, freeaddrinfo);
 		int fd = -1;
 		for (auto *rp = result; rp; rp = rp->ai_next) {
+			ThrowIfInterrupted();
 			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 			if (fd < 0) {
+				continue;
+			}
+			auto flags = fcntl(fd, F_GETFL, 0);
+			if (flags < 0) {
+				close(fd);
+				fd = -1;
+				continue;
+			}
+			if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+				close(fd);
+				fd = -1;
 				continue;
 			}
 			if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
 				socket_fd = make_uniq<ScopedSocket>(fd);
 				return;
+			}
+			if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
+				socket_fd = make_uniq<ScopedSocket>(fd);
+				WaitForSocketEvents(POLLOUT);
+
+				int socket_error = 0;
+				socklen_t error_len = sizeof(socket_error);
+				if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 && socket_error == 0) {
+					return;
+				}
+
+				socket_fd.reset();
+				fd = -1;
+				continue;
 			}
 			close(fd);
 			fd = -1;
@@ -649,9 +781,16 @@ private:
 				                  LastSessionError());
 			}
 		}
-		libssh2_session_set_blocking(session, 1);
-		if (libssh2_session_handshake(session, socket_fd->Get()) != 0) {
-			throw IOException("Failed SSH handshake: %s", LastSessionError());
+		libssh2_session_set_blocking(session, 0);
+		while (true) {
+			auto rc = libssh2_session_handshake(session, socket_fd->Get());
+			if (rc == 0) {
+				return;
+			}
+			if (rc != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed SSH handshake: %s", LastSessionError());
+			}
+			WaitForSessionIO();
 		}
 	}
 
@@ -688,7 +827,6 @@ private:
 			                                          HostKeyTypeToKnownHostMask(hostkey_type),
 			                                      &host);
 			libssh2_knownhost_free(known_hosts);
-			result.known_hosts_check = check;
 			if (check != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
 				result.retryable =
 				    check == LIBSSH2_KNOWNHOST_CHECK_MISMATCH || check == LIBSSH2_KNOWNHOST_CHECK_NOTFOUND;
@@ -708,7 +846,6 @@ private:
 			}
 			auto actual = ToHexLower(fingerprint, 20);
 			if (actual != *config.host_key_fingerprint) {
-				result.fingerprint_match = false;
 				result.retryable = true;
 				result.error_message =
 				    StringUtil::Format("SSH host key fingerprint mismatch for '%s:%d' (algorithm=%s)", config.host,
@@ -722,8 +859,8 @@ private:
 	}
 
 	void OpenVerifiedSession() {
-		HostVerificationResult last_verification;
 		std::string last_error;
+		std::string last_verification_error;
 
 		for (const auto &attempt : BuildHostKeyAlgorithmAttempts()) {
 			ResetConnectionState();
@@ -731,10 +868,12 @@ private:
 			try {
 				OpenSession(attempt.empty() ? nullptr : attempt.c_str());
 			} catch (const IOException &ex) {
-				if (attempt.empty()) {
+				if (attempt.empty() && last_verification_error.empty()) {
 					throw;
 				}
-				last_error = ex.what();
+				if (last_verification_error.empty()) {
+					last_error = ex.what();
+				}
 				continue;
 			}
 
@@ -748,11 +887,14 @@ private:
 				ResetConnectionState();
 				throw IOException("%s", verification.error_message);
 			}
-			last_verification = std::move(verification);
-			last_error = last_verification.error_message;
+			last_verification_error = verification.error_message;
+			last_error = verification.error_message;
 		}
 
 		ResetConnectionState();
+		if (!last_verification_error.empty()) {
+			throw IOException("%s", last_verification_error);
+		}
 		if (!last_error.empty()) {
 			throw IOException("%s", last_error);
 		}
@@ -761,18 +903,30 @@ private:
 
 	void Authenticate() {
 		if (config.password) {
-			auto rc = libssh2_userauth_password(session, config.username.c_str(), config.password->c_str());
-			if (rc != 0) {
-				throw IOException("SSH password authentication failed for '%s': %s", config.username,
-				                  LastSessionError());
+			while (true) {
+				auto rc = libssh2_userauth_password(session, config.username.c_str(), config.password->c_str());
+				if (rc == 0) {
+					return;
+				}
+				if (rc != LIBSSH2_ERROR_EAGAIN) {
+					throw IOException("SSH password authentication failed for '%s': %s", config.username,
+					                  LastSessionError());
+				}
+				WaitForSessionIO();
 			}
-			return;
 		}
 		auto passphrase = config.key_passphrase ? config.key_passphrase->c_str() : nullptr;
-		auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr,
-		                                              config.key_path->c_str(), passphrase);
-		if (rc != 0) {
-			throw IOException("SSH public key authentication failed for '%s': %s", config.username, LastSessionError());
+		while (true) {
+			auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr,
+			                                              config.key_path->c_str(), passphrase);
+			if (rc == 0) {
+				return;
+			}
+			if (rc != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("SSH public key authentication failed for '%s': %s", config.username,
+				                  LastSessionError());
+			}
+			WaitForSessionIO();
 		}
 	}
 
@@ -781,21 +935,32 @@ private:
 		if (handle_slot.handle) {
 			return handle_slot;
 		}
-		handle_slot.handle = libssh2_sftp_open(sftp_session, config.remote_path.c_str(), LIBSSH2_FXF_READ, 0);
-		if (!handle_slot.handle) {
-			throw IOException("Failed to open SFTP file '%s': %s", config.remote_path, LastSessionError());
+		while (true) {
+			handle_slot.handle = libssh2_sftp_open(sftp_session, config.remote_path.c_str(), LIBSSH2_FXF_READ, 0);
+			if (handle_slot.handle) {
+				handle_slot.current_offset.reset();
+				if (profiling_enabled) {
+					stats.RecordHandleOpened();
+				}
+				return handle_slot;
+			}
+			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed to open SFTP file '%s': %s", config.remote_path, LastSessionError());
+			}
+			WaitForSessionIO();
 		}
-		handle_slot.current_offset.reset();
-		if (profiling_enabled) {
-			stats.RecordHandleOpened();
-		}
-		return handle_slot;
 	}
 
 	void OpenSftpHandle() {
-		sftp_session = libssh2_sftp_init(session);
-		if (!sftp_session) {
-			throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
+		while (true) {
+			sftp_session = libssh2_sftp_init(session);
+			if (sftp_session) {
+				break;
+			}
+			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
+			}
+			WaitForSessionIO();
 		}
 		for (idx_t i = 0; i < sftp_handles.size(); i++) {
 			sftp_handles[i].index = i;
@@ -805,13 +970,22 @@ private:
 
 	void StatFile() {
 		LIBSSH2_SFTP_ATTRIBUTES attrs;
-		if (libssh2_sftp_fstat_ex(sftp_handles[0].handle, &attrs, 0) != 0) {
-			throw IOException("Failed to stat SFTP file '%s': %s", config.remote_path, LastSessionError());
+		while (true) {
+			auto rc = libssh2_sftp_fstat_ex(sftp_handles[0].handle, &attrs, 0);
+			if (rc == 0) {
+				break;
+			}
+			if (rc != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed to stat SFTP file '%s': %s", config.remote_path, LastSessionError());
+			}
+			WaitForSessionIO();
 		}
 		if (!(attrs.flags & LIBSSH2_SFTP_ATTR_SIZE)) {
 			throw IOException("SFTP file '%s' did not report a file size", config.remote_path);
 		}
 		file_size = UnsafeNumericCast<idx_t>(attrs.filesize);
+		last_modified =
+		    (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) ? Timestamp::FromEpochSeconds(attrs.mtime) : timestamp_t();
 	}
 
 	SftpReadHandle &SelectReadHandle(idx_t offset) {
@@ -873,6 +1047,7 @@ private:
 
 	H5SftpUrl url;
 	H5SftpConfig config;
+	ClientContext *context = nullptr;
 	const bool profiling_enabled = std::getenv("H5DB_SFTP_PROFILE") != nullptr;
 	SftpReadStats stats;
 	unique_ptr<ScopedSocket> socket_fd;
@@ -880,21 +1055,187 @@ private:
 	LIBSSH2_SFTP *sftp_session = nullptr;
 	std::array<SftpReadHandle, SFTP_HANDLE_POOL_SIZE> sftp_handles;
 	idx_t file_size = 0;
+	timestamp_t last_modified;
+};
+
+class H5SftpFileHandle : public FileHandle {
+public:
+	H5SftpFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags) : FileHandle(fs, file.path, flags) {
+	}
+
+	void Close() override {
+	}
+
+	idx_t position = 0;
+};
+
+class H5SftpFileSystem : public FileSystem {
+public:
+	H5SftpFileSystem(ClientContext &context_p, const H5SftpUrl &url_p)
+	    : context(context_p), url(url_p), path(url_p.original_url) {
+	}
+
+protected:
+	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
+	                                        optional_ptr<FileOpener> opener) override {
+		if (file.path != path) {
+			throw InternalException("Unexpected SFTP file open for '%s' on handle bound to '%s'", file.path, path);
+		}
+		return make_uniq<H5SftpFileHandle>(*this, file, flags);
+	}
+
+	bool SupportsOpenFileExtended() const override {
+		return true;
+	}
+
+public:
+	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override {
+		auto &sftp_handle = handle.Cast<H5SftpFileHandle>();
+		GetOrCreateEngine().Read(location, UnsafeNumericCast<idx_t>(nr_bytes), buffer);
+		sftp_handle.position = location + UnsafeNumericCast<idx_t>(nr_bytes);
+	}
+
+	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override {
+		auto &sftp_handle = handle.Cast<H5SftpFileHandle>();
+		GetOrCreateEngine().Read(sftp_handle.position, UnsafeNumericCast<idx_t>(nr_bytes), buffer);
+		sftp_handle.position += UnsafeNumericCast<idx_t>(nr_bytes);
+		return nr_bytes;
+	}
+
+	int64_t GetFileSize(FileHandle &handle) override {
+		return UnsafeNumericCast<int64_t>(GetOrCreateEngine().GetFileSize());
+	}
+
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override {
+		return GetOrCreateEngine().GetLastModifiedTime();
+	}
+
+	string GetVersionTag(FileHandle &handle) override {
+		return "";
+	}
+
+	void Seek(FileHandle &handle, idx_t location) override {
+		handle.Cast<H5SftpFileHandle>().position = location;
+	}
+
+	idx_t SeekPosition(FileHandle &handle) override {
+		return handle.Cast<H5SftpFileHandle>().position;
+	}
+
+	bool CanHandleFile(const string &fpath) override {
+		return IsSftpPath(fpath);
+	}
+
+	bool CanSeek() override {
+		return true;
+	}
+
+	bool OnDiskFile(FileHandle &handle) override {
+		return false;
+	}
+
+	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener) override {
+		return false;
+	}
+
+	string GetName() const override {
+		return "H5SftpFileSystem";
+	}
+
+	string PathSeparator(const string &path) override {
+		return "/";
+	}
+
+private:
+	H5SftpFileEngine &GetOrCreateEngine() {
+		if (!engine) {
+			engine = make_shared_ptr<H5SftpFileEngine>(context, url);
+		}
+		return *engine;
+	}
+
+	ClientContext &context;
+	H5SftpUrl url;
+	std::string path;
+	shared_ptr<H5SftpFileEngine> engine;
+};
+
+class H5SftpRemoteBackend : public H5RemoteBackend {
+public:
+	H5SftpRemoteBackend(ClientContext &context_p, const H5SftpUrl &url_p)
+	    : raw_fs(context_p, url_p), caching_fs(raw_fs, *context_p.db), path(url_p.original_url),
+	      read_flags(FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO) {
+		OpenFileInfo open_info(path);
+		if (Settings::Get<ValidateExternalFileCacheSetting>(context_p) == CacheValidationMode::VALIDATE_REMOTE) {
+			open_info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+			open_info.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(true);
+		}
+		cached_handle = caching_fs.OpenFile(QueryContext(context_p), open_info, read_flags);
+		if (!cached_handle) {
+			throw IOException("Failed to open remote SFTP file '%s'", path);
+		}
+		file_size = cached_handle->GetFileSize();
+	}
+
+	idx_t GetFileSize() const override {
+		return file_size;
+	}
+
+	void ReadCached(idx_t offset, idx_t size, void *buf) override {
+		if (!cached_handle) {
+			throw IOException("Failed to read SFTP data: no readable cached file handle");
+		}
+		data_ptr_t buffer = nullptr;
+		auto pinned_buffer = cached_handle->Read(buffer, size, offset);
+		if (!pinned_buffer.IsValid() || !buffer) {
+			throw IOException("Failed to read SFTP data: invalid cached buffer");
+		}
+		std::memcpy(buf, buffer, size);
+	}
+
+	void ReadDirect(idx_t offset, idx_t size, void *buf) override {
+		OpenDirectHandleIfNeeded();
+		if (!direct_handle) {
+			throw IOException("Failed to read SFTP data: no readable direct file handle");
+		}
+		direct_handle->Read(buf, size, offset);
+	}
+
+private:
+	void OpenDirectHandleIfNeeded() {
+		if (direct_handle) {
+			return;
+		}
+		OpenFileInfo open_info(path);
+		direct_handle = raw_fs.OpenFile(open_info, read_flags);
+		if (!direct_handle) {
+			throw IOException("Failed to open remote SFTP file '%s' for direct reads", path);
+		}
+	}
+
+	H5SftpFileSystem raw_fs;
+	CachingFileSystem caching_fs;
+	std::string path;
+	FileOpenFlags read_flags;
+	unique_ptr<CachingFileHandle> cached_handle;
+	unique_ptr<FileHandle> direct_handle;
+	idx_t file_size = 0;
 };
 #endif
 
 } // namespace
 
 bool IsH5RemotePath(const std::string &path) {
-	return IsDuckDBFsRemotePath(path) || IsSftpPath(path);
+	return IsSftpPath(path) || FileSystem::IsRemoteFile(path);
 }
 
 H5RemoteBackendDescriptor DescribeH5RemotePath(const std::string &path) {
-	if (IsDuckDBFsRemotePath(path)) {
-		return {H5RemoteBackendType::DUCKDB_FS, "httpfs"};
-	}
 	if (IsSftpPath(path)) {
 		return {H5RemoteBackendType::SFTP, ""};
+	}
+	std::string required_extension;
+	if (TryGetDuckDBFsRemoteExtension(path, required_extension)) {
+		return {H5RemoteBackendType::DUCKDB_FS, required_extension};
 	}
 	throw InvalidInputException("Not a supported remote path: %s", path);
 }

@@ -53,6 +53,7 @@ struct H5TreeNamedRow {
 
 std::string H5TreeNormalizeObjectPath(std::string object_path);
 std::string H5TreeNormalizeExceptionMessage(const std::string &message);
+bool H5TreeIsProjectedAttributeArgument(const Value &input);
 H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &input, const std::string &function_name);
 void H5TreeBindProjectedAttributes(const std::string &function_name, const vector<Value> &inputs, idx_t start_idx,
                                    vector<string> &names, vector<LogicalType> &return_types,

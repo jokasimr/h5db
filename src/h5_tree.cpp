@@ -426,13 +426,11 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 static void H5AttrFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto &name_vec = args.data[0];
-	auto &default_vec = args.data[1];
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
 	auto &tag_child = GetTreeStructChild(children[0]);
 	auto &name_child = GetTreeStructChild(children[1]);
 	auto &default_child = GetTreeStructChild(children[2]);
-	default_child.Reference(default_vec);
 
 	UnifiedVectorFormat name_data;
 	name_vec.ToUnifiedFormat(args.size(), name_data);
@@ -446,37 +444,67 @@ static void H5AttrFunction(DataChunk &args, ExpressionState &, Vector &result) {
 		FlatVector::GetData<string_t>(name_child)[i] = StringVector::AddString(name_child, name_ptr[name_idx]);
 	}
 
-	bool all_const = default_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
-	                 name_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	bool all_const = name_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	if (args.ColumnCount() == 2) {
+		auto &default_vec = args.data[1];
+		default_child.Reference(default_vec);
+		all_const = all_const && default_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	} else {
+		if (all_const) {
+			default_child.SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(default_child, true);
+		} else {
+			for (idx_t i = 0; i < args.size(); i++) {
+				FlatVector::SetNull(default_child, i, true);
+			}
+		}
+	}
+
 	result.SetVectorType(all_const ? VectorType::CONSTANT_VECTOR : VectorType::FLAT_VECTOR);
 	result.Verify(args.size());
 }
 
 static unique_ptr<FunctionData> H5AttrBind(ClientContext &, ScalarFunction &bound_function,
                                            vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 2) {
-		throw InvalidInputException("h5_attr() requires two arguments: attribute name and default value");
-	}
-	if (!arguments[1]->IsFoldable()) {
-		throw InvalidInputException("h5_attr default_value must be a constant expression");
-	}
-	if (arguments[1]->return_type.id() == LogicalTypeId::SQLNULL) {
+	if (arguments.size() != 1 && arguments.size() != 2) {
 		throw InvalidInputException(
-		    "h5_attr default_value must have a concrete type; use an explicit cast such as NULL::VARCHAR");
+		    "h5_attr() requires one or two arguments: attribute name and optional default value");
 	}
-	child_list_t<LogicalType> struct_children = {{"tag", LogicalType::VARCHAR},
-	                                             {"attribute_name", arguments[0]->return_type},
-	                                             {"default_value", arguments[1]->return_type}};
+	LogicalType default_type;
+	if (arguments.size() == 2) {
+		if (!arguments[1]->IsFoldable()) {
+			throw InvalidInputException("h5_attr default_value must be a constant expression");
+		}
+		if (arguments[1]->return_type.id() == LogicalTypeId::SQLNULL) {
+			throw InvalidInputException(
+			    "h5_attr default_value must have a concrete type; use an explicit cast such as NULL::VARCHAR");
+		}
+		default_type = arguments[1]->return_type;
+	} else {
+		default_type = LogicalType::VARIANT();
+	}
+	child_list_t<LogicalType> struct_children = {
+	    {"tag", LogicalType::VARCHAR}, {"attribute_name", arguments[0]->return_type}, {"default_value", default_type}};
 	bound_function.return_type = LogicalType::STRUCT(struct_children);
 	return make_uniq<VariableReturnBindData>(bound_function.return_type);
 }
 
 void RegisterH5AttrFunction(ExtensionLoader &loader) {
-	ScalarFunction h5_attr("h5_attr", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalTypeId::STRUCT, H5AttrFunction,
-	                       H5AttrBind);
-	h5_attr.serialize = VariableReturnBindData::Serialize;
-	h5_attr.deserialize = VariableReturnBindData::Deserialize;
-	h5_attr.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	ScalarFunctionSet h5_attr("h5_attr");
+
+	ScalarFunction h5_attr_one("h5_attr", {LogicalType::VARCHAR}, LogicalTypeId::STRUCT, H5AttrFunction, H5AttrBind);
+	h5_attr_one.serialize = VariableReturnBindData::Serialize;
+	h5_attr_one.deserialize = VariableReturnBindData::Deserialize;
+	h5_attr_one.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_attr.AddFunction(h5_attr_one);
+
+	ScalarFunction h5_attr_two("h5_attr", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalTypeId::STRUCT,
+	                           H5AttrFunction, H5AttrBind);
+	h5_attr_two.serialize = VariableReturnBindData::Serialize;
+	h5_attr_two.deserialize = VariableReturnBindData::Deserialize;
+	h5_attr_two.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_attr.AddFunction(h5_attr_two);
+
 	loader.RegisterFunction(h5_attr);
 }
 

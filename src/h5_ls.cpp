@@ -219,19 +219,16 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	vector<string> names;
 	vector<LogicalType> return_types;
 	H5LsGetReturnSchema(projected_attributes, names, return_types);
-	try {
-		H5TreeBindProjectedAttributes(function_name, values, 2, names, return_types, projected_attributes);
-	} catch (const InvalidInputException &ex) {
-		if (!force_swmr) {
-			auto message = std::string(ex.what());
-			if (message.find("projected attribute arguments must be") != std::string::npos) {
-				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(name, default_value) or "
-				                            "h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are "
-				                            "not supported");
+	if (!force_swmr) {
+		for (idx_t i = 2; i < values.size(); i++) {
+			if (!H5TreeIsProjectedAttributeArgument(values[i])) {
+				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(name) or "
+				                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named "
+				                            "parameters such as swmr := true are not supported");
 			}
 		}
-		throw;
 	}
+	H5TreeBindProjectedAttributes(function_name, values, 2, names, return_types, projected_attributes);
 
 	child_list_t<LogicalType> struct_fields;
 	for (idx_t i = 0; i < names.size(); i++) {

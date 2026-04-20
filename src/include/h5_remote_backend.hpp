@@ -15,7 +15,8 @@ class H5RemoteBackend {
 public:
 	virtual ~H5RemoteBackend() = default;
 	virtual idx_t GetFileSize() const = 0;
-	virtual void Read(idx_t offset, idx_t size, void *buf) = 0;
+	virtual void ReadCached(idx_t offset, idx_t size, void *buf) = 0;
+	virtual void ReadDirect(idx_t offset, idx_t size, void *buf) = 0;
 };
 
 bool IsH5RemotePath(const std::string &path);

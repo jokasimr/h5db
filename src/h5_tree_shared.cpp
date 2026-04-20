@@ -46,6 +46,16 @@ static Value H5TreeUnwrapAliasSpec(const Value &input, std::optional<std::string
 	return current;
 }
 
+bool H5TreeIsProjectedAttributeArgument(const Value &input) {
+	std::optional<std::string> alias_name;
+	auto current = H5TreeUnwrapAliasSpec(input, alias_name);
+	if (!H5TreeIsAttrStructType(current.type())) {
+		return false;
+	}
+	auto &children = StructValue::GetChildren(current);
+	return children.size() == 3 && children[0].GetValue<string>() == "__attr__";
+}
+
 static H5TreeObjectIdentity H5TreeIdentityFromToken(unsigned long fileno, const H5O_token_t &token) {
 	H5TreeObjectIdentity identity;
 	identity.fileno = fileno;
@@ -150,15 +160,13 @@ H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &inpu
 	std::optional<std::string> alias_name;
 	auto current = H5TreeUnwrapAliasSpec(input, alias_name);
 	if (!H5TreeIsAttrStructType(current.type())) {
-		throw InvalidInputException(function_name +
-		                            " projected attribute arguments must be h5_attr(name, default_value) "
-		                            "or h5_alias(alias, h5_attr(...))");
+		throw InvalidInputException(function_name + " projected attribute arguments must be h5_attr(name) or "
+		                                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))");
 	}
 	auto &children = StructValue::GetChildren(current);
 	if (children.size() != 3 || children[0].GetValue<string>() != "__attr__") {
-		throw InvalidInputException(function_name +
-		                            " projected attribute arguments must be h5_attr(name, default_value) "
-		                            "or h5_alias(alias, h5_attr(...))");
+		throw InvalidInputException(function_name + " projected attribute arguments must be h5_attr(name) or "
+		                                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))");
 	}
 	if (children[1].IsNull()) {
 		throw InvalidInputException("h5_attr name must not be NULL");
