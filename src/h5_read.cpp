@@ -1395,17 +1395,17 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 						if (is_index && (lower_const.value.IsNull() || upper_const.value.IsNull())) {
 							return false;
 						}
-						// Claim BETWEEN as two filters: col >= lower AND col <= upper
+						// Claim BETWEEN using its actual inclusive/exclusive bounds
 						ClaimedFilter lower_filter;
 						lower_filter.column_index = bind_data_col_idx;
-						lower_filter.comparison = ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+						lower_filter.comparison = between.LowerComparisonType();
 						lower_filter.constant = std::move(lower_value);
 						lower_filter.comparison_type = comparison_type;
 						claimed.push_back(lower_filter);
 
 						ClaimedFilter upper_filter;
 						upper_filter.column_index = bind_data_col_idx;
-						upper_filter.comparison = ExpressionType::COMPARE_LESSTHANOREQUALTO;
+						upper_filter.comparison = between.UpperComparisonType();
 						upper_filter.constant = std::move(upper_value);
 						upper_filter.comparison_type = comparison_type;
 						claimed.push_back(upper_filter);
@@ -1421,16 +1421,17 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 	if (expr->expression_class == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conj = expr->Cast<BoundConjunctionExpression>();
 
-		if (conj.type == ExpressionType::CONJUNCTION_AND && conj.children.size() == 2) {
-			// Try to claim RSE filters from children
+		if (conj.type == ExpressionType::CONJUNCTION_AND) {
+			// Try to claim pushdown-eligible filters from all children of a flattened AND
 			vector<ClaimedFilter> temp_claimed;
-			bool claimed_left = TryClaimPushdownFilter(conj.children[0], table_index, get_to_bind_map, pushdown_columns,
-			                                           columns, temp_claimed);
-			bool claimed_right = TryClaimPushdownFilter(conj.children[1], table_index, get_to_bind_map,
-			                                            pushdown_columns, columns, temp_claimed);
+			bool claimed_any = false;
+			for (const auto &child : conj.children) {
+				claimed_any |= TryClaimPushdownFilter(child, table_index, get_to_bind_map, pushdown_columns, columns,
+				                                      temp_claimed);
+			}
 
-			// If we claimed any RSE filters, add them to optimize I/O and return true
-			if (claimed_left || claimed_right) {
+			// If we claimed any pushdown filters, add them to optimize I/O and return true
+			if (claimed_any) {
 				claimed.insert(claimed.end(), temp_claimed.begin(), temp_claimed.end());
 				return true; // Indicate we claimed something
 			}
