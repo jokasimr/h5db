@@ -11,6 +11,7 @@ PASSWORD="h5db"
 UNITTEST_BIN="$PROJECT_ROOT/build/release/test/unittest"
 TEST_GLOB="*"
 RUN_INTERACTION_TESTS=1
+PYTHON_BIN="python3"
 
 usage() {
   cat <<USAGE
@@ -26,6 +27,15 @@ Options:
   --skip-interaction-tests  Skip dedicated SFTP interaction tests.
 USAGE
 }
+
+if ! command -v python3 >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    echo "Error: python not found" >&2
+    exit 1
+  fi
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +63,36 @@ while [[ $# -gt 0 ]]; do
 done
 
 bash "$PROJECT_ROOT/test/data/ensure_test_data.sh"
+
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+  if [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
+    source "$PROJECT_ROOT/venv/bin/activate"
+  elif [ -f "$PROJECT_ROOT/venv/Scripts/activate" ]; then
+    source "$PROJECT_ROOT/venv/Scripts/activate"
+  fi
+fi
+
+if ! "$PYTHON_BIN" -c "import paramiko" >/dev/null 2>&1; then
+  echo "paramiko not found, attempting to install..." >&2
+  if ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+    "$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+  if "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+      "$PYTHON_BIN" -m pip install paramiko >/dev/null
+    else
+      "$PYTHON_BIN" -m pip install --user paramiko >/dev/null
+    fi
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache py3-pip py3-paramiko >/dev/null
+  fi
+  if ! "$PYTHON_BIN" -c "import paramiko" >/dev/null 2>&1; then
+    echo "Error: paramiko not found" >&2
+    echo "Install with: python -m pip install --user paramiko" >&2
+    echo "Or on Alpine: apk add --no-cache py3-pip py3-paramiko" >&2
+    exit 1
+  fi
+fi
 
 TMP_ROOT="$(mktemp -d "$PROJECT_ROOT/test/.remote_sftp_sql.XXXXXX")"
 TMP_SQL="$TMP_ROOT/sql"
@@ -83,7 +123,7 @@ CREATE OR REPLACE TEMPORARY SECRET h5db_remote_sftp (
 );
 SQL
 
-./venv/bin/python "$PROJECT_ROOT/test/scripts/sftp_test_server.py" \
+"$PYTHON_BIN" "$PROJECT_ROOT/test/scripts/sftp_test_server.py" \
   --host "$HOST" \
   --port "$PORT" \
   --directory "$PROJECT_ROOT/test/data" \
@@ -98,7 +138,7 @@ for _ in $(seq 1 50); do
   if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
     break
   fi
-  if [[ -s "$KNOWN_HOSTS" ]] && python3 - "$HOST" "$PORT" <<'PY'
+  if [[ -s "$KNOWN_HOSTS" ]] && "$PYTHON_BIN" - "$HOST" "$PORT" <<'PY'
 import socket
 import sys
 
@@ -125,7 +165,7 @@ if [[ "$READY" -ne 1 ]]; then
   exit 1
 fi
 
-python3 "$PROJECT_ROOT/test/scripts/rewrite_remote_sqllogictests.py" \
+"$PYTHON_BIN" "$PROJECT_ROOT/test/scripts/rewrite_remote_sqllogictests.py" \
   --input-root "$PROJECT_ROOT/test/sql" \
   --output-root "$TMP_SQL" \
   --base-url "$BASE_URL" \
@@ -137,6 +177,6 @@ TMP_SQL_REL="${TMP_SQL#$PROJECT_ROOT/}"
 "$UNITTEST_BIN" "$TMP_SQL_REL/${TEST_GLOB}"
 
 if [[ "$RUN_INTERACTION_TESTS" -eq 1 ]]; then
-  ./venv/bin/python "$PROJECT_ROOT/test/scripts/run_sftp_interaction_tests.py" \
+  "$PYTHON_BIN" "$PROJECT_ROOT/test/scripts/run_sftp_interaction_tests.py" \
     --duckdb-bin "${UNITTEST_BIN%/test/unittest}/duckdb"
 fi

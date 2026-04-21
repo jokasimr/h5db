@@ -1247,7 +1247,7 @@ unique_ptr<H5RemoteBackend> OpenH5RemoteBackend(ClientContext &context, const st
 		return make_uniq<DuckDBFsRemoteBackend>(context, path);
 	case H5RemoteBackendType::SFTP:
 #ifdef _WIN32
-		throw NotImplementedException("Native SFTP backend is not implemented on Windows");
+		throw NotImplementedException("SFTP URLs are not supported on Windows");
 #else
 		return make_uniq<H5SftpRemoteBackend>(context, ParseSftpUrl(path));
 #endif

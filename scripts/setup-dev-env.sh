@@ -28,8 +28,8 @@ source "$VENV_DIR/bin/activate"
 
 echo "Installing Python packages..."
 
-# Install test data generation tools
-pip install -q h5py numpy
+# Install test data generation tools and remote-test harness dependencies
+pip install -q h5py numpy paramiko
 
 # Install code formatting tools (required by CI)
 pip install -q "black>=24" clang-format==11.0.1 cmake-format clang-tidy
@@ -63,7 +63,7 @@ echo "To activate the environment:"
 echo "  source venv/bin/activate"
 echo ""
 echo "This will give you access to:"
-echo "  - Python packages (h5py, numpy)"
+echo "  - Python packages (h5py, numpy, paramiko)"
 echo "  - Formatting tools (black, clang-format, cmake-format, clang-tidy)"
 echo "  - Build environment variables (VCPKG_TOOLCHAIN_PATH, GEN)"
 echo ""

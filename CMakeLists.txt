@@ -6,12 +6,7 @@ set(TARGET_NAME h5db)
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-# For clang-tidy builds, HDF5 is optional (only needs headers for static analysis)
-if(CLANG_TIDY)
-    find_package(HDF5 COMPONENTS C)
-else()
-    find_package(HDF5 REQUIRED COMPONENTS C)
-endif()
+find_package(HDF5 REQUIRED COMPONENTS C)
 
 find_package(libssh2 CONFIG REQUIRED)
 

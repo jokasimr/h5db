@@ -11,7 +11,8 @@ or
 make test_debug
 ```
 
-`make test` will generate any missing HDF5 test data before running tests.
+`make test` will generate any missing HDF5 test data before running tests. On Linux it also runs the rewritten remote
+HTTP and rewritten remote SFTP suites.
 
 ## Large Tests
 
@@ -34,14 +35,28 @@ Run the full SQL suite against rewritten remote paths using the local range-capa
 make test_remote_http
 ```
 
-On macOS, `make test` currently skips the remote HTTP portion of the suite; use `make test_remote_http` on Linux to
-exercise the rewritten remote coverage.
+## Run Suite Against SFTP URLs
+
+Run the full SQL suite against rewritten `sftp://` paths using the local rooted SFTP server:
+
+```bash
+make test_remote_sftp
+```
+
+This target also runs the dedicated SFTP interaction harness in `test/scripts/run_sftp_interaction_tests.py`.
 
 ## Remote-Only SQLLogicTests
 
 `test/sql/remote/*.test` contains remote HTTP-specific checks (auth, retries, redirects, timeout, truncation,
 corruption, caching, and simulated server/drop errors).
 These are included in `make test` through the remote runner and can also be executed via `make test_remote_http`.
+
+## SFTP Interaction Harness
+
+`test/scripts/run_sftp_tests.sh` rewrites the main SQL suite against `sftp://` URLs, starts the local SFTP test
+server, and by default runs `test/scripts/run_sftp_interaction_tests.py` for auth, host-key verification, cache, and
+disconnect cases. The runner will use the repo venv when present and otherwise falls back to `python3`/`python`,
+installing `paramiko` if needed.
 
 ## TSAN Stress Harness
 

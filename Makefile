@@ -7,36 +7,29 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
+# Keep clang-tidy within the template system while providing the same manifest
+# location that the normal build targets already use.
+tidy-check: EXT_DEBUG_FLAGS += $(VCPKG_MANIFEST_FLAGS)
+tidy-check: ${EXTENSION_CONFIG_STEP}
+
 # Override test targets to ensure test data exists before running tests.
 test_release_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/release/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	if [ "$$(uname -s)" = "Darwin" ]; then \
-		echo "Skipping remote HTTP tests on macOS"; \
-	else \
-		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH); \
-		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/release/$(TEST_PATH); \
-	fi
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/release/$(TEST_PATH)
+	bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/release/$(TEST_PATH)
 
 test_debug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/debug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	if [ "$$(uname -s)" = "Darwin" ]; then \
-		echo "Skipping remote HTTP tests on macOS"; \
-	else \
-		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH); \
-		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/debug/$(TEST_PATH); \
-	fi
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/debug/$(TEST_PATH)
+	bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/debug/$(TEST_PATH)
 
 test_reldebug_internal:
 	bash $(PROJ_DIR)test/data/ensure_test_data.sh
 	./build/reldebug/$(TEST_PATH) "test/sql/*" "~test/sql/remote/*"
-	if [ "$$(uname -s)" = "Darwin" ]; then \
-		echo "Skipping remote HTTP tests on macOS"; \
-	else \
-		bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH); \
-		bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH); \
-	fi
+	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH)
+	bash $(PROJ_DIR)test/scripts/run_sftp_tests.sh --unittest-bin ./build/reldebug/$(TEST_PATH)
 
 test_remote_http:
 	bash $(PROJ_DIR)test/scripts/run_remote_tests.sh
