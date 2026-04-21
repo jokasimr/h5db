@@ -1,11 +1,12 @@
 # h5db: HDF5 Extension for DuckDB
 
 `h5db` lets DuckDB query HDF5 files directly with SQL. It is aimed at analytics-style access to HDF5 data: inspect
-file structure, read datasets as columns, read attributes, and work with remote files through DuckDB `httpfs`.
+file structure, read datasets as columns, read attributes, and work with remote files through DuckDB's filesystem
+stack or SFTP.
 
 ## Highlights
 
-- Reads local or remote (`https://`, `s3://`, ...) HDF5 files directly from SQL.
+- Reads local or remote (`https://`, `s3://`, `sftp://`, ...) HDF5 files directly from SQL.
 - Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
 - Multiple datasets can be stacked horizontally to make a table.
 - Scalar datasets are treated as constant columns.
@@ -100,6 +101,50 @@ FROM h5_tree(
 SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
 ```
 
+## Remote Access
+
+All h5db functions accept local paths or remote URLs as `filename`.
+
+- DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
+  `gs://`, and `hf://` use DuckDB's filesystem stack and benefit from DuckDB's remote caching features.
+- `sftp://` URLs are supported through h5db's built-in SFTP backend on POSIX platforms. On Windows, `sftp://` is not
+  supported.
+- Remote opens are treated as immutable snapshots. `swmr := true` is accepted for API consistency, but remote paths do
+  not use `H5F_ACC_SWMR_READ`.
+
+To read over SFTP, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access:
+
+```sql
+CREATE OR REPLACE SECRET beamline_sftp (
+    TYPE sftp,
+    SCOPE 'sftp://beamline.example.org/',
+    USERNAME 'alice',
+    PASSWORD 'secret',
+    KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
+);
+
+SELECT * FROM h5_read(
+    'sftp://beamline.example.org/data/run001.h5',
+    '/entry/data'
+);
+```
+
+SFTP secrets require:
+
+- `USERNAME`
+- exactly one of `PASSWORD` or `KEY_PATH`
+- at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
+
+Optional SFTP secret fields:
+
+- `KEY_PASSPHRASE`
+- `PORT` (default `22`)
+- `HOST_KEY_ALGORITHMS`
+
+For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. If you use
+`HOST_KEY_FINGERPRINT`, provide the lowercase hex SHA1 host-key fingerprint. See [docs/API.md](docs/API.md) for the
+full SFTP secret reference.
+
 ## Build From Source
 
 ### Prerequisites
@@ -140,12 +185,13 @@ If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a re
 ## Behavior Notes
 
 - `swmr := true` enables HDF5 SWMR read mode for local files.
-- Remote URLs accept `swmr`, but remote opens use the DuckDB-backed remote VFD as immutable snapshots served by
-  `httpfs`; `H5F_ACC_SWMR_READ` is not used on that path.
+- Remote URLs accept `swmr`, but remote opens use the DuckDB-backed remote VFD as immutable snapshots; remote paths do
+  not use `H5F_ACC_SWMR_READ`.
 - If multiple non-scalar regular datasets are read together, `h5_read()` uses the minimum outer dimension as the output
   row count.
 - If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
 - In `h5_tree(...)`, projected attributes use the declared default when an object does not have the attribute.
+- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`.
 - In `h5_tree(...)`, rows are path-oriented and recursive: alias paths, dangling links, and external links can all
   appear as separate rows.
 - In `h5_ls(...)`, only the immediate children of the requested group are returned.
@@ -171,7 +217,7 @@ See [docs/API.md](docs/API.md) for full type-mapping details and error behavior.
 ## Testing
 
 ```bash
-# Full suite: local tests + rewritten remote suite
+# Full suite: local tests + rewritten remote HTTP/SFTP suites
 make test
 
 # Local SQLLogicTests only
@@ -179,13 +225,15 @@ make test
 
 # Rewritten remote URL suite via the local range-capable HTTP server
 make test_remote_http
+
+# Rewritten remote URL suite via the local SFTP server + interaction harness
+make test_remote_sftp
 ```
 
 Notes:
 
 - `make test` ensures missing HDF5 fixtures exist before running tests.
-- On macOS, the Makefile currently skips the remote HTTP portion of `make test`; use Linux to exercise the rewritten
-  remote suite.
+- `make test` runs both remote harnesses.
 
 For targeted test runs, test-data generation, and debugging workflows, see [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) and
 [test/README.md](test/README.md).
@@ -196,5 +244,3 @@ For targeted test runs, test-data generation, and debugging workflows, see [docs
 - [docs/API.md](docs/API.md): function reference, settings, type mapping, and limitations
 - [docs/RSE_USAGE.md](docs/RSE_USAGE.md): detailed guide to run-start encoding support
 - [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md): building, testing, debugging, and project layout
-- [docs/internals/H5_TREE_ATTRIBUTES_SPEC.md](docs/internals/H5_TREE_ATTRIBUTES_SPEC.md): internal design note for
-  projected attributes in `h5_tree` and `h5_ls`

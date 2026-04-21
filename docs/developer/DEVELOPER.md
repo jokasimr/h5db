@@ -120,13 +120,14 @@ echo "export GEN=ninja" >> .env
 
 ### 4. Set Up Python Virtual Environment
 
-The project includes a Python virtual environment for running test data generation scripts:
+The project includes a Python virtual environment for running test data generation scripts and the SFTP interaction
+harness:
 
 ```bash
 # The venv is already created, but if you need to recreate it:
 python3 -m venv venv
 source venv/bin/activate
-pip install h5py numpy
+pip install h5py numpy paramiko
 deactivate
 ```
 
@@ -218,7 +219,7 @@ test/sql/large/                # Large SQLLogicTest files (slow)
 ### Running All Tests
 
 ```bash
-# Full suite: local tests + rewritten remote URL suite
+# Full suite: local tests + rewritten remote HTTP/SFTP suites
 make test
 
 # Run the local SQLLogicTests directly
@@ -240,8 +241,11 @@ If you run tests directly, ensure test data exists first:
 # Run a specific local test file directly
 ./build/release/test/unittest "test/sql/<testfile>.test"
 
-# Run the rewritten remote suite (includes test/sql/remote/*.test)
+# Run the rewritten remote HTTP suite (includes test/sql/remote/*.test)
 make test_remote_http
+
+# Run the rewritten remote SFTP suite + dedicated interaction harness
+make test_remote_sftp
 ```
 
 ### Running Individual Test Cases
@@ -258,15 +262,16 @@ You can filter tests by pattern:
 The Makefile provides a convenient test target:
 
 ```bash
-# Full suite: local tests + remote URL suite via local range-capable server
+# Full suite: local tests + remote HTTP/SFTP suites
 make test
 ```
 
 `make test` also ensures all HDF5 test data is present by running
 `test/data/ensure_test_data.sh` before executing the tests.
-It then runs the local SQLLogicTests and the rewritten remote URL suite (including `test/sql/remote/*.test`).
+It then runs the local SQLLogicTests, the rewritten remote HTTP suite (including `test/sql/remote/*.test`), and the
+rewritten remote SFTP suite plus its dedicated interaction harness.
 
-### Running Remote-URL Test Suite
+### Running Remote HTTP Test Suite
 
 To run the suite against rewritten remote URLs (using the local range-capable HTTP server):
 
@@ -277,13 +282,17 @@ make test_remote_http
 This target also runs `test/sql/remote/*.test` (auth, retries, redirects, timeout, truncation, corruption,
 cache behavior, and simulated server/drop failures).
 
-### TODO: Re-enable macOS Remote CI Coverage
+### Running Remote SFTP Test Suite
 
-Remote HTTP tests are currently skipped on macOS in the Makefile test targets (`test_*_internal`) due to a GitHub-hosted macOS runner issue where the local range test server process can stay alive but fail readiness.
+To run the suite against rewritten SFTP URLs (using the local rooted SFTP server):
 
-TODO:
-- Root-cause and fix the macOS runner startup/readiness behavior for `test/scripts/range_http_server.py`.
-- Remove the Darwin skip guard in the Makefile once fixed so remote tests run on macOS CI again.
+```bash
+make test_remote_sftp
+```
+
+This target rewrites the main SQL suite against `sftp://` URLs, starts the local SFTP test server, and then runs the
+dedicated interaction harness in `test/scripts/run_sftp_interaction_tests.py`. The runner will use the repo venv when
+present and otherwise falls back to `python3`/`python`, installing `paramiko` if needed.
 
 ---
 
@@ -524,6 +533,9 @@ h5db/
 ├── src/                     # Source code
 │   ├── h5db_extension.cpp   # Extension entry point
 │   ├── h5_read.cpp          # h5_read implementation
+│   ├── h5_remote_backend.cpp # DuckDB-FS and SFTP remote backends
+│   ├── h5_remote_vfd.cpp    # HDF5 remote VFD glue
+│   ├── h5_sftp_secrets.cpp  # DuckDB TYPE sftp secret registration
 │   ├── h5_tree.cpp          # h5_tree implementation
 │   ├── h5_ls.cpp            # h5_ls table/scalar implementations
 │   ├── h5_tree_shared.cpp   # shared h5_tree/h5_ls metadata helpers
@@ -550,6 +562,9 @@ h5db/
 - **`.env`**: Environment configuration (VCPKG path, build settings)
 - **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner
 - **`src/h5_read.cpp`** also owns `get_partition_data` for ordered batch sinks (`CTAS`, `INSERT`, `COPY`)
+- **`src/h5_remote_backend.cpp`**: DuckDB-backed remote access plus `sftp://` backend
+- **`src/h5_remote_vfd.cpp`**: HDF5 VFD integration for remote files
+- **`src/h5_sftp_secrets.cpp`**: registration and validation for DuckDB `TYPE sftp` secrets
 - **`src/h5_tree.cpp`**: recursive namespace listing
 - **`src/h5_ls.cpp`**: immediate-child listing (`h5_ls` table and scalar forms)
 - **`src/h5_tree_shared.cpp`**: shared row resolution, metadata, and projected-attribute helpers for `h5_tree`/`h5_ls`
@@ -558,7 +573,11 @@ h5db/
 - **`test/sql/*.test`**: SQLLogicTest test files (regular)
 - **`test/sql/remote/*.test`**: remote-only SQLLogicTests (auth, retries, redirects, transport faults)
 - **`test/sql/large/*.test`**: large SQLLogicTests (slow)
-- **`vcpkg.json`**: Dependencies (HDF5, etc.)
+- **`test/scripts/run_remote_tests.sh`**: rewritten remote HTTP suite harness
+- **`test/scripts/run_sftp_tests.sh`**: rewritten remote SFTP suite harness
+- **`test/scripts/run_sftp_interaction_tests.py`**: dedicated SFTP interaction/auth/cache harness
+- **`test/scripts/sftp_test_server_lib.py`**: local rooted SFTP test server implementation
+- **`vcpkg.json`**: Dependencies (`hdf5`, `libssh2`)
 
 ---
 
@@ -656,6 +675,12 @@ make test
 
 # Optional: skip slow tests
 ./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
+
+# Test rewritten remote HTTP suite
+make test_remote_http
+
+# Test rewritten remote SFTP suite + interaction harness
+make test_remote_sftp
 
 # Ensure test data exists (generate if missing)
 ./test/data/ensure_test_data.sh

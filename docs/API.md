@@ -2,11 +2,59 @@
 
 This document describes all functions provided by the h5db extension.
 
-## Table Functions
+## Remote Access
 
-`swmr := true` enables HDF5 SWMR read mode for local files. Remote URLs accept the parameter, but remote paths are
-opened through the DuckDB-backed remote VFD as immutable snapshots served by `httpfs`, so `H5F_ACC_SWMR_READ` is not
-used there.
+The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
+parameter, but remote paths are opened through the DuckDB-backed remote VFD as immutable snapshots, so
+`H5F_ACC_SWMR_READ` is not used there.
+
+All h5db functions accept local paths or remote URLs as `filename`.
+
+- DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
+  `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
+  when needed.
+- `sftp://` URLs are handled by h5db's built-in SFTP backend on POSIX platforms. On Windows, `sftp://` is not
+  supported.
+- Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
+
+### SFTP Secrets
+
+Before using `sftp://` URLs, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access.
+
+**Example:**
+
+```sql
+CREATE OR REPLACE SECRET beamline_sftp (
+    TYPE sftp,
+    SCOPE 'sftp://beamline.example.org/',
+    USERNAME 'alice',
+    PASSWORD 'secret',
+    KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
+);
+
+SELECT * FROM h5_read(
+    'sftp://beamline.example.org/data/run001.h5',
+    '/entry/data'
+);
+```
+
+**Required secret fields:**
+- `USERNAME`
+- exactly one of `PASSWORD` or `KEY_PATH`
+- at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
+
+**Optional secret fields:**
+- `KEY_PASSPHRASE`: passphrase for an encrypted private key
+- `PORT`: default `22`
+- `HOST_KEY_ALGORITHMS`: libssh2 host-key preference string, for example
+  `'ssh-ed25519,ecdsa-sha2-nistp256'`
+
+**Notes:**
+- `HOST_KEY_FINGERPRINT` is the lowercase hex SHA1 host-key fingerprint.
+- If a username or port is embedded in the `sftp://` URL, it must match the selected secret.
+- This is an h5db backend limitation, not a statement about libssh2 generally.
+
+## Table Functions
 
 ### `h5_tree(filename, projected_attributes...)`
 
@@ -16,11 +64,11 @@ resolve to the same underlying object. Selected HDF5 attributes can be projected
 as additional columns with `h5_attr(...)`.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
-  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr(name)`
   - `h5_attr(name, default_value)`
-  - `h5_alias(alias_name, h5_attr(name, default_value))`
+  - `h5_alias(alias_name, h5_attr(...))`
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
@@ -38,7 +86,7 @@ as additional columns with `h5_attr(...)`.
   - `[d0, d1, ...]` for array datasets
 - one additional column per projected attribute
   - column name = resolved attribute name, unless overridden by `h5_alias(...)`
-  - column type = type of `default_value`
+  - column type = `VARIANT` for `h5_attr(name)`, otherwise the type of `default_value`
 
 **Traversal Semantics:**
 - `/` is returned as a `group` row.
@@ -54,11 +102,13 @@ as additional columns with `h5_attr(...)`.
 - `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
 - constant expressions such as `lower('STRING_ATTR')` are allowed
 - row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree`
-- `default_value` must be a bind-time constant expression with a concrete type
+- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
+- if `default_value` is provided, it must be a bind-time constant expression with a concrete type
 - typed `NULL` defaults are allowed, e.g. `NULL::VARCHAR`
 - if an object has the projected attribute, `h5_tree` reads it using the same conversion rules as `h5_attributes()`
   and casts it to the declared output type
-- if an object does not have the projected attribute, `h5_tree` emits `default_value`
+- if an object does not have the projected attribute, `h5_tree` emits `default_value` (or `NULL::VARIANT` for
+  `h5_attr(name)`)
 - projected output names must be unique; duplicate projected names or collisions with `path`, `type`, `dtype`, or
   `shape` fail at bind time with DuckDB's duplicate-column error
 
@@ -107,12 +157,12 @@ returns the same row shape as `h5_tree()`, but only for the immediate children o
 the requested group.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
-  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr(name)`
   - `h5_attr(name, default_value)`
-  - `h5_alias(alias_name, h5_attr(name, default_value))`
+  - `h5_alias(alias_name, h5_attr(...))`
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with the same columns and projected-attribute semantics as `h5_tree()`
@@ -147,8 +197,7 @@ FROM h5_ls(
 Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
-  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
@@ -205,8 +254,7 @@ SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 Reads attributes from an object or the file root.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. Remote schemes are handled through DuckDB `httpfs`
-  (for example `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`, `gs://`, `hf://`).
+- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `object_path` (VARCHAR): Path to the target object, or `/` for root
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
@@ -248,7 +296,7 @@ Returns the immediate children of a group as a `MAP(VARCHAR, STRUCT(...))` keyed
 by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 
 **Parameters:**
-- `filename` (VARCHAR): File path or URL. Must be a constant expression.
+- `filename` (VARCHAR): File path or remote URL. Must be a constant expression. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR): Group path to list. May vary per row.
 - `projected_attributes` (variadic, optional): Zero or more `h5_attr(...)` or
   `h5_alias(..., h5_attr(...))` expressions. These must be constant expressions.
@@ -331,29 +379,38 @@ Adds a virtual index column for the outermost dimension when used with `h5_read(
 SELECT index, measurements FROM h5_read('data.h5', h5_index(), '/measurements');
 ```
 
-**Predicate pushdown:** range filters on the index column (e.g., `index >= 100`, `index BETWEEN 10 AND 20`) are used to
-reduce I/O when the bounds are static constants.
+**Predicate pushdown:** range-like filters on the index column (for example `index >= 100`, `index BETWEEN 10 AND 20`,
+or comparison-cast forms with bind-time constants) are used to reduce I/O when the planner can normalize them into
+simple comparisons.
 
 ---
 
-### `h5_attr(name, default_value)`
+### `h5_attr(name[, default_value])`
 
 Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 
 **Parameters:**
 - `name` (VARCHAR): Attribute name to read. Any non-`NULL` bind-time-resolved `VARCHAR` expression is allowed.
-- `default_value` (ANY): Bind-time constant default value. Its type becomes the output type of the projected column.
+- `default_value` (ANY, optional): Bind-time constant default value. Its type becomes the output type of the projected
+  column. If omitted, the default is `NULL::VARIANT`.
 
 **Returns:** STRUCT wrapper used by `h5_tree()` and `h5_ls()`
 
 **Notes:**
+- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
 - typed `NULL` defaults such as `NULL::VARCHAR` are allowed
 - untyped `NULL` defaults are rejected
-- missing attributes use `default_value`
+- missing attributes use `default_value` or `NULL::VARIANT` when the default is omitted
 - present attributes are converted like `h5_attributes()` and then cast to the type of `default_value`
 
 **Example:**
 ```sql
+SELECT path, type, NX_class
+FROM h5_tree(
+    'data.h5',
+    h5_attr('NX_class')
+);
+
 SELECT path, type, NX_class
 FROM h5_tree(
     'data.h5',
@@ -477,8 +534,9 @@ All functions provide clear error messages for common issues:
 - **`h5_read` projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely
   for significant performance gains
 - **`h5_read` predicate pushdown**: Range-like filters with static constants are applied during scan for RSE and `h5_index()` columns
-  to reduce I/O (supported: `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`; not supported: `!=`, `IS DISTINCT FROM`, or expressions
-  like `index + 1 > 10`)
+  to reduce I/O. Supported shapes include `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, bind-time-foldable RHS expressions, and
+  comparison-cast forms that normalize to those operators. Unsupported boolean shapes such as `OR`, `!=`,
+  `IS DISTINCT FROM`, or expressions like `index + 1 > 10` remain post-scan filters.
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row
