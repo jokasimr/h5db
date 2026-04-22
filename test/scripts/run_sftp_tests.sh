@@ -99,6 +99,7 @@ TMP_SQL="$TMP_ROOT/sql"
 KNOWN_HOSTS="$TMP_ROOT/known_hosts"
 HOST_KEY="$TMP_ROOT/host_key"
 PRELUDE="$TMP_ROOT/remote_sftp_prelude.sql"
+SERVER_LOG="$TMP_ROOT/h5db_remote_sftp.log"
 SERVER_PID=""
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
@@ -130,7 +131,7 @@ SQL
   --username "$USERNAME" \
   --password "$PASSWORD" \
   --host-key-file "$HOST_KEY" \
-  --known-hosts-file "$KNOWN_HOSTS" >/tmp/h5db_remote_sftp.log 2>&1 &
+  --known-hosts-file "$KNOWN_HOSTS" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 READY=0
@@ -159,8 +160,8 @@ done
 
 if [[ "$READY" -ne 1 ]]; then
   echo "Failed to start SFTP server on ${HOST}:${PORT}" >&2
-  if [[ -f /tmp/h5db_remote_sftp.log ]]; then
-    tail -n 80 /tmp/h5db_remote_sftp.log >&2 || true
+  if [[ -f "$SERVER_LOG" ]]; then
+    tail -n 80 "$SERVER_LOG" >&2 || true
   fi
   exit 1
 fi

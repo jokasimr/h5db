@@ -12,7 +12,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -30,14 +30,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) > 1001249999)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500'
@@ -49,7 +49,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -67,14 +67,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) <= 1001250000.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -86,7 +86,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -104,14 +104,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) >= 1001250000.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500'
@@ -123,7 +123,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -141,14 +141,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) < 1001250000.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500'
@@ -160,7 +160,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -178,14 +178,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -197,7 +197,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -215,14 +215,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) BETWEEN 1001249999 AND 1001750000)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500'
@@ -234,7 +234,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -252,14 +252,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) <= 1001249999)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500'
@@ -275,7 +275,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -293,14 +293,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -312,7 +312,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -330,14 +330,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) > 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -349,7 +349,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -367,14 +367,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) < 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -386,7 +386,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -404,14 +404,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) <= 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -423,7 +423,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -441,14 +441,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) < 30.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -464,7 +464,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -482,14 +482,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) > 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -501,7 +501,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -519,14 +519,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) >= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -538,7 +538,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -556,14 +556,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) < 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -575,7 +575,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -593,14 +593,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) <= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -612,7 +612,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query IIII
 SELECT COUNT(*), MIN(regular), MAX(regular), SUM(regular)
@@ -630,14 +630,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) BETWEEN 2.0 AND 5.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -649,7 +649,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -667,14 +667,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) > 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -686,7 +686,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -704,14 +704,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) >= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -723,7 +723,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -741,14 +741,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) <= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -760,7 +760,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -778,14 +778,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) < 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -801,7 +801,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -819,14 +819,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) > 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -838,7 +838,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -856,14 +856,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) >= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -875,7 +875,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -893,14 +893,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) < 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -912,7 +912,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -930,14 +930,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) <= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -949,7 +949,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query IIII
 SELECT COUNT(*), MIN(regular), MAX(regular), SUM(regular)
@@ -967,14 +967,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) BETWEEN 2.0 AND 5.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -986,7 +986,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1004,14 +1004,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) >= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -1023,7 +1023,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1041,14 +1041,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) > 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -1060,7 +1060,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1078,14 +1078,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) <= 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1097,7 +1097,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1115,14 +1115,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) < 3.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1134,7 +1134,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -1152,14 +1152,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int64_rse_values AS DECIMAL(20,1)) BETWEEN 250.0 AND 450.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1171,7 +1171,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -1189,14 +1189,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(int64_rse_values AS DECIMAL(20,1)) < 250.0)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1212,7 +1212,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1230,14 +1230,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL(11,1)) < 15.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 200'
@@ -1249,7 +1249,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1267,14 +1267,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL(11,1)) >= 20.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 300'
@@ -1286,7 +1286,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1304,14 +1304,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL(11,1)) BETWEEN 15.5 AND 25.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1323,7 +1323,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1341,14 +1341,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL(11,1)) >= 15.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 700'
@@ -1360,7 +1360,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1378,14 +1378,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL(11,1)) < 20.5)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 600'
@@ -1401,7 +1401,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1419,14 +1419,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) < 1.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2'
@@ -1442,7 +1442,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1464,14 +1464,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (regular BETWEEN 400 AND 800) AND (float_rse_values <= 4.6))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 200'
@@ -1483,7 +1483,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -1505,14 +1505,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "((int_rse_values >= 30) AND (regular BETWEEN 400 AND 699) AND (CAST(int_rse_values AS DECIMAL(11,1)) BETWEEN 20.1 AND 45.0))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 400'
@@ -1524,7 +1524,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -1546,14 +1546,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (regular BETWEEN 400 AND 700) AND (float_rse_values <= 4.0))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 0'
@@ -1565,7 +1565,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query III
 SELECT COUNT(*), MIN(index), MAX(index)
@@ -1585,14 +1585,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "((integers >= 2) AND (CAST(index AS DECIMAL(20,1)) BETWEEN 2.1 AND 6.9))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 4'
@@ -1604,7 +1604,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1622,14 +1622,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) <= 1.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2'
@@ -1641,7 +1641,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1659,14 +1659,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) >= 1.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 8'
@@ -1678,7 +1678,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1696,14 +1696,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) > 1.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 8'
@@ -1715,7 +1715,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1733,14 +1733,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) >= 7.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2'
@@ -1752,7 +1752,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1770,14 +1770,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) > 7.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2'
@@ -1789,7 +1789,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1807,14 +1807,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) <= 7.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 8'
@@ -1826,7 +1826,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1844,14 +1844,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) < 7.2)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 8'
@@ -1863,7 +1863,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_pushdown_cast_profile.json';
+PRAGMA profiling_output='h5db_pushdown_cast_profile.json';
 
 query II
 SELECT COUNT(*), SUM(index)
@@ -1881,14 +1881,14 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) BETWEEN 1.2 AND 3.8)"');
 ----
 1
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_pushdown_cast_profile.json')
+FROM read_text('h5db_pushdown_cast_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2'

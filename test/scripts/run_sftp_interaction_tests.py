@@ -57,7 +57,7 @@ class SFTPInteractionTests(unittest.TestCase):
             else args.duckdb_bin
         )
         cls.data_dir = str((cls.project_root / "test/data").resolve())
-        cls.tempdir = Path(tempfile.mkdtemp(prefix="h5db_sftp_interaction_", dir="/tmp"))
+        cls.tempdir = Path(tempfile.mkdtemp(prefix="h5db_sftp_interaction_"))
         cls.mutable_root = cls.tempdir / "mutable_root"
         cls.mutable_root.mkdir()
         cls.mutable_file = cls.mutable_root / "mutable.h5"

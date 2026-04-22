@@ -85,7 +85,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_three_and_profile.json';
+PRAGMA profiling_output='h5db_large_three_and_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -103,7 +103,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_three_and_profile.json')
+FROM read_text('h5db_large_three_and_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 6000000'
@@ -117,7 +117,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_chain_same_rse_profile.json';
+PRAGMA profiling_output='h5db_large_chain_same_rse_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -138,7 +138,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_chain_same_rse_profile.json')
+FROM read_text('h5db_large_chain_same_rse_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 2000000'
@@ -152,7 +152,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_chain_multi_rse_profile.json';
+PRAGMA profiling_output='h5db_large_chain_multi_rse_profile.json';
 
 query III
 SELECT COUNT(*), MIN(regular), MAX(regular)
@@ -177,7 +177,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_chain_multi_rse_profile.json')
+FROM read_text('h5db_large_chain_multi_rse_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 4000000'
@@ -191,7 +191,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_chain_rse_index_profile.json';
+PRAGMA profiling_output='h5db_large_chain_rse_index_profile.json';
 
 query III
 SELECT COUNT(*), MIN(index), MAX(index)
@@ -213,7 +213,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_chain_rse_index_profile.json')
+FROM read_text('h5db_large_chain_rse_index_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 3000000'
@@ -227,7 +227,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_chain_tight_profile.json';
+PRAGMA profiling_output='h5db_large_chain_tight_profile.json';
 
 query III
 SELECT COUNT(*), MIN(index), MAX(index)
@@ -251,7 +251,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_chain_tight_profile.json')
+FROM read_text('h5db_large_chain_tight_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 500001'
@@ -265,7 +265,7 @@ statement ok
 PRAGMA enable_profiling='json';
 
 statement ok
-PRAGMA profiling_output='/tmp/h5db_large_chain_empty_profile.json';
+PRAGMA profiling_output='h5db_large_chain_empty_profile.json';
 
 query I
 SELECT COUNT(*)
@@ -289,7 +289,7 @@ PRAGMA disable_profiling;
 
 query I
 SELECT COUNT(*)
-FROM read_text('/tmp/h5db_large_chain_empty_profile.json')
+FROM read_text('h5db_large_chain_empty_profile.json')
 WHERE contains(
     substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
     '"operator_cardinality": 0'

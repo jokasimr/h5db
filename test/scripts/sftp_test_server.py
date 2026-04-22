@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import signal
+import tempfile
 import threading
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def main() -> None:
     if not root_dir.is_dir():
         raise SystemExit(f"Directory does not exist: {root_dir}")
 
-    host_key = load_or_create_host_key(args.host_key_file or Path("/tmp") / "h5db_sftp_hostkey", "rsa")
+    host_key = load_or_create_host_key(args.host_key_file or Path(tempfile.gettempdir()) / "h5db_sftp_hostkey", "rsa")
     if args.known_hosts_file:
         write_known_host(args.known_hosts_file, args.host, args.port, host_key)
 
@@ -45,8 +46,8 @@ def main() -> None:
     print(f"Serving SFTP on {args.host}:{server.port} from {root_dir}", flush=True)
 
     try:
-        while not shutdown_requested.is_set():
-            signal.pause()
+        while not shutdown_requested.wait(1.0):
+            pass
     except KeyboardInterrupt:
         pass
     finally:

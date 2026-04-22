@@ -57,10 +57,10 @@ trap cleanup EXIT
 
 BASE_URL="http://127.0.0.1:${PORT}"
 READY=0
-LAST_LOG="/tmp/h5db_remote_http.log"
+LAST_LOG="$TMP_ROOT/h5db_remote_http.log"
 for PORT_OFFSET in $(seq 0 $((PORT_TRIES - 1))); do
   CANDIDATE_PORT=$((PORT + PORT_OFFSET))
-  LAST_LOG="/tmp/h5db_remote_http.${CANDIDATE_PORT}.log"
+  LAST_LOG="$TMP_ROOT/h5db_remote_http.${CANDIDATE_PORT}.log"
 
   python3 "$PROJECT_ROOT/test/scripts/range_http_server.py" \
     --port "$CANDIDATE_PORT" \
