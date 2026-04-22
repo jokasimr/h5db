@@ -217,9 +217,11 @@ class SFTPInteractionTests(unittest.TestCase):
     def run_sql(self, sql: str) -> DuckDBResult:
         try:
             completed = subprocess.run(
-                [self.duckdb_bin, "-unsigned", "-c", sql],
+                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-c", sql],
                 cwd=self.project_root,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
             )
@@ -291,9 +293,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.key_known_hosts}',
                 PORT {self.key_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(sql)
@@ -315,9 +315,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.key_known_hosts}',
                 PORT {self.key_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(sql)
@@ -496,9 +494,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 PORT {self.multi_key_server.port},
                 HOST_KEY_ALGORITHMS 'ecdsa-sha2-nistp256'
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(ecdsa_sql)
@@ -520,9 +516,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 PORT {self.multi_key_server.port},
                 HOST_KEY_ALGORITHMS 'ssh-rsa'
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(rsa_sql)
@@ -544,9 +538,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 PORT {self.multi_key_server.port},
                 HOST_KEY_ALGORITHMS 'ssh-rsa,ecdsa-sha2-nistp256'
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(sql)
@@ -568,9 +560,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 PORT {self.multi_key_server.port},
                 HOST_KEY_ALGORITHMS 'bogus'
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(sql)
@@ -593,9 +583,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('{url}')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_tree('{url}');
             """
         ).strip()
         baseline_result = self.run_sql(baseline_sql)
@@ -620,17 +608,11 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('{url}')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
-            COPY (
-                SELECT COALESCE(SUM(nr_bytes), 0)
-                FROM duckdb_external_file_cache()
-                WHERE path = '{url}'
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('{url}')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT COALESCE(SUM(nr_bytes), 0)
+            FROM duckdb_external_file_cache()
+            WHERE path = '{url}';
+            SELECT COUNT(*) FROM h5_tree('{url}');
             """
         ).strip()
         result = self.run_sql(repeated_sql)
@@ -658,12 +640,8 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('{url}')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('{url}')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT COUNT(*) FROM h5_tree('{url}');
             """
         ).strip()
         result = self.run_sql(sql)
@@ -689,9 +667,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            COPY (
-                SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d');
             """
         ).strip()
         baseline_result = self.run_sql(baseline_sql)
@@ -716,12 +692,8 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            COPY (
-                SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
-            COPY (
-                SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d');
+            SELECT SUM(array_2d[1]) FROM h5_read('{url}', '/array_2d');
             """
         ).strip()
         result = self.run_sql(repeated_sql)
@@ -736,12 +708,14 @@ class SFTPInteractionTests(unittest.TestCase):
         self.replace_mutable_fixture("simple.h5", now - 120)
 
         process = subprocess.Popen(
-            [self.duckdb_bin, "-unsigned"],
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned"],
             cwd=self.project_root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
 
@@ -777,9 +751,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
                 PORT {self.mutable_server.port}
             );
-            COPY (
-                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5')
-            ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+            SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
             """
         ).strip()
         process.stdin.write(setup_sql + "\n")
@@ -796,9 +768,7 @@ class SFTPInteractionTests(unittest.TestCase):
         process.stdin.write(
             textwrap.dedent(
                 f"""
-                COPY (
-                    SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5')
-                ) TO STDOUT (FORMAT CSV, HEADER FALSE);
+                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
                 .quit
                 """
             )
