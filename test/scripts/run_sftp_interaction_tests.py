@@ -2,6 +2,7 @@
 import argparse
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +35,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_host_binary_path(project_root: Path, path_text: str) -> str:
+    if os.name == "nt":
+        match = re.match(r"^/([a-zA-Z])/(.*)$", path_text)
+        if match:
+            drive = match.group(1).upper()
+            rest = match.group(2).replace("/", "\\")
+            path_text = f"{drive}:\\{rest}"
+
+    path = Path(path_text)
+    resolved = path.resolve() if path.is_absolute() else (project_root / path_text).resolve()
+    if os.name == "nt" and not resolved.exists() and resolved.suffix.lower() != ".exe":
+        exe_path = resolved.with_suffix(".exe")
+        if exe_path.exists():
+            resolved = exe_path
+    return str(resolved)
+
+
 class DuckDBResult:
     def __init__(self, completed: subprocess.CompletedProcess[str]):
         self.returncode = completed.returncode
@@ -51,11 +69,7 @@ class SFTPInteractionTests(unittest.TestCase):
             raise RuntimeError("Arguments must be parsed before running tests")
         args = PARSED_ARGS
         cls.project_root = Path(__file__).resolve().parents[2]
-        cls.duckdb_bin = (
-            str((cls.project_root / args.duckdb_bin).resolve())
-            if not Path(args.duckdb_bin).is_absolute()
-            else args.duckdb_bin
-        )
+        cls.duckdb_bin = normalize_host_binary_path(cls.project_root, args.duckdb_bin)
         cls.data_dir = str((cls.project_root / "test/data").resolve())
         cls.tempdir = Path(tempfile.mkdtemp(prefix="h5db_sftp_interaction_"))
         cls.mutable_root = cls.tempdir / "mutable_root"

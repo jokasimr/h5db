@@ -13,6 +13,15 @@ TEST_GLOB="*"
 RUN_INTERACTION_TESTS=1
 PYTHON_BIN="python3"
 
+native_path_for_host() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -am "$path"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
 usage() {
   cat <<USAGE
 Usage: $0 [options]
@@ -101,6 +110,7 @@ HOST_KEY="$TMP_ROOT/host_key"
 PRELUDE="$TMP_ROOT/remote_sftp_prelude.sql"
 SERVER_LOG="$TMP_ROOT/h5db_remote_sftp.log"
 SERVER_PID=""
+KNOWN_HOSTS_SQL_PATH="$(native_path_for_host "$KNOWN_HOSTS")"
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" >/dev/null 2>&1 || true
@@ -119,7 +129,7 @@ CREATE OR REPLACE TEMPORARY SECRET h5db_remote_sftp (
     SCOPE '${BASE_URL}',
     USERNAME '${USERNAME}',
     PASSWORD '${PASSWORD}',
-    KNOWN_HOSTS_PATH '${KNOWN_HOSTS}',
+    KNOWN_HOSTS_PATH '${KNOWN_HOSTS_SQL_PATH}',
     PORT ${PORT}
 );
 SQL
