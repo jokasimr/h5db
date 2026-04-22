@@ -45,6 +45,18 @@ LOAD h5db;
 Then run queries such as:
 
 ```sql
+-- Read one dataset
+SELECT * FROM h5_read('data.h5', '/measurements');
+
+-- Read multiple datasets side by side
+SELECT * FROM h5_read('data.h5', '/timestamps', '/temperatures');
+
+-- Add a virtual row index
+SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
+
+-- Read a remote file
+SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
+
 -- Inspect the file structure
 SELECT * FROM h5_tree('data.h5');
 
@@ -52,7 +64,7 @@ SELECT * FROM h5_tree('data.h5');
 SELECT path, type, NX_class
 FROM h5_tree(
     'data.h5',
-    h5_attr('NX_class', NULL::VARCHAR)
+    h5_attr('NX_class')
 );
 
 -- Project all attributes as one map-valued column
@@ -71,14 +83,8 @@ SELECT * FROM h5_ls('data.h5', '/entry/instrument');
 -- Return a map of immediate children keyed by child name
 SELECT h5_ls('data.h5', '/entry/instrument');
 
--- Read one dataset
-SELECT * FROM h5_read('data.h5', '/measurements');
-
--- Read multiple datasets side by side
-SELECT * FROM h5_read('data.h5', '/timestamps', '/temperatures');
-
--- Add a virtual row index
-SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
+-- Read attributes
+SELECT * FROM h5_attributes('data.h5', '/measurements');
 
 -- Read run-start encoded data
 SELECT * FROM h5_read(
@@ -94,18 +100,12 @@ SELECT * FROM h5_read(
     '/measurements'
 );
 
--- Read attributes
-SELECT * FROM h5_attributes('data.h5', '/measurements');
-
 -- Rename a projected h5_tree attribute column
 SELECT path, time
 FROM h5_tree(
     'data.h5',
-    h5_alias('time', h5_attr('count_time', 0::DOUBLE))
+    h5_alias('time', h5_attr('count_time'))
 );
-
--- Read a remote file
-SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
 ```
 
 ## Remote Access
