@@ -1,11 +1,12 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#endif
+
 #include <libssh2.h>
 #include <libssh2_sftp.h>
-#else
-#include <libssh2.h>
-#include <libssh2_sftp.h>
+
+#ifndef _WIN32
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -586,9 +587,13 @@ private:
 		struct WinsockState {
 			WinsockState() {
 				WSADATA wsadata;
-				auto rc = WSAStartup(MAKEWORD(2, 0), &wsadata);
+				auto rc = WSAStartup(MAKEWORD(2, 2), &wsadata);
 				if (rc != 0) {
 					throw IOException("WSAStartup failed: %d", rc);
+				}
+				if (LOBYTE(wsadata.wVersion) != 2 || HIBYTE(wsadata.wVersion) != 2) {
+					WSACleanup();
+					throw IOException("WSAStartup did not negotiate Winsock 2.2");
 				}
 			}
 
@@ -767,12 +772,7 @@ private:
 			timeout.tv_sec = 0;
 			timeout.tv_usec = IO_WAIT_SLICE_MS * 1000;
 
-#ifdef _WIN32
 			auto rc = select(0, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr, &exceptfds, &timeout);
-#else
-			auto rc = select(socket_fd->Get() + 1, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr,
-			                 &exceptfds, &timeout);
-#endif
 			if (rc > 0) {
 				return;
 			}
@@ -837,7 +837,11 @@ private:
 		auto port_string = std::to_string(config.port);
 		auto rc = getaddrinfo(config.host.c_str(), port_string.c_str(), &hints, &result);
 		if (rc != 0) {
+#ifdef _WIN32
+			throw IOException("Failed to resolve SFTP host '%s': %s", config.host, gai_strerrorA(rc));
+#else
 			throw IOException("Failed to resolve SFTP host '%s': %s", config.host, gai_strerror(rc));
+#endif
 		}
 
 		std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> addrinfo_guard(result, freeaddrinfo);
