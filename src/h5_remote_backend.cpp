@@ -1,3 +1,20 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <libssh2.h>
+#include <libssh2_sftp.h>
+#else
+#include <libssh2.h>
+#include <libssh2_sftp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#endif
+
 #include "h5_remote_backend.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -10,18 +27,6 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/caching_file_system.hpp"
-
-#ifndef _WIN32
-#include <libssh2.h>
-#include <libssh2_sftp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cerrno>
-#endif
 
 #include <cstring>
 #include <cstdlib>
@@ -107,7 +112,6 @@ private:
 	idx_t file_size = 0;
 };
 
-#ifndef _WIN32
 struct H5SftpUrl {
 	std::string original_url;
 	std::string authority;
@@ -372,25 +376,26 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 
 class ScopedSocket {
 public:
-	explicit ScopedSocket(int fd_p) : fd(fd_p) {
+	explicit ScopedSocket(libssh2_socket_t fd_p) : fd(fd_p) {
 	}
 	~ScopedSocket() {
-		if (fd >= 0) {
-			close(fd);
+		if (fd != LIBSSH2_INVALID_SOCKET) {
+			LIBSSH2_SOCKET_CLOSE(fd);
 		}
 	}
-	int Get() const {
+	libssh2_socket_t Get() const {
 		return fd;
 	}
 
 private:
-	int fd;
+	libssh2_socket_t fd;
 };
 
 class H5SftpFileEngine {
 public:
 	H5SftpFileEngine(ClientContext &context_p, const H5SftpUrl &url_p) : context(&context_p), url(url_p) {
 		config = ResolveSftpConfig(context_p, url);
+		InitializeSocketApi();
 		InitializeLibssh2();
 		OpenVerifiedSession();
 		Authenticate();
@@ -576,6 +581,26 @@ private:
 		}
 	}
 
+	static void InitializeSocketApi() {
+#ifdef _WIN32
+		struct WinsockState {
+			WinsockState() {
+				WSADATA wsadata;
+				auto rc = WSAStartup(MAKEWORD(2, 0), &wsadata);
+				if (rc != 0) {
+					throw IOException("WSAStartup failed: %d", rc);
+				}
+			}
+
+			~WinsockState() {
+				WSACleanup();
+			}
+		};
+
+		static WinsockState winsock_state;
+#endif
+	}
+
 	static std::vector<std::string> GetSupportedHostKeyAlgorithms() {
 		static std::once_flag supported_once;
 		static std::vector<std::string> supported_algorithms;
@@ -673,15 +698,106 @@ private:
 		}
 	}
 
-	void WaitForSocketEvents(short events) {
+	static bool SocketConnectInProgress(int error_code) {
+#ifdef _WIN32
+		return error_code == WSAEWOULDBLOCK || error_code == WSAEINPROGRESS || error_code == WSAEALREADY;
+#else
+		return error_code == EINPROGRESS || error_code == EWOULDBLOCK;
+#endif
+	}
+
+	static bool SocketWaitInterrupted(int error_code) {
+#ifdef _WIN32
+		return error_code == WSAEINTR;
+#else
+		return error_code == EINTR;
+#endif
+	}
+
+	static int GetSocketLastError() {
+#ifdef _WIN32
+		return WSAGetLastError();
+#else
+		return errno;
+#endif
+	}
+
+	static std::string SocketErrorMessage(int error_code) {
+#ifdef _WIN32
+		return StringUtil::Format("WSA error %d", error_code);
+#else
+		return std::strerror(error_code);
+#endif
+	}
+
+	static bool TrySetSocketNonBlocking(libssh2_socket_t fd) {
+#ifdef _WIN32
+		u_long non_blocking = 1;
+		return ioctlsocket(fd, FIONBIO, &non_blocking) == 0;
+#else
+		auto flags = fcntl(fd, F_GETFL, 0);
+		if (flags < 0) {
+			return false;
+		}
+		return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+	}
+
+	void WaitForSocketEvents(bool wait_read, bool wait_write) {
 		D_ASSERT(socket_fd);
-		struct pollfd pfd;
-		pfd.fd = socket_fd->Get();
-		pfd.events = events;
-		pfd.revents = 0;
 
 		while (true) {
 			ThrowIfInterrupted();
+#ifdef _WIN32
+			fd_set readfds;
+			fd_set writefds;
+			fd_set exceptfds;
+			FD_ZERO(&readfds);
+			FD_ZERO(&writefds);
+			FD_ZERO(&exceptfds);
+			if (wait_read) {
+				FD_SET(socket_fd->Get(), &readfds);
+			}
+			if (wait_write) {
+				FD_SET(socket_fd->Get(), &writefds);
+			}
+			FD_SET(socket_fd->Get(), &exceptfds);
+
+			timeval timeout;
+			timeout.tv_sec = 0;
+			timeout.tv_usec = IO_WAIT_SLICE_MS * 1000;
+
+#ifdef _WIN32
+			auto rc = select(0, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr, &exceptfds, &timeout);
+#else
+			auto rc = select(socket_fd->Get() + 1, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr,
+			                 &exceptfds, &timeout);
+#endif
+			if (rc > 0) {
+				return;
+			}
+			if (rc == 0) {
+				continue;
+			}
+			auto error_code = GetSocketLastError();
+			if (SocketWaitInterrupted(error_code)) {
+				continue;
+			}
+			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(error_code));
+#else
+			short events = 0;
+			if (wait_read) {
+				events |= POLLIN;
+			}
+			if (wait_write) {
+				events |= POLLOUT;
+			}
+
+			struct pollfd pfd;
+			pfd.fd = socket_fd->Get();
+			pfd.events = events;
+			pfd.revents = 0;
+
 			auto rc = poll(&pfd, 1, IO_WAIT_SLICE_MS);
 			if (rc > 0) {
 				return;
@@ -689,27 +805,25 @@ private:
 			if (rc == 0) {
 				continue;
 			}
-			if (errno == EINTR) {
+			auto error_code = GetSocketLastError();
+			if (SocketWaitInterrupted(error_code)) {
 				continue;
 			}
-			throw IOException("Polling SFTP socket failed: %s", std::strerror(errno));
+			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(error_code));
+#endif
 		}
 	}
 
 	void WaitForSessionIO() {
 		D_ASSERT(session);
 		auto directions = libssh2_session_block_directions(session);
-		short events = 0;
-		if (directions & LIBSSH2_SESSION_BLOCK_INBOUND) {
-			events |= POLLIN;
+		auto wait_read = (directions & LIBSSH2_SESSION_BLOCK_INBOUND) != 0;
+		auto wait_write = (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) != 0;
+		if (!wait_read && !wait_write) {
+			wait_read = true;
+			wait_write = true;
 		}
-		if (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) {
-			events |= POLLOUT;
-		}
-		if (events == 0) {
-			events = POLLIN | POLLOUT;
-		}
-		WaitForSocketEvents(events);
+		WaitForSocketEvents(wait_read, wait_write);
 	}
 
 	void ConnectSocket() {
@@ -727,44 +841,48 @@ private:
 		}
 
 		std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> addrinfo_guard(result, freeaddrinfo);
-		int fd = -1;
+		libssh2_socket_t fd = LIBSSH2_INVALID_SOCKET;
 		for (auto *rp = result; rp; rp = rp->ai_next) {
 			ThrowIfInterrupted();
 			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-			if (fd < 0) {
+			if (fd == LIBSSH2_INVALID_SOCKET) {
 				continue;
 			}
-			auto flags = fcntl(fd, F_GETFL, 0);
-			if (flags < 0) {
-				close(fd);
-				fd = -1;
-				continue;
-			}
-			if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-				close(fd);
-				fd = -1;
+			if (!TrySetSocketNonBlocking(fd)) {
+				LIBSSH2_SOCKET_CLOSE(fd);
+				fd = LIBSSH2_INVALID_SOCKET;
 				continue;
 			}
 			if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
 				socket_fd = make_uniq<ScopedSocket>(fd);
 				return;
 			}
-			if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
+
+			auto connect_error = GetSocketLastError();
+			if (SocketConnectInProgress(connect_error)) {
 				socket_fd = make_uniq<ScopedSocket>(fd);
-				WaitForSocketEvents(POLLOUT);
+				WaitForSocketEvents(false, true);
 
 				int socket_error = 0;
+#ifdef _WIN32
+				int error_len = sizeof(socket_error);
+				if (getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&socket_error), &error_len) == 0 &&
+				    socket_error == 0) {
+					return;
+				}
+#else
 				socklen_t error_len = sizeof(socket_error);
 				if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 && socket_error == 0) {
 					return;
 				}
+#endif
 
 				socket_fd.reset();
-				fd = -1;
+				fd = LIBSSH2_INVALID_SOCKET;
 				continue;
 			}
-			close(fd);
-			fd = -1;
+			LIBSSH2_SOCKET_CLOSE(fd);
+			fd = LIBSSH2_INVALID_SOCKET;
 		}
 		throw IOException("Failed to connect to SFTP host '%s:%d'", config.host, config.port);
 	}
@@ -916,9 +1034,11 @@ private:
 			}
 		}
 		auto passphrase = config.key_passphrase ? config.key_passphrase->c_str() : nullptr;
+		D_ASSERT(config.key_path.has_value());
+		const auto &key_path = config.key_path.value();
 		while (true) {
-			auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr,
-			                                              config.key_path->c_str(), passphrase);
+			auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr, key_path.c_str(),
+			                                              passphrase);
 			if (rc == 0) {
 				return;
 			}
@@ -984,8 +1104,9 @@ private:
 			throw IOException("SFTP file '%s' did not report a file size", config.remote_path);
 		}
 		file_size = UnsafeNumericCast<idx_t>(attrs.filesize);
-		last_modified =
-		    (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) ? Timestamp::FromEpochSeconds(attrs.mtime) : timestamp_t();
+		last_modified = (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME)
+		                    ? Timestamp::FromEpochSeconds(UnsafeNumericCast<int64_t>(attrs.mtime))
+		                    : timestamp_t();
 	}
 
 	SftpReadHandle &SelectReadHandle(idx_t offset) {
@@ -1221,7 +1342,6 @@ private:
 	unique_ptr<FileHandle> direct_handle;
 	idx_t file_size = 0;
 };
-#endif
 
 } // namespace
 
@@ -1246,11 +1366,7 @@ unique_ptr<H5RemoteBackend> OpenH5RemoteBackend(ClientContext &context, const st
 	case H5RemoteBackendType::DUCKDB_FS:
 		return make_uniq<DuckDBFsRemoteBackend>(context, path);
 	case H5RemoteBackendType::SFTP:
-#ifdef _WIN32
-		throw NotImplementedException("SFTP URLs are not supported on Windows");
-#else
 		return make_uniq<H5SftpRemoteBackend>(context, ParseSftpUrl(path));
-#endif
 	default:
 		throw InternalException("Unknown remote backend type");
 	}
