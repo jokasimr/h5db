@@ -8,6 +8,7 @@ PORT="18080"
 UNITTEST_BIN="$PROJECT_ROOT/build/release/test/unittest"
 TEST_GLOB="*"
 PREPEND_FILE="$PROJECT_ROOT/test/sql/remote_httpfs_prelude.sql"
+PORT_TRIES=10
 
 usage() {
   cat <<USAGE
@@ -55,18 +56,22 @@ cleanup() {
 trap cleanup EXIT
 
 BASE_URL="http://127.0.0.1:${PORT}"
-python3 "$PROJECT_ROOT/test/scripts/range_http_server.py" \
-  --port "$PORT" \
-  --directory "$PROJECT_ROOT/test/data" >/tmp/h5db_remote_http.log 2>&1 &
-SERVER_PID=$!
-
-# Wait until the local server is actually serving range requests.
 READY=0
-for _ in $(seq 1 50); do
-  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
-    break
-  fi
-  if python3 - "$PORT" <<'PY'
+LAST_LOG="/tmp/h5db_remote_http.log"
+for PORT_OFFSET in $(seq 0 $((PORT_TRIES - 1))); do
+  CANDIDATE_PORT=$((PORT + PORT_OFFSET))
+  LAST_LOG="/tmp/h5db_remote_http.${CANDIDATE_PORT}.log"
+
+  python3 "$PROJECT_ROOT/test/scripts/range_http_server.py" \
+    --port "$CANDIDATE_PORT" \
+    --directory "$PROJECT_ROOT/test/data" >"$LAST_LOG" 2>&1 &
+  SERVER_PID=$!
+
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+      break
+    fi
+    if python3 - "$CANDIDATE_PORT" <<'PY'
 import sys
 import urllib.request
 
@@ -80,17 +85,24 @@ try:
 except Exception:
     sys.exit(1)
 PY
-  then
-    READY=1
-    break
-  fi
-  sleep 0.1
+    then
+      READY=1
+      PORT="$CANDIDATE_PORT"
+      BASE_URL="http://127.0.0.1:${PORT}"
+      break 2
+    fi
+    sleep 0.1
+  done
+
+  kill "$SERVER_PID" >/dev/null 2>&1 || true
+  wait "$SERVER_PID" >/dev/null 2>&1 || true
+  SERVER_PID=""
 done
 
 if [[ "$READY" -ne 1 ]]; then
-  echo "Failed to start range HTTP server on port $PORT" >&2
-  if [[ -f /tmp/h5db_remote_http.log ]]; then
-    tail -n 80 /tmp/h5db_remote_http.log >&2 || true
+  echo "Failed to start range HTTP server on ports ${PORT}-$((PORT + PORT_TRIES - 1))" >&2
+  if [[ -f "$LAST_LOG" ]]; then
+    tail -n 80 "$LAST_LOG" >&2 || true
   fi
   exit 1
 fi

@@ -173,6 +173,15 @@ make -j8
 If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a repo-root `.env` file instead. See
 [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) for the full setup and troubleshooting guide.
 
+For contributor workflows that run `make test` or the SFTP interaction harness, set up and
+activate the repo venv first:
+
+```bash
+./scripts/setup-dev-env.sh
+source venv/bin/activate
+make -j8
+```
+
 ### Build Outputs
 
 - `./build/release/duckdb`
@@ -233,7 +242,10 @@ make test_remote_sftp
 Notes:
 
 - `make test` ensures missing HDF5 fixtures exist before running tests.
-- `make test` runs both remote harnesses.
+- On POSIX platforms, `make test` runs both remote harnesses.
+- On Windows, `make test` skips the SFTP harness and the SFTP-only SQL validation file.
+- `make test_remote_sftp` is intended for POSIX platforms; on Windows it is skipped.
+- If you run the local SQLLogicTests directly on Windows, also exclude `~test/sql/sftp_secret_validation.test`.
 
 For targeted test runs, test-data generation, and debugging workflows, see [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) and
 [test/README.md](test/README.md).

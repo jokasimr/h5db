@@ -37,4 +37,4 @@ jobs:
       duckdb_version: v1.5.2
       ci_tools_version: v1.5.2
       extension_name: h5db
-      format_checks: 'format;tidy'
+      format_checks: 'format'

@@ -46,6 +46,10 @@ if(HDF5_FOUND)
 endif()
 target_link_libraries(${EXTENSION_NAME} libssh2::libssh2)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} libssh2::libssh2)
+if(WIN32)
+    target_link_libraries(${EXTENSION_NAME} ws2_32)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32)
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}
