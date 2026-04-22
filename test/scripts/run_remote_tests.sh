@@ -75,11 +75,12 @@ for PORT_OFFSET in $(seq 0 $((PORT_TRIES - 1))); do
 import sys
 import urllib.request
 
-port = sys.argv[1]
+port = int(sys.argv[1])
 url = f"http://127.0.0.1:{port}/simple.h5"
 req = urllib.request.Request(url, method="HEAD", headers={"Range": "bytes=0-99"})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 try:
-    with urllib.request.urlopen(req, timeout=0.2) as resp:
+    with opener.open(req, timeout=0.5) as resp:
         code = getattr(resp, "status", resp.getcode())
         sys.exit(0 if code == 206 else 1)
 except Exception:
