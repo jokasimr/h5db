@@ -55,6 +55,13 @@ FROM h5_tree(
     h5_attr('NX_class', NULL::VARCHAR)
 );
 
+-- Project all attributes as one map-valued column
+SELECT path, h5_attr
+FROM h5_tree(
+    'data.h5',
+    h5_attr()
+);
+
 -- List only the root group's immediate children
 SELECT * FROM h5_ls('data.h5');
 
@@ -107,8 +114,7 @@ All h5db functions accept local paths or remote URLs as `filename`.
 
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
   `gs://`, and `hf://` use DuckDB's filesystem stack and benefit from DuckDB's remote caching features.
-- `sftp://` URLs are supported through h5db's built-in SFTP backend on POSIX platforms. On Windows, `sftp://` is not
-  supported.
+- `sftp://` URLs are supported through h5db's built-in SFTP backend.
 - Remote opens are treated as immutable snapshots. `swmr := true` is accepted for API consistency, but remote paths do
   not use `H5F_ACC_SWMR_READ`.
 
@@ -199,6 +205,11 @@ make -j8
 - If multiple non-scalar regular datasets are read together, `h5_read()` uses the minimum outer dimension as the output
   row count.
 - If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
+- `h5_attr()` projects all attributes as `MAP(VARCHAR, VARIANT)` with default output name `h5_attr`.
+- For `h5_attr()`, resolved objects with no attributes produce `{}`, while unresolved or external rows produce `NULL`.
+- Unsupported values inside `h5_attr()` become `NULL` map entries instead of failing the query.
+- Invalid UTF-8 string attribute values are preserved as `BLOB` in `VARIANT`/`BLOB` projected attributes, but still
+  fail in text-typed projections and in `h5_attributes()`.
 - In `h5_tree(...)`, projected attributes use the declared default when an object does not have the attribute.
 - `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`.
 - In `h5_tree(...)`, rows are path-oriented and recursive: alias paths, dangling links, and external links can all
@@ -242,10 +253,7 @@ make test_remote_sftp
 Notes:
 
 - `make test` ensures missing HDF5 fixtures exist before running tests.
-- On POSIX platforms, `make test` runs both remote harnesses.
-- On Windows, `make test` skips the SFTP harness and the SFTP-only SQL validation file.
-- `make test_remote_sftp` is intended for POSIX platforms; on Windows it is skipped.
-- If you run the local SQLLogicTests directly on Windows, also exclude `~test/sql/sftp_secret_validation.test`.
+- `make test` runs both remote harnesses.
 
 For targeted test runs, test-data generation, and debugging workflows, see [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md) and
 [test/README.md](test/README.md).

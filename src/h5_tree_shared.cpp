@@ -2,7 +2,6 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
@@ -31,6 +30,11 @@ static bool H5TreeIsAttrStructType(const LogicalType &type) {
 	return children.size() == 3 && children[0].second == LogicalType::VARCHAR;
 }
 
+static string H5TreeProjectedAttributeUsage(const string &function_name) {
+	return function_name + " projected attribute arguments must be h5_attr(), h5_attr(name), "
+	                       "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))";
+}
+
 static Value H5TreeUnwrapAliasSpec(const Value &input, std::optional<std::string> &alias_name) {
 	Value current = input;
 	while (H5TreeIsAliasStructType(current.type())) {
@@ -53,7 +57,11 @@ bool H5TreeIsProjectedAttributeArgument(const Value &input) {
 		return false;
 	}
 	auto &children = StructValue::GetChildren(current);
-	return children.size() == 3 && children[0].GetValue<string>() == "__attr__";
+	if (children.size() != 3) {
+		return false;
+	}
+	auto tag = children[0].GetValue<string>();
+	return tag == "__attr__" || tag == "__attr_all__";
 }
 
 static H5TreeObjectIdentity H5TreeIdentityFromToken(unsigned long fileno, const H5O_token_t &token) {
@@ -95,8 +103,15 @@ static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5Tre
 	}
 }
 
+static H5StringDecodeMode H5TreeProjectedAttributeDecodeMode(const LogicalType &output_type) {
+	return output_type.id() == LogicalTypeId::VARIANT || output_type.id() == LogicalTypeId::BLOB
+	           ? H5StringDecodeMode::TEXT_OR_BLOB
+	           : H5StringDecodeMode::STRICT_TEXT;
+}
+
 static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue &target, hid_t object_id,
                                                   const H5TreeProjectedAttributeSpec &spec) {
+	D_ASSERT(!spec.all_attributes);
 	auto exists = H5Aexists(object_id, spec.attribute_name.c_str());
 	if (exists < 0) {
 		throw IOException("Failed to inspect attribute: " + spec.attribute_name);
@@ -106,23 +121,10 @@ static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue 
 		return;
 	}
 
-	H5AttributeHandle attr(object_id, spec.attribute_name.c_str());
-	if (!attr.is_valid()) {
-		throw IOException("Failed to open attribute: " + spec.attribute_name);
-	}
-	hid_t type_id = H5Aget_type(attr);
-	if (type_id < 0) {
-		throw IOException("Failed to get type for attribute: " + spec.attribute_name);
-	}
-	H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
-	hid_t space_id = H5Aget_space(attr);
-	if (space_id < 0) {
-		throw IOException("Failed to get dataspace for attribute: " + spec.attribute_name);
-	}
-	H5DataspaceHandle space = H5DataspaceHandle::TakeOwnershipOf(space_id);
-
-	auto source_type = H5ResolveAttributeLogicalType(type.get(), space.get(), spec.attribute_name);
-	auto value = H5ReadAttributeValue(attr, type.get(), source_type, spec.attribute_name);
+	auto opened = H5OpenAttribute(object_id, spec.attribute_name);
+	auto source_type = H5ResolveAttributeLogicalType(opened.type.get(), opened.space.get(), spec.attribute_name);
+	auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), source_type, spec.attribute_name,
+	                                  H5TreeProjectedAttributeDecodeMode(spec.output_type));
 	Value cast_value;
 	string error_message;
 	if (!value.DefaultTryCastAs(spec.output_type, cast_value, &error_message, false)) {
@@ -133,6 +135,70 @@ static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue 
 	target.value = std::move(cast_value);
 }
 
+struct H5TreeAllAttributesIterData {
+	vector<Value> *keys = nullptr;
+	vector<Value> *values = nullptr;
+	bool error = false;
+	string error_message;
+};
+
+static herr_t H5TreeAllAttributesCallback(hid_t location_id, const char *attr_name, const H5A_info_t *, void *op_data) {
+	auto &iter_data = *reinterpret_cast<H5TreeAllAttributesIterData *>(op_data);
+	if (iter_data.error) {
+		return -1;
+	}
+
+	auto fail = [&](const string &message) {
+		iter_data.error = true;
+		iter_data.error_message = message;
+		return -1;
+	};
+
+	try {
+		auto attribute_name = string(attr_name);
+		auto opened = H5OpenAttribute(location_id, attribute_name);
+		LogicalType source_type;
+		Value variant_value(LogicalType::VARIANT());
+		if (!H5TryResolveAttributeLogicalType(opened.type.get(), opened.space.get(), source_type)) {
+			iter_data.keys->emplace_back(Value(attribute_name));
+			iter_data.values->push_back(std::move(variant_value));
+			return 0;
+		}
+
+		auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), source_type, attribute_name,
+		                                  H5StringDecodeMode::TEXT_OR_BLOB);
+		string error_message;
+		if (!value.DefaultTryCastAs(LogicalType::VARIANT(), variant_value, &error_message, false)) {
+			return fail("Attribute '" + attribute_name + "' contains values that cannot be cast to VARIANT");
+		}
+		iter_data.keys->emplace_back(Value(attribute_name));
+		iter_data.values->push_back(std::move(variant_value));
+	} catch (const std::exception &ex) {
+		return fail(H5NormalizeExceptionMessage(ex.what()));
+	}
+	return 0;
+}
+
+static void H5TreePopulateAllAttributesValue(H5TreeProjectedAttributeValue &target, hid_t object_id) {
+	vector<Value> keys;
+	vector<Value> values;
+
+	hsize_t idx = 0;
+	H5TreeAllAttributesIterData iter_data;
+	iter_data.keys = &keys;
+	iter_data.values = &values;
+	auto status = H5Aiterate2(object_id, H5_INDEX_NAME, H5_ITER_NATIVE, &idx, H5TreeAllAttributesCallback, &iter_data);
+	if (status < 0) {
+		if (iter_data.error) {
+			throw IOException(iter_data.error_message);
+		}
+		throw IOException("Failed to iterate attributes");
+	}
+
+	target.present = true;
+	target.value = Value::MAP(LogicalType::VARCHAR, LogicalType::VARIANT(), std::move(keys), std::move(values));
+}
+
 std::string H5TreeNormalizeObjectPath(std::string object_path) {
 	if (object_path.empty()) {
 		return "/";
@@ -140,35 +206,21 @@ std::string H5TreeNormalizeObjectPath(std::string object_path) {
 	return object_path;
 }
 
-std::string H5TreeNormalizeExceptionMessage(const std::string &message) {
-	if (message.empty() || message.front() != '{') {
-		return message;
-	}
-	try {
-		auto info = StringUtil::ParseJSONMap(message, true)->Flatten();
-		for (const auto &entry : info) {
-			if (entry.first == "exception_message") {
-				return entry.second;
-			}
-		}
-	} catch (...) {
-	}
-	return message;
-}
-
 H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &input, const std::string &function_name) {
 	std::optional<std::string> alias_name;
 	auto current = H5TreeUnwrapAliasSpec(input, alias_name);
 	if (!H5TreeIsAttrStructType(current.type())) {
-		throw InvalidInputException(function_name + " projected attribute arguments must be h5_attr(name) or "
-		                                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))");
+		throw InvalidInputException(H5TreeProjectedAttributeUsage(function_name));
 	}
 	auto &children = StructValue::GetChildren(current);
-	if (children.size() != 3 || children[0].GetValue<string>() != "__attr__") {
-		throw InvalidInputException(function_name + " projected attribute arguments must be h5_attr(name) or "
-		                                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))");
+	if (children.size() != 3) {
+		throw InvalidInputException(H5TreeProjectedAttributeUsage(function_name));
 	}
-	if (children[1].IsNull()) {
+	auto tag = children[0].GetValue<string>();
+	if (tag != "__attr__" && tag != "__attr_all__") {
+		throw InvalidInputException(H5TreeProjectedAttributeUsage(function_name));
+	}
+	if (tag == "__attr__" && children[1].IsNull()) {
 		throw InvalidInputException("h5_attr name must not be NULL");
 	}
 	if (children[2].type().id() == LogicalTypeId::SQLNULL) {
@@ -177,8 +229,11 @@ H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &inpu
 	}
 
 	H5TreeProjectedAttributeSpec spec;
-	spec.attribute_name = children[1].GetValue<string>();
-	spec.output_column_name = alias_name ? *alias_name : spec.attribute_name;
+	spec.all_attributes = tag == "__attr_all__";
+	if (!spec.all_attributes) {
+		spec.attribute_name = children[1].GetValue<string>();
+	}
+	spec.output_column_name = alias_name ? *alias_name : (spec.all_attributes ? "h5_attr" : spec.attribute_name);
 	spec.default_value = children[2];
 	spec.output_type = children[2].type();
 	return spec;
@@ -358,7 +413,11 @@ void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEn
 
 	if (need_projected_attributes) {
 		for (idx_t i = 0; i < projected_attributes.size(); i++) {
-			H5TreePopulateProjectedAttributeValue(row.projected_values[i], object, projected_attributes[i]);
+			if (projected_attributes[i].all_attributes) {
+				H5TreePopulateAllAttributesValue(row.projected_values[i], object);
+			} else {
+				H5TreePopulateProjectedAttributeValue(row.projected_values[i], object, projected_attributes[i]);
+			}
 		}
 	}
 }
@@ -424,7 +483,7 @@ void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &gro
 			return 0;
 		} catch (const std::exception &ex) {
 			data.error = true;
-			data.error_message = ex.what();
+			data.error_message = H5NormalizeExceptionMessage(ex.what());
 			return -1;
 		}
 	};

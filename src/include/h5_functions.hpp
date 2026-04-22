@@ -1,10 +1,19 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "h5_raii.hpp"
 #include <hdf5.h>
 #include <vector>
 
 namespace duckdb {
+
+enum class H5StringDecodeMode : uint8_t { STRICT_TEXT, TEXT_OR_BLOB };
+
+struct H5OpenedAttribute {
+	H5AttributeHandle attr;
+	H5TypeHandle type;
+	H5DataspaceHandle space;
+};
 
 // Helper function to get HDF5 type as string
 std::string H5TypeToString(hid_t type_id);
@@ -21,9 +30,17 @@ LogicalType H5AttributeTypeToDuckDBType(hid_t type_id);
 // Resolve the DuckDB LogicalType for an HDF5 attribute from its type and dataspace.
 LogicalType H5ResolveAttributeLogicalType(hid_t type_id, hid_t space_id, const std::string &attribute_name);
 
+// Resolve the DuckDB LogicalType for an HDF5 attribute when unsupported attribute forms should be skipped.
+// Returns false for unsupported attribute types/dataspaces and throws on genuine HDF5 inspection failures.
+bool H5TryResolveAttributeLogicalType(hid_t type_id, hid_t space_id, LogicalType &duckdb_type);
+
 // Read an HDF5 attribute into a DuckDB Value using a previously resolved DuckDB type.
 Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &duckdb_type,
-                           const std::string &attribute_name);
+                           const std::string &attribute_name,
+                           H5StringDecodeMode string_decode_mode = H5StringDecodeMode::STRICT_TEXT);
+
+// Open an attribute and inspect its HDF5 type and dataspace.
+H5OpenedAttribute H5OpenAttribute(hid_t object_id, const std::string &attribute_name);
 
 // Table function for listing HDF5 file contents
 void RegisterH5TreeFunction(ExtensionLoader &loader);

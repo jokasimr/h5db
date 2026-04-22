@@ -6,8 +6,8 @@ Status: implemented and current
 
 `h5_tree(...)` supports projecting selected HDF5 attributes as additional output
 columns. The same projected-attribute syntax is also reused by `h5_ls(...)`.
-Projected attributes are declared with `h5_attr(name, default_value)` and may be
-renamed with `h5_alias(...)`.
+Projected attributes are declared with `h5_attr()`, `h5_attr(name)`, or
+`h5_attr(name, default_value)` and may be renamed with `h5_alias(...)`.
 
 Example:
 
@@ -30,8 +30,10 @@ h5_tree(filename, projected_attribute_or_alias..., swmr := <bool>)
 
 Projected arguments must be one of:
 
+- `h5_attr()`
+- `h5_attr(name)`
 - `h5_attr(name, default_value)`
-- `h5_alias(alias_name, h5_attr(name, default_value))`
+- `h5_alias(alias_name, h5_attr(...))`
 
 `h5_alias(...)` follows the same alias semantics here that it already uses in
 `h5_read(...)`.
@@ -47,8 +49,13 @@ The base `h5_tree` columns remain:
 
 Each projected attribute appends one column:
 
-- output column name = resolved `name`, unless overridden by `h5_alias(...)`
-- output column type = type of `default_value`
+- `h5_attr()` defaults to output column name `h5_attr`
+- `h5_attr(name)` defaults to output column name `name`
+- `h5_attr(name, default_value)` defaults to output column name `name`
+- `h5_alias(...)` overrides the default output name
+- `h5_attr()` has type `MAP(VARCHAR, VARIANT)`
+- `h5_attr(name)` has type `VARIANT`
+- `h5_attr(name, default_value)` has type `type(default_value)`
 
 Projected output names must be unique within the final result schema. If a
 projected name duplicates another projected name, or collides with an existing
@@ -56,6 +63,17 @@ projected name duplicates another projected name, or collides with an existing
 error.
 
 ## `h5_attr` Semantics
+
+`h5_attr()` defines one projected all-attributes column.
+
+Rules:
+
+- output name defaults to `h5_attr`
+- output type is `MAP(VARCHAR, VARIANT)`
+- on resolved rows, all attributes are returned in one map keyed by attribute name
+- if the object has no attributes, the result is an empty map
+- on unresolved or external rows, the result is `NULL`
+- unsupported attribute values are inserted as `NULL` map entries instead of failing the query
 
 `h5_attr(name, default_value)` defines one projected attribute column.
 
@@ -69,10 +87,12 @@ Rules:
 - `default_value` must have a concrete type
 - typed `NULL` defaults such as `NULL::VARCHAR` are allowed
 - untyped `NULL` defaults are rejected
+- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
 
 Examples:
 
 ```sql
+h5_attr()
 h5_attr('NX_class', NULL::VARCHAR)
 h5_attr(lower('STRING_ATTR'), NULL::VARCHAR)
 h5_attr('count_time', 0::DOUBLE)
@@ -83,6 +103,11 @@ h5_attr('units', 'unknown'::VARCHAR)
 
 For each projected attribute column:
 
+- if the projection is `h5_attr()`:
+  - iterate all attributes on the current object
+  - convert each supported value to `VARIANT`
+  - if one attribute value is unsupported, store that entry as `NULL`
+  - emit the resulting map
 - if the current object has the attribute:
   - read the attribute
   - convert it to a DuckDB value using the same conversion rules as
@@ -92,8 +117,8 @@ For each projected attribute column:
 - if the current object does not have the attribute:
   - emit `default_value`
 
-There is no separate "missing without default" case because every projected
-attribute is declared through `h5_attr(name, default_value)`.
+There is no separate "missing without default" case because single-attribute
+projections always have an implicit or explicit default.
 
 ## Type and Error Behavior
 
@@ -113,10 +138,16 @@ Current unsupported forms include:
 - string array attributes
 - the same unsupported HDF5 attribute types already rejected by `h5_attributes(...)`
 
+UTF-8 behavior:
+
+- invalid UTF-8 string values are preserved as `BLOB` in `VARIANT`-typed projected
+  attributes and in `BLOB`-typed projections
+- text-typed projected attributes still fail on invalid UTF-8 string values
+
 Error behavior:
 
 - invalid projected argument shape:
-  - `h5_tree projected attribute arguments must be h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))`
+  - `h5_tree projected attribute arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))`
 - `NULL` attribute name:
   - `h5_attr name must not be NULL`
 - non-constant default:
@@ -172,6 +203,10 @@ Focused SQLLogic coverage lives in:
 
 The test coverage includes:
 
+- all-attributes map projection with default column naming
+- aliased all-attributes map projection
+- `NULL` vs empty-map behavior for unresolved/external vs resolved rows
+- unsupported attribute entries degrading to `NULL` inside the map
 - scalar projected attributes with typed `NULL` defaults
 - scalar projected attributes with non-`NULL` defaults
 - array projected attributes

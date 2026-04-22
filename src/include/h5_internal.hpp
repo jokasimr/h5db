@@ -40,6 +40,7 @@ void ThrowIfInterrupted(ClientContext &context);
 H5RemoteErrorInfo TakeRemoteErrorInfo(const std::string &filename);
 std::string AppendRemoteError(const std::string &message, const std::string &filename);
 std::string FormatRemoteFileError(const std::string &prefix, const std::string &filename);
+std::string H5NormalizeExceptionMessage(const std::string &message);
 
 // Type tag for compile-time type dispatch
 template <typename T>

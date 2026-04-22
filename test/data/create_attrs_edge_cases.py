@@ -17,6 +17,14 @@ with h5py.File("attrs_edge_cases.h5", "w") as f:
     ds.attrs["vlen_str_attr"] = "variable"
     ds.attrs["fixed_str_attr"] = np.bytes_("fixed")
 
+    # Dataset with invalid UTF-8 payload in a string attribute.
+    ds = f.create_dataset("invalid_utf8_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs.create("invalid_utf8_attr", b"\xff\xfe", dtype=h5py.string_dtype(encoding="ascii", length=2))
+
+    # Dataset with invalid UTF-8 payload in a fixed-length string attribute containing an interior NUL.
+    ds = f.create_dataset("invalid_utf8_fixed_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs.create("invalid_utf8_fixed_attr", b"\xff\x00A", dtype=h5py.string_dtype(encoding="ascii", length=3))
+
     # Dataset with unsupported multidimensional attribute (2D).
     ds = f.create_dataset("multidim_attr_dataset", data=np.arange(4, dtype=np.int32))
     ds.attrs["attr_2d"] = np.arange(6, dtype=np.int32).reshape(2, 3)

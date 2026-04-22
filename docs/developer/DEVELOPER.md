@@ -235,8 +235,6 @@ If you run tests directly, ensure test data exists first:
 ./test/data/ensure_test_data.sh
 ```
 
-On Windows, add `~test/sql/sftp_secret_validation.test` to direct SQLLogicTest invocations.
-
 ### Running Specific Tests
 
 ```bash
@@ -271,8 +269,7 @@ make test
 `make test` also ensures all HDF5 test data is present by running
 `test/data/ensure_test_data.sh` before executing the tests.
 It then runs the local SQLLogicTests, the rewritten remote HTTP suite (including `test/sql/remote/*.test`), and the
-rewritten remote SFTP suite plus its dedicated interaction harness on POSIX platforms. On Windows, the SFTP harness
-and the SFTP-only SQL validation file are skipped.
+rewritten remote SFTP suite plus its dedicated interaction harness.
 
 ### Running Remote HTTP Test Suite
 
@@ -295,8 +292,7 @@ make test_remote_sftp
 
 This target rewrites the main SQL suite against `sftp://` URLs, starts the local SFTP test server, and then runs the
 dedicated interaction harness in `test/scripts/run_sftp_interaction_tests.py`. The runner will use the repo venv when
-present and otherwise falls back to `python3`/`python`, installing `paramiko` if needed. It is intended for POSIX
-platforms; on Windows it is skipped.
+present and otherwise falls back to `python3`/`python`, installing `paramiko` if needed.
 
 ---
 
@@ -680,7 +676,7 @@ make test
 # Test rewritten remote HTTP suite
 make test_remote_http
 
-# Test rewritten remote SFTP suite + interaction harness (POSIX only)
+# Test rewritten remote SFTP suite + interaction harness
 make test_remote_sftp
 
 # Ensure test data exists (generate if missing)

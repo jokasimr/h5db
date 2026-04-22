@@ -12,6 +12,7 @@ namespace duckdb {
 enum class H5TreeEntryType : uint8_t { UNKNOWN, GROUP, DATASET, DATATYPE, LINK, EXTERNAL };
 
 struct H5TreeProjectedAttributeSpec {
+	bool all_attributes = false;
 	std::string attribute_name;
 	std::string output_column_name;
 	Value default_value;
@@ -52,7 +53,6 @@ struct H5TreeNamedRow {
 };
 
 std::string H5TreeNormalizeObjectPath(std::string object_path);
-std::string H5TreeNormalizeExceptionMessage(const std::string &message);
 bool H5TreeIsProjectedAttributeArgument(const Value &input);
 H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &input, const std::string &function_name);
 void H5TreeBindProjectedAttributes(const std::string &function_name, const vector<Value> &inputs, idx_t start_idx,

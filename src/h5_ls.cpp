@@ -13,6 +13,7 @@
 #include "duckdb/common/types/vector.hpp"
 #endif
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
 namespace duckdb {
@@ -54,8 +55,9 @@ struct H5LsScalarBindData : public FunctionData {
 		for (idx_t i = 0; i < projected_attributes.size(); i++) {
 			const auto &lhs = projected_attributes[i];
 			const auto &rhs = other.projected_attributes[i];
-			if (lhs.attribute_name != rhs.attribute_name || lhs.output_column_name != rhs.output_column_name ||
-			    lhs.output_type != rhs.output_type || lhs.default_value.ToString() != rhs.default_value.ToString()) {
+			if (lhs.all_attributes != rhs.all_attributes || lhs.attribute_name != rhs.attribute_name ||
+			    lhs.output_column_name != rhs.output_column_name || lhs.output_type != rhs.output_type ||
+			    lhs.default_value.ToString() != rhs.default_value.ToString()) {
 				return false;
 			}
 		}
@@ -71,6 +73,16 @@ static void H5LsGetReturnSchema(const vector<H5TreeProjectedAttributeSpec> &proj
 	for (const auto &spec : projected_attributes) {
 		names.push_back(spec.output_column_name);
 		return_types.push_back(spec.output_type);
+	}
+}
+
+static void H5LsValidateUniqueFieldNames(const vector<string> &names) {
+	std::unordered_set<string> seen;
+	seen.reserve(names.size());
+	for (const auto &name : names) {
+		if (!seen.insert(name).second) {
+			throw BinderException("table \"h5_ls\" has duplicate column name \"%s\"", name);
+		}
 	}
 }
 
@@ -222,13 +234,14 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	if (!force_swmr) {
 		for (idx_t i = 2; i < values.size(); i++) {
 			if (!H5TreeIsProjectedAttributeArgument(values[i])) {
-				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(name) or "
+				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), "
 				                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named "
 				                            "parameters such as swmr := true are not supported");
 			}
 		}
 	}
 	H5TreeBindProjectedAttributes(function_name, values, 2, names, return_types, projected_attributes);
+	H5LsValidateUniqueFieldNames(names);
 
 	child_list_t<LogicalType> struct_fields;
 	for (idx_t i = 0; i < names.size(); i++) {

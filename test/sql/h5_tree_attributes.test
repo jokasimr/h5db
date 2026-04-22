@@ -81,6 +81,99 @@ FROM h5_tree(
 ----
 1	2
 
+query TTITI
+SELECT
+    path,
+    typeof(h5_attr),
+    cardinality(h5_attr),
+    variant_typeof(map_extract_value(h5_attr, 'string_attr')),
+    COALESCE(TRY_CAST(map_extract_value(h5_attr, 'group_int_attr') AS BIGINT), -1)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr()
+)
+ORDER BY path;
+----
+/	MAP(VARCHAR, VARIANT)	0	VARIANT_NULL	-1
+/dataset_with_attrs	MAP(VARCHAR, VARIANT)	13	VARCHAR	-1
+/group_with_attrs	MAP(VARCHAR, VARIANT)	3	VARIANT_NULL	999
+
+query I
+SELECT cardinality(attrs)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('attrs', h5_attr())
+)
+WHERE path = '/';
+----
+0
+
+query TI
+SELECT path, CASE WHEN h5_attr IS NULL THEN 1 ELSE 0 END
+FROM h5_tree(
+    'test/data/links.h5',
+    h5_attr()
+)
+WHERE path IN ('/dangling_link', '/external_link')
+ORDER BY path;
+----
+/dangling_link	1
+/external_link	1
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE variant_typeof(map_extract_value(h5_attr, 'enum_attr')) = 'VARIANT_NULL'),
+    COUNT(*) FILTER (WHERE cardinality(h5_attr) = 1)
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr()
+)
+WHERE path = '/enum_attr_dataset';
+----
+1	1
+
+query TTT
+SELECT
+    variant_typeof(map_extract_value(h5_attr, 'invalid_utf8_attr')),
+    variant_typeof(invalid_utf8_attr),
+    typeof(invalid_utf8_attr_blob)
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr(),
+    h5_attr('invalid_utf8_attr'),
+    h5_alias('invalid_utf8_attr_blob', h5_attr('invalid_utf8_attr', NULL::BLOB))
+)
+WHERE path = '/invalid_utf8_attr_dataset';
+----
+BLOB	BLOB	BLOB
+
+query TTTTT
+SELECT
+    variant_typeof(map_extract_value(h5_attr, 'invalid_utf8_fixed_attr')),
+    variant_typeof(invalid_utf8_fixed_attr),
+    typeof(invalid_utf8_fixed_attr_blob),
+    octet_length(invalid_utf8_fixed_attr_blob),
+    hex(CAST(map_extract_value(h5_attr, 'invalid_utf8_fixed_attr') AS BLOB))
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr(),
+    h5_attr('invalid_utf8_fixed_attr'),
+    h5_alias('invalid_utf8_fixed_attr_blob', h5_attr('invalid_utf8_fixed_attr', NULL::BLOB))
+)
+WHERE path = '/invalid_utf8_fixed_attr_dataset';
+----
+BLOB	BLOB	BLOB	3	FF0041
+
+query TIT
+SELECT typeof(valid_blob), octet_length(valid_blob), hex(valid_blob)
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_alias('valid_blob', h5_attr('vlen_str_attr', NULL::BLOB))
+)
+WHERE path = '/string_attrs';
+----
+BLOB	8	7661726961626C65
+
 query TI
 SELECT path, attr
 FROM h5_tree(
@@ -122,6 +215,15 @@ FROM h5_tree(
 statement error
 SELECT * FROM h5_tree(
     'test/data/with_attrs.h5',
+    h5_attr(),
+    h5_attr()
+);
+----
+Binder Error: table "h5_tree" has duplicate column name "h5_attr"
+
+statement error
+SELECT * FROM h5_tree(
+    'test/data/with_attrs.h5',
     h5_alias('dup', h5_attr('group_int_attr', NULL::BIGINT)),
     h5_alias('dup', h5_attr('group_string_attr', NULL::VARCHAR))
 );
@@ -153,12 +255,12 @@ Binder Error: table "h5_tree" has duplicate column name "path"
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', 'string_attr');
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', 42);
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', random()));
@@ -178,7 +280,7 @@ Invalid Input Error: h5_attr name must not be NULL
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_alias('renamed', 42));
 ----
-Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(name) or h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
+Invalid Input Error: h5_tree projected attribute arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...))
 
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr(42, NULL::VARCHAR));
@@ -200,6 +302,22 @@ statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', 0::INTEGER));
 ----
 IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER
+
+statement error
+SELECT * FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('invalid_utf8_attr', NULL::VARCHAR)
+);
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+
+statement error
+SELECT * FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('invalid_utf8_fixed_attr', NULL::VARCHAR)
+);
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
 
 statement error
 SELECT * FROM h5_tree('test/data/attrs_edge_cases.h5', h5_attr('attr_2d', [0, 0, 0]::INTEGER[3]));

@@ -11,9 +11,8 @@ or
 make test_debug
 ```
 
-`make test` will generate any missing HDF5 test data before running tests. On POSIX platforms it also runs the
-rewritten remote HTTP and rewritten remote SFTP suites, including the dedicated SFTP interaction harness. On Windows,
-the SFTP harness and the SFTP-only SQL validation file are skipped.
+`make test` will generate any missing HDF5 test data before running tests. It also runs the
+rewritten remote HTTP and rewritten remote SFTP suites, including the dedicated SFTP interaction harness.
 
 ## Large Tests
 
@@ -21,8 +20,6 @@ Large tests live in `test/sql/large/` as `*.test` and are included in `make test
 ```bash
 ./build/release/test/unittest "test/sql/*" "~test/sql/large/*" "~test/sql/remote/*"
 ```
-
-On Windows, add `~test/sql/sftp_secret_validation.test` to direct SQLLogicTest invocations.
 
 ## Run Everything
 
@@ -47,7 +44,7 @@ make test_remote_sftp
 ```
 
 This target also runs the dedicated SFTP interaction harness in `test/scripts/run_sftp_interaction_tests.py`. It is
-intended for POSIX platforms; on Windows it is skipped.
+part of the normal test flow.
 
 ## Remote-Only SQLLogicTests
 

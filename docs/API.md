@@ -13,8 +13,7 @@ All h5db functions accept local paths or remote URLs as `filename`.
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
   `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
   when needed.
-- `sftp://` URLs are handled by h5db's built-in SFTP backend on POSIX platforms. On Windows, `sftp://` is not
-  supported.
+- `sftp://` URLs are handled by h5db's built-in SFTP backend.
 - Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
 
 ### SFTP Secrets
@@ -52,7 +51,6 @@ SELECT * FROM h5_read(
 **Notes:**
 - `HOST_KEY_FINGERPRINT` is the lowercase hex SHA1 host-key fingerprint.
 - If a username or port is embedded in the `sftp://` URL, it must match the selected secret.
-- This is an h5db backend limitation, not a statement about libssh2 generally.
 
 ## Table Functions
 
@@ -66,6 +64,7 @@ as additional columns with `h5_attr(...)`.
 **Parameters:**
 - `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr()`
   - `h5_attr(name)`
   - `h5_attr(name, default_value)`
   - `h5_alias(alias_name, h5_attr(...))`
@@ -85,8 +84,10 @@ as additional columns with `h5_attr(...)`.
   - `[]` for scalar datasets
   - `[d0, d1, ...]` for array datasets
 - one additional column per projected attribute
-  - column name = resolved attribute name, unless overridden by `h5_alias(...)`
-  - column type = `VARIANT` for `h5_attr(name)`, otherwise the type of `default_value`
+  - `h5_attr()` produces column `h5_attr` with type `MAP(VARCHAR, VARIANT)`
+  - `h5_attr(name)` produces column `name` with type `VARIANT`
+  - `h5_attr(name, default_value)` produces column `name` with the type of `default_value`
+  - `h5_alias(...)` overrides the default output name
 
 **Traversal Semantics:**
 - `/` is returned as a `group` row.
@@ -99,12 +100,20 @@ as additional columns with `h5_attr(...)`.
   rows. Unresolved and external rows use projected defaults.
 
 **Projected Attribute Semantics:**
+- `h5_attr()` projects all attributes for the current object into one `MAP(VARCHAR, VARIANT)` column
 - `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
 - constant expressions such as `lower('STRING_ATTR')` are allowed
 - row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree`
 - `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
+- `h5_attr()` uses `NULL::MAP(VARCHAR, VARIANT)` as its implicit default
 - if `default_value` is provided, it must be a bind-time constant expression with a concrete type
 - typed `NULL` defaults are allowed, e.g. `NULL::VARCHAR`
+- if `h5_attr()` is used on a resolved local row, `h5_tree` emits a map containing all attributes on that object
+- if an object has no attributes, `h5_attr()` emits an empty map
+- if `h5_attr()` is used on an unresolved or external row, `h5_tree` emits `NULL`
+- unsupported attribute values inside `h5_attr()` are included with `NULL` map values instead of failing the query
+- string attribute values with invalid UTF-8 are preserved as `BLOB` in `VARIANT`-typed projected attributes
+- text-typed projected attributes still fail on invalid UTF-8 string values
 - if an object has the projected attribute, `h5_tree` reads it using the same conversion rules as `h5_attributes()`
   and casts it to the declared output type
 - if an object does not have the projected attribute, `h5_tree` emits `default_value` (or `NULL::VARIANT` for
@@ -129,6 +138,13 @@ SELECT path, type, NX_class
 FROM h5_tree(
     'data.h5',
     h5_attr('NX_class', NULL::VARCHAR)
+);
+
+-- Project all attributes as one map-valued column
+SELECT path, h5_attr
+FROM h5_tree(
+    'data.h5',
+    h5_attr()
 );
 
 -- Rename a projected attribute column
@@ -160,6 +176,7 @@ the requested group.
 - `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
+  - `h5_attr()`
   - `h5_attr(name)`
   - `h5_attr(name, default_value)`
   - `h5_alias(alias_name, h5_attr(...))`
@@ -262,6 +279,7 @@ Reads attributes from an object or the file root.
 - Column names are the attribute names
 - Column types match the attribute types (numeric, string, or arrays)
 - If the target object has no attributes, the function raises `IO Error: Object has no attributes: ...`
+- Invalid UTF-8 string attribute values raise an error in `h5_attributes()`
 
 **Type Support:**
 - Numeric scalars, string scalars, and 1D numeric arrays
@@ -385,19 +403,25 @@ simple comparisons.
 
 ---
 
-### `h5_attr(name[, default_value])`
+### `h5_attr([name[, default_value]])`
 
 Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 
 **Parameters:**
-- `name` (VARCHAR): Attribute name to read. Any non-`NULL` bind-time-resolved `VARCHAR` expression is allowed.
+- `name` (VARCHAR, optional): Attribute name to read. Any non-`NULL` bind-time-resolved `VARCHAR` expression is allowed.
 - `default_value` (ANY, optional): Bind-time constant default value. Its type becomes the output type of the projected
-  column. If omitted, the default is `NULL::VARIANT`.
+  column for single-attribute projection. If omitted, `h5_attr(name)` defaults to `NULL::VARIANT`.
 
 **Returns:** STRUCT wrapper used by `h5_tree()` and `h5_ls()`
 
 **Notes:**
+- `h5_attr()` projects all attributes into one `MAP(VARCHAR, VARIANT)` column named `h5_attr`
+- on resolved rows with no attributes, `h5_attr()` produces `{}`
+- on unresolved or external rows, `h5_attr()` produces `NULL`
+- unsupported attribute values inside `h5_attr()` become `NULL` map entries
 - `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
+- `VARIANT`-typed or `BLOB`-typed projected attributes preserve invalid UTF-8 string values as `BLOB`
+- `VARCHAR`-typed projected attributes still fail on invalid UTF-8 string values
 - typed `NULL` defaults such as `NULL::VARCHAR` are allowed
 - untyped `NULL` defaults are rejected
 - missing attributes use `default_value` or `NULL::VARIANT` when the default is omitted
@@ -405,6 +429,12 @@ Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 
 **Example:**
 ```sql
+SELECT path, h5_attr
+FROM h5_tree(
+    'data.h5',
+    h5_attr()
+);
+
 SELECT path, type, NX_class
 FROM h5_tree(
     'data.h5',

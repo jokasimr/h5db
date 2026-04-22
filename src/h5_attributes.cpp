@@ -3,7 +3,6 @@
 #include "h5_raii.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #else
@@ -48,22 +47,6 @@ static std::string NormalizeObjectPath(std::string object_path) {
 	return object_path;
 }
 
-static std::string NormalizeExceptionMessage(const std::string &message) {
-	if (message.empty() || message.front() != '{') {
-		return message;
-	}
-	try {
-		auto info = StringUtil::ParseJSONMap(message, true)->Flatten();
-		for (const auto &entry : info) {
-			if (entry.first == "exception_message") {
-				return entry.second;
-			}
-		}
-	} catch (...) {
-	}
-	return message;
-}
-
 // Callback for H5Aiterate2 to collect attribute names
 static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const H5A_info_t *ainfo, void *op_data) {
 	auto &iter_data = *reinterpret_cast<AttrIterData *>(op_data);
@@ -78,35 +61,19 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 	};
 
 	auto &attributes = *iter_data.attributes;
-
-	H5AttributeHandle attr(location_id, attr_name);
-	if (!attr.is_valid()) {
-		return fail("Failed to open attribute: " + std::string(attr_name));
-	}
-
-	hid_t type_id = H5Aget_type(attr);
-	if (type_id < 0) {
-		return fail("Failed to get type for attribute: " + std::string(attr_name));
-	}
-	H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
-
-	hid_t space_id = H5Aget_space(attr);
-	if (space_id < 0) {
-		return fail("Failed to get dataspace for attribute: " + std::string(attr_name));
-	}
-	H5DataspaceHandle space = H5DataspaceHandle::TakeOwnershipOf(space_id);
-
+	H5OpenedAttribute opened;
 	LogicalType duckdb_type;
 	try {
-		duckdb_type = H5ResolveAttributeLogicalType(type.get(), space.get(), attr_name);
+		opened = H5OpenAttribute(location_id, attr_name);
+		duckdb_type = H5ResolveAttributeLogicalType(opened.type.get(), opened.space.get(), attr_name);
 	} catch (const std::exception &ex) {
-		return fail(NormalizeExceptionMessage(ex.what()));
+		return fail(H5NormalizeExceptionMessage(ex.what()));
 	}
 
 	AttributeInfo info;
 	info.name = attr_name;
 	info.type = duckdb_type;
-	info.h5_type = std::move(type);
+	info.h5_type = std::move(opened.type);
 
 	attributes.push_back(std::move(info));
 
@@ -132,8 +99,7 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 
 	H5ObjectHandle obj(file, result->object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException(AppendRemoteError(
-		    "Failed to open object: " + result->object_path + " in file: " + result->filename, result->filename));
+		throw IOException(AppendRemoteError("Failed to open object: " + result->object_path, result->filename));
 	}
 
 	hsize_t idx = 0;
@@ -201,7 +167,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 			auto value = H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.type, attr_info.name);
 			result_vector.SetValue(0, value);
 		} catch (const std::exception &ex) {
-			throw IOException(AppendRemoteError(ex.what(), bind_data.filename));
+			throw IOException(AppendRemoteError(H5NormalizeExceptionMessage(ex.what()), bind_data.filename));
 		}
 	}
 

@@ -154,7 +154,7 @@ public:
 			auto message = worker_error;
 			lock.unlock();
 			JoinWorker();
-			throw IOException(FormatRemoteFileError(message, bind_data.filename));
+			throw IOException(AppendRemoteError(message, bind_data.filename));
 		}
 		if (row_queue.empty()) {
 			return;
@@ -218,7 +218,7 @@ private:
 		stop_requested = true;
 		worker_done = true;
 		worker_failed = true;
-		worker_error = H5TreeNormalizeExceptionMessage(message);
+		worker_error = H5NormalizeExceptionMessage(message);
 		queue_not_empty.notify_all();
 		queue_not_full.notify_all();
 	}
@@ -425,13 +425,24 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 }
 
 static void H5AttrFunction(DataChunk &args, ExpressionState &, Vector &result) {
-	auto &name_vec = args.data[0];
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
 	auto &tag_child = GetTreeStructChild(children[0]);
 	auto &name_child = GetTreeStructChild(children[1]);
 	auto &default_child = GetTreeStructChild(children[2]);
 
+	if (args.ColumnCount() == 0) {
+		for (idx_t i = 0; i < args.size(); i++) {
+			FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__attr_all__");
+			FlatVector::SetNull(name_child, i, true);
+			FlatVector::SetNull(default_child, i, true);
+		}
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		result.Verify(args.size());
+		return;
+	}
+
+	auto &name_vec = args.data[0];
 	UnifiedVectorFormat name_data;
 	name_vec.ToUnifiedFormat(args.size(), name_data);
 	auto name_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
@@ -466,11 +477,11 @@ static void H5AttrFunction(DataChunk &args, ExpressionState &, Vector &result) {
 
 static unique_ptr<FunctionData> H5AttrBind(ClientContext &, ScalarFunction &bound_function,
                                            vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 1 && arguments.size() != 2) {
-		throw InvalidInputException(
-		    "h5_attr() requires one or two arguments: attribute name and optional default value");
+	if (arguments.size() > 2) {
+		throw InvalidInputException("h5_attr() accepts zero, one, or two arguments");
 	}
 	LogicalType default_type;
+	LogicalType attribute_name_type = LogicalType::VARCHAR;
 	if (arguments.size() == 2) {
 		if (!arguments[1]->IsFoldable()) {
 			throw InvalidInputException("h5_attr default_value must be a constant expression");
@@ -480,17 +491,27 @@ static unique_ptr<FunctionData> H5AttrBind(ClientContext &, ScalarFunction &boun
 			    "h5_attr default_value must have a concrete type; use an explicit cast such as NULL::VARCHAR");
 		}
 		default_type = arguments[1]->return_type;
-	} else {
+		attribute_name_type = arguments[0]->return_type;
+	} else if (arguments.size() == 1) {
 		default_type = LogicalType::VARIANT();
+		attribute_name_type = arguments[0]->return_type;
+	} else {
+		default_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARIANT());
 	}
 	child_list_t<LogicalType> struct_children = {
-	    {"tag", LogicalType::VARCHAR}, {"attribute_name", arguments[0]->return_type}, {"default_value", default_type}};
+	    {"tag", LogicalType::VARCHAR}, {"attribute_name", attribute_name_type}, {"default_value", default_type}};
 	bound_function.return_type = LogicalType::STRUCT(struct_children);
 	return make_uniq<VariableReturnBindData>(bound_function.return_type);
 }
 
 void RegisterH5AttrFunction(ExtensionLoader &loader) {
 	ScalarFunctionSet h5_attr("h5_attr");
+
+	ScalarFunction h5_attr_zero("h5_attr", {}, LogicalTypeId::STRUCT, H5AttrFunction, H5AttrBind);
+	h5_attr_zero.serialize = VariableReturnBindData::Serialize;
+	h5_attr_zero.deserialize = VariableReturnBindData::Deserialize;
+	h5_attr_zero.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_attr.AddFunction(h5_attr_zero);
 
 	ScalarFunction h5_attr_one("h5_attr", {LogicalType::VARCHAR}, LogicalTypeId::STRUCT, H5AttrFunction, H5AttrBind);
 	h5_attr_one.serialize = VariableReturnBindData::Serialize;
