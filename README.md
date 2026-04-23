@@ -46,19 +46,19 @@ Then run queries such as:
 
 ```sql
 -- Read one dataset
-SELECT * FROM h5_read('data.h5', '/measurements');
+FROM h5_read('data.h5', '/measurements');
 
 -- Read multiple datasets side by side
-SELECT * FROM h5_read('data.h5', '/timestamps', '/temperatures');
+FROM h5_read('data.h5', '/timestamps', '/temperatures');
 
 -- Add a virtual row index
-SELECT * FROM h5_read('data.h5', h5_index(), '/measurements');
+FROM h5_read('data.h5', h5_index(), '/measurements');
 
 -- Read a remote file
-SELECT * FROM h5_read('https://example.com/data.h5', '/dataset_name');
+FROM h5_read('https://example.com/data.h5', '/dataset_name');
 
 -- Inspect the file structure
-SELECT * FROM h5_tree('data.h5');
+FROM h5_tree('data.h5');
 
 -- Inspect the file structure and project selected attributes
 SELECT path, type, NX_class
@@ -75,26 +75,26 @@ FROM h5_tree(
 );
 
 -- List only the root group's immediate children
-SELECT * FROM h5_ls('data.h5');
+FROM h5_ls('data.h5');
 
 -- List the immediate children of a specific group
-SELECT * FROM h5_ls('data.h5', '/entry/instrument');
+FROM h5_ls('data.h5', '/entry/instrument');
 
 -- Return a map of immediate children keyed by child name
 SELECT h5_ls('data.h5', '/entry/instrument');
 
 -- Read attributes
-SELECT * FROM h5_attributes('data.h5', '/measurements');
+FROM h5_attributes('data.h5', '/measurements');
 
 -- Read run-start encoded data
-SELECT * FROM h5_read(
+FROM h5_read(
     'experiment.h5',
     '/timestamp',
     h5_rse('/state_run_starts', '/state_values')
 );
 
 -- Rename a column definition
-SELECT * FROM h5_read(
+FROM h5_read(
     'data.h5',
     h5_alias('idx', h5_index()),
     '/measurements'
@@ -129,7 +129,7 @@ CREATE OR REPLACE SECRET beamline_sftp (
     KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
 );
 
-SELECT * FROM h5_read(
+FROM h5_read(
     'sftp://beamline.example.org/data/run001.h5',
     '/entry/data'
 );
@@ -197,40 +197,12 @@ make -j8
 - `./build/release/extension/h5db/h5db.duckdb_extension`
   Loadable extension artifact.
 
-## Behavior Notes
-
-- `swmr := true` enables HDF5 SWMR read mode for local files.
-- Remote URLs accept `swmr`, but remote opens use the DuckDB-backed remote VFD as immutable snapshots; remote paths do
-  not use `H5F_ACC_SWMR_READ`.
-- If multiple non-scalar regular datasets are read together, `h5_read()` uses the minimum outer dimension as the output
-  row count.
-- If the target object has no attributes, `h5_attributes()` raises `IO Error: Object has no attributes: ...`.
-- `h5_attr()` projects all attributes as `MAP(VARCHAR, VARIANT)` with default output name `h5_attr`.
-- For `h5_attr()`, resolved objects with no attributes produce `{}`, while unresolved or external rows produce `NULL`.
-- Unsupported values inside `h5_attr()` become `NULL` map entries instead of failing the query.
-- Invalid UTF-8 string attribute values are preserved as `BLOB` in `VARIANT`/`BLOB` projected attributes, but still
-  fail in text-typed projections and in `h5_attributes()`.
-- In `h5_tree(...)`, projected attributes use the declared default when an object does not have the attribute.
-- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`.
-- In `h5_tree(...)`, rows are path-oriented and recursive: alias paths, dangling links, and external links can all
-  appear as separate rows.
-- In `h5_ls(...)`, only the immediate children of the requested group are returned.
-- Table `h5_ls(...)` defaults the path to `/` if omitted.
-- Scalar `h5_ls(...)` requires an explicit path and returns `NULL` for `NULL` path inputs.
-- Scalar `h5_ls(...)` does not accept named parameters such as `swmr := true`; use `h5_ls_swmr(...)` or
-  `SET h5db_swmr_default = true`.
-- In `h5_tree(...)`, projected output names must be unique; duplicate projected names or collisions with `path`,
-  `type`, `dtype`, or `shape` fail at bind time.
-
 ## Current Limitations
 
 - Compound, enum, reference, opaque, bitfield, time-like, and non-string variable-length HDF5 types are not supported.
 - Datasets with more than 4 dimensions are not supported.
 - Multi-dimensional string datasets are not supported.
-- Attribute string arrays are not supported.
 - Attribute multidimensional dataspaces are not supported.
-- Projected `h5_tree(...)` and `h5_ls(...)` attributes follow the same attribute type/limitation rules as
-  `h5_attributes()`.
 
 See [docs/API.md](docs/API.md) for full type-mapping details and error behavior.
 

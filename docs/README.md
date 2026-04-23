@@ -12,7 +12,6 @@ Contributor documentation:
 
 Internal design notes:
 
-- [internals/H5_TREE_ATTRIBUTES_SPEC.md](internals/H5_TREE_ATTRIBUTES_SPEC.md)
 - [internals/PARTITION_OWNERSHIP_DESIGN.md](internals/PARTITION_OWNERSHIP_DESIGN.md)
 - [internals/REMOTE_METADATA_AND_INTERRUPTS.md](internals/REMOTE_METADATA_AND_INTERRUPTS.md)
 - [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md)

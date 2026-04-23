@@ -1,23 +1,26 @@
-# Extension updating 
-When cloning this template, the target version of DuckDB should be the latest stable release of DuckDB. However, there 
-will inevitably come a time when a new DuckDB is released and the extension repository needs updating. This process goes
-as follows:
+# Extension Updating
 
-- Bump submodules
-  - `./duckdb` should be set to latest tagged release
-  - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. So if you're building for DuckDB `v1.1.0` there will be a branch in `extension-ci-tools` named `v1.1.0` to which you should check out. 
-- Bump versions in `./github/workflows`
-  - `duckdb_version` input in `duckdb-stable-build` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - `duckdb_version` input in `duckdb-stable-deploy` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - the reusable workflow `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml` for the `duckdb-stable-build` job should be set to latest tagged release
+When updating h5db to a newer DuckDB release:
 
-# API changes
-DuckDB extensions built with this extension template are built against the internal C++ API of DuckDB. This API is not guaranteed to be stable.
-What this means for extension development is that when updating your extensions DuckDB target version using the above steps, you may run into the fact that your extension no longer builds properly.
+- Update submodules:
+  - set `./duckdb` to the target tagged DuckDB release
+  - set `./extension-ci-tools` to the matching release branch
+- Update workflow pins in `./github/workflows`:
+  - set the `duckdb_version` input in the `duckdb-stable-build` job in `MainDistributionPipeline.yml`
+  - set the `duckdb_version` input in the `duckdb-stable-deploy` job in `MainDistributionPipeline.yml`
+  - update the reusable workflow reference for `duckdb-stable-build` in
+    `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml`
 
-Currently, DuckDB does not (yet) provide a specific change log for these API changes, but it is generally not too hard to figure out what has changed.
+# API Changes
 
-For figuring out how and why the C++ API changed, we recommend using the following resources:
-- DuckDB's [Release Notes](https://github.com/duckdb/duckdb/releases)
-- DuckDB's history of [Core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions)
-- The git history of the relevant C++ Header file of the API that has changed
+h5db is built against DuckDB's internal C++ API, which is not guaranteed to be stable across DuckDB releases. After
+updating the target DuckDB version, you may need follow-up code changes before the extension builds again.
+
+DuckDB does not publish a dedicated changelog for internal C++ API changes, but the relevant changes are usually easy to
+trace from source history.
+
+Useful references:
+
+- DuckDB [release notes](https://github.com/duckdb/duckdb/releases)
+- DuckDB history of [core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions)
+- git history of the relevant DuckDB C++ headers

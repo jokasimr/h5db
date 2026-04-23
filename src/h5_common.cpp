@@ -6,6 +6,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/error_manager.hpp"
 #include "duckdb/main/config.hpp"
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <mutex>
@@ -145,9 +146,54 @@ std::string H5NormalizeExceptionMessage(const std::string &message) {
 	return message;
 }
 
-static Value H5CreateStringAttributeValue(std::string result, H5StringDecodeMode string_decode_mode) {
-	if (!Value::StringIsValid(result)) {
-		if (string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB) {
+bool H5StringMatchesCharset(const std::string &value, H5T_cset_t cset) {
+	switch (cset) {
+	case H5T_CSET_ASCII:
+		for (auto byte : value) {
+			if (static_cast<unsigned char>(byte) > 0x7F) {
+				return false;
+			}
+		}
+		return true;
+	case H5T_CSET_UTF8:
+		return Value::StringIsValid(value);
+	default:
+		return Value::StringIsValid(value);
+	}
+}
+
+std::string H5DecodeFixedLengthString(const char *raw_data, size_t raw_size, H5T_str_t strpad) {
+	size_t decoded_size = raw_size;
+	switch (strpad) {
+	case H5T_STR_NULLTERM: {
+		auto null_it = std::find(raw_data, raw_data + raw_size, '\0');
+		decoded_size = static_cast<size_t>(null_it - raw_data);
+		break;
+	}
+	case H5T_STR_NULLPAD:
+		while (decoded_size > 0 && raw_data[decoded_size - 1] == '\0') {
+			decoded_size--;
+		}
+		break;
+	case H5T_STR_SPACEPAD:
+		while (decoded_size > 0 && raw_data[decoded_size - 1] == ' ') {
+			decoded_size--;
+		}
+		break;
+	default:
+		break;
+	}
+	return std::string(raw_data, decoded_size);
+}
+
+static bool H5StringDecodeModePreservesRawBytes(H5StringDecodeMode string_decode_mode) {
+	return string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB;
+}
+
+static Value H5CreateDecodedStringValue(std::string result, H5T_cset_t cset,
+                                        H5StringDecodeMode string_decode_mode) {
+	if (!H5StringMatchesCharset(result, cset)) {
+		if (H5StringDecodeModePreservesRawBytes(string_decode_mode)) {
 			return Value::BLOB(const_data_ptr_cast(result.data()), result.size());
 		}
 		throw ErrorManager::InvalidUnicodeError(result, "value construction");
@@ -155,15 +201,174 @@ static Value H5CreateStringAttributeValue(std::string result, H5StringDecodeMode
 	return Value(std::move(result));
 }
 
-static Value H5CreateStringAttributeValue(std::string result, const char *raw_data, size_t raw_size,
-                                          H5StringDecodeMode string_decode_mode) {
-	if (!Value::StringIsValid(result)) {
-		if (string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB) {
+static Value H5CreateDecodedStringValue(std::string result, const char *raw_data, size_t raw_size,
+                                        H5T_cset_t cset, H5StringDecodeMode string_decode_mode) {
+	if (!H5StringMatchesCharset(result, cset)) {
+		if (H5StringDecodeModePreservesRawBytes(string_decode_mode)) {
 			return Value::BLOB(const_data_ptr_cast(raw_data), raw_size);
 		}
 		throw ErrorManager::InvalidUnicodeError(result, "value construction");
 	}
 	return Value(std::move(result));
+}
+
+struct H5StringTypeInfo {
+	bool is_variable = false;
+	H5T_cset_t cset = H5T_CSET_ASCII;
+	size_t fixed_length = 0;
+	H5T_str_t strpad = H5T_STR_NULLTERM;
+};
+
+static H5StringTypeInfo H5InspectStringType(hid_t string_type_id, const std::string &attribute_name) {
+	H5StringTypeInfo info;
+
+	auto is_variable = H5Tis_variable_str(string_type_id);
+	if (is_variable < 0) {
+		throw IOException("Failed to inspect string type for attribute: " + attribute_name);
+	}
+	info.is_variable = is_variable > 0;
+
+	info.cset = H5Tget_cset(string_type_id);
+	if (info.cset == H5T_CSET_ERROR) {
+		throw IOException("Failed to inspect string charset for attribute: " + attribute_name);
+	}
+
+	if (!info.is_variable) {
+		info.fixed_length = H5Tget_size(string_type_id);
+		info.strpad = H5Tget_strpad(string_type_id);
+		if (info.strpad == H5T_STR_ERROR) {
+			throw IOException("Failed to inspect string padding for attribute: " + attribute_name);
+		}
+	}
+	return info;
+}
+
+static Value H5DecodeVariableStringValue(std::string result, const H5StringTypeInfo &type_info,
+                                         H5StringDecodeMode string_decode_mode) {
+	return H5CreateDecodedStringValue(std::move(result), type_info.cset, string_decode_mode);
+}
+
+static Value H5DecodeFixedStringValue(const char *raw_data, const H5StringTypeInfo &type_info,
+                                      H5StringDecodeMode string_decode_mode) {
+	auto result = H5DecodeFixedLengthString(raw_data, type_info.fixed_length, type_info.strpad);
+	return H5CreateDecodedStringValue(std::move(result), raw_data, type_info.fixed_length, type_info.cset,
+	                                  string_decode_mode);
+}
+
+static idx_t H5GetAttributeListLength(hid_t h5_type_id, hid_t h5_space_id, const std::string &attribute_name) {
+	auto type_class = H5Tget_class(h5_type_id);
+	if (type_class == H5T_ARRAY) {
+		auto ndims = H5Tget_array_ndims(h5_type_id);
+		if (ndims < 0) {
+			throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+		}
+		if (ndims != 1) {
+			throw IOException("Only 1D array attributes are supported, found " + std::to_string(ndims) + "D array");
+		}
+		hsize_t dims[1];
+		if (H5Tget_array_dims2(h5_type_id, dims) < 0) {
+			throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+		}
+		return static_cast<idx_t>(dims[0]);
+	}
+
+	auto space_class = H5Sget_simple_extent_type(h5_space_id);
+	if (space_class != H5S_SIMPLE) {
+		throw IOException("Failed to inspect attribute dataspace: " + attribute_name);
+	}
+	auto ndims = H5Sget_simple_extent_ndims(h5_space_id);
+	if (ndims < 0) {
+		throw IOException("Failed to inspect attribute dataspace: " + attribute_name);
+	}
+	if (ndims != 1) {
+		throw IOException("Only 1D array attributes are supported, found " + std::to_string(ndims) + "D array");
+	}
+	hsize_t dims[1];
+	if (H5Sget_simple_extent_dims(h5_space_id, dims, nullptr) < 0) {
+		throw IOException("Failed to inspect attribute dimensions: " + attribute_name);
+	}
+	return static_cast<idx_t>(dims[0]);
+}
+
+static LogicalType H5StringArrayElementType(H5StringDecodeMode string_decode_mode) {
+	return string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB ? LogicalType::VARIANT() : LogicalType::VARCHAR;
+}
+
+static Value H5ReadStringArrayAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id,
+                                             const std::string &attribute_name,
+                                             H5StringDecodeMode string_decode_mode) {
+	auto child_type = H5StringArrayElementType(string_decode_mode);
+	auto array_size = H5GetAttributeListLength(h5_type_id, h5_space_id, attribute_name);
+	if (array_size == 0) {
+		return Value::LIST(child_type, vector<Value>());
+	}
+
+	hid_t string_type_id = h5_type_id;
+	H5TypeHandle base_type;
+	auto type_class = H5Tget_class(h5_type_id);
+	if (type_class == H5T_ARRAY) {
+		auto base_type_id = H5Tget_super(h5_type_id);
+		if (base_type_id < 0) {
+			throw IOException("Failed to inspect string array attribute base type: " + attribute_name);
+		}
+		base_type = H5TypeHandle::TakeOwnershipOf(base_type_id);
+		if (H5Tget_class(base_type.get()) != H5T_STRING) {
+			throw IOException("Failed to inspect string array attribute base type: " + attribute_name);
+		}
+		string_type_id = base_type.get();
+	} else if (type_class != H5T_STRING) {
+		throw IOException("Failed to inspect string array attribute type: " + attribute_name);
+	}
+
+	auto type_info = H5InspectStringType(string_type_id, attribute_name);
+
+	vector<Value> values;
+	values.reserve(array_size);
+
+	if (type_info.is_variable) {
+		vector<char *> raw_values(array_size);
+		H5ErrorSuppressor suppress;
+		if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
+			throw IOException("Failed to read string array attribute: " + attribute_name);
+		}
+
+		auto reclaim = [&]() {
+			if (H5Dvlen_reclaim(h5_type_id, h5_space_id, H5P_DEFAULT, raw_values.data()) < 0) {
+				throw IOException("Failed to reclaim string array attribute: " + attribute_name);
+			}
+		};
+
+		try {
+			for (idx_t i = 0; i < array_size; i++) {
+				if (!raw_values[i]) {
+					values.emplace_back(child_type);
+					continue;
+				}
+				values.emplace_back(
+				    H5DecodeVariableStringValue(std::string(raw_values[i]), type_info, string_decode_mode));
+			}
+		} catch (...) {
+			try {
+				reclaim();
+			} catch (...) {
+			}
+			throw;
+		}
+		reclaim();
+		return Value::LIST(child_type, std::move(values));
+	}
+
+	vector<char> buffer(array_size * type_info.fixed_length);
+	H5ErrorSuppressor suppress;
+	if (H5Aread(attr_id, h5_type_id, buffer.data()) < 0) {
+		throw IOException("Failed to read string array attribute: " + attribute_name);
+	}
+
+	for (idx_t i = 0; i < array_size; i++) {
+		auto *raw_ptr = buffer.data() + (i * type_info.fixed_length);
+		values.emplace_back(H5DecodeFixedStringValue(raw_ptr, type_info, string_decode_mode));
+	}
+	return Value::LIST(child_type, std::move(values));
 }
 
 // Convert HDF5 type to string representation
@@ -324,7 +529,7 @@ LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
 		}
 
 		LogicalType element_type = H5TypeToDuckDBType(base_type);
-		return LogicalType::ARRAY(element_type, dims[0]);
+		return LogicalType::LIST(element_type);
 	}
 
 	return H5TypeToDuckDBType(type_id);
@@ -354,7 +559,7 @@ static H5AttributeTypeResolution H5ResolveAttributeLogicalTypeInternal(hid_t typ
 	if (space_class == H5S_SIMPLE && ndims == 1) {
 		try {
 			LogicalType element_type = H5TypeToDuckDBType(type_id);
-			duckdb_type = LogicalType::ARRAY(element_type, dims[0]);
+			duckdb_type = LogicalType::LIST(element_type);
 		} catch (const std::exception &ex) {
 			return {false, LogicalType(), "unsupported type: " + NormalizeAttributeTypeError(ex)};
 		}
@@ -364,11 +569,6 @@ static H5AttributeTypeResolution H5ResolveAttributeLogicalTypeInternal(hid_t typ
 		} catch (const std::exception &ex) {
 			return {false, LogicalType(), "unsupported type: " + NormalizeAttributeTypeError(ex)};
 		}
-	}
-
-	if (duckdb_type.id() == LogicalTypeId::ARRAY &&
-	    ArrayType::GetChildType(duckdb_type).id() == LogicalTypeId::VARCHAR) {
-		return {false, LogicalType(), "unsupported type: string array attributes are not supported"};
 	}
 
 	return {true, duckdb_type, ""};
@@ -412,36 +612,37 @@ H5OpenedAttribute H5OpenAttribute(hid_t object_id, const std::string &attribute_
 	return result;
 }
 
-Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &duckdb_type,
+Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, const LogicalType &resolved_type,
                            const std::string &attribute_name, H5StringDecodeMode string_decode_mode) {
-	if (duckdb_type.id() == LogicalTypeId::ARRAY) {
-		auto &child_type = ArrayType::GetChildType(duckdb_type);
-		auto array_size = ArrayType::GetSize(duckdb_type);
+	if (resolved_type.id() == LogicalTypeId::LIST) {
+		auto &child_type = ListType::GetChildType(resolved_type);
+		if (child_type.id() == LogicalTypeId::VARCHAR) {
+			return H5ReadStringArrayAttributeValue(attr_id, h5_type_id, h5_space_id, attribute_name,
+			                                      string_decode_mode);
+		}
+		auto array_size = H5GetAttributeListLength(h5_type_id, h5_space_id, attribute_name);
+		if (array_size == 0) {
+			return Value::LIST(child_type, vector<Value>());
+		}
 		return DispatchOnDuckDBType(child_type, [&](auto type_tag) -> Value {
 			using T = typename decltype(type_tag)::type;
 			std::vector<Value> values;
 			values.reserve(array_size);
-
-			if constexpr (std::is_same_v<T, string>) {
-				throw IOException("Attribute '" + attribute_name +
-				                  "' has unsupported type: string array attributes are not supported");
-			} else {
-				std::vector<T> raw_values(array_size);
-				H5ErrorSuppressor suppress;
-				if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
-					throw IOException("Failed to read array attribute: " + attribute_name);
-				}
-				for (auto &value : raw_values) {
-					values.push_back(CreateDuckDBValue(value));
-				}
+			std::vector<T> raw_values(array_size);
+			H5ErrorSuppressor suppress;
+			if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
+				throw IOException("Failed to read array attribute: " + attribute_name);
 			}
-			return Value::ARRAY(child_type, std::move(values));
+			for (auto &value : raw_values) {
+				values.push_back(CreateDuckDBValue(value));
+			}
+			return Value::LIST(child_type, std::move(values));
 		});
 	}
 
-	if (duckdb_type.id() == LogicalTypeId::VARCHAR) {
-		htri_t is_variable = H5Tis_variable_str(h5_type_id);
-		if (is_variable > 0) {
+	if (resolved_type.id() == LogicalTypeId::VARCHAR) {
+		auto type_info = H5InspectStringType(h5_type_id, attribute_name);
+		if (type_info.is_variable) {
 			char *str_ptr = nullptr;
 			H5ErrorSuppressor suppress;
 			if (H5Aread(attr_id, h5_type_id, &str_ptr) < 0) {
@@ -450,25 +651,22 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &d
 			if (!str_ptr) {
 				return Value(LogicalType::VARCHAR);
 			}
-			std::string result(str_ptr);
+			auto result = std::string(str_ptr);
 			if (H5free_memory(str_ptr) < 0) {
 				throw IOException("Failed to reclaim variable-length string attribute: " + attribute_name);
 			}
-			return H5CreateStringAttributeValue(std::move(result), string_decode_mode);
+			return H5DecodeVariableStringValue(std::move(result), type_info, string_decode_mode);
 		}
 
-		size_t str_len = H5Tget_size(h5_type_id);
-		std::vector<char> buffer(str_len);
+		std::vector<char> buffer(type_info.fixed_length);
 		H5ErrorSuppressor suppress;
 		if (H5Aread(attr_id, h5_type_id, buffer.data()) < 0) {
 			throw IOException("Failed to read fixed-length string attribute: " + attribute_name);
 		}
-		size_t actual_len = strnlen(buffer.data(), str_len);
-		std::string result(buffer.data(), actual_len);
-		return H5CreateStringAttributeValue(std::move(result), buffer.data(), buffer.size(), string_decode_mode);
+		return H5DecodeFixedStringValue(buffer.data(), type_info, string_decode_mode);
 	}
 
-	return DispatchOnDuckDBType(duckdb_type, [&](auto type_tag) -> Value {
+	return DispatchOnDuckDBType(resolved_type, [&](auto type_tag) -> Value {
 		using T = typename decltype(type_tag)::type;
 		T value;
 		H5ErrorSuppressor suppress;

@@ -106,62 +106,70 @@ echo -e "${GREEN}[9/28] Generating attrs_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_attrs_edge_cases.py)
 
 echo ""
-echo -e "${GREEN}[10/28] Generating root_attrs.h5${NC}"
+echo -e "${GREEN}[10/28] Generating invalid_string_array_attrs.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_invalid_string_array_attrs_test.py)
+
+echo ""
+echo -e "${GREEN}[11/28] Generating root_attrs.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_root_attrs_test.py)
 
 echo ""
-echo -e "${GREEN}[11/28] Generating empty_scalar.h5${NC}"
+echo -e "${GREEN}[12/28] Generating empty_scalar.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_empty_scalar_test.py)
 
 echo ""
-echo -e "${GREEN}[12/28] Generating names_edge_cases.h5${NC}"
+echo -e "${GREEN}[12b/28] Generating h5_read_string_edge_cases.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_h5_read_string_edge_cases.py)
+
+echo ""
+echo -e "${GREEN}[13/28] Generating names_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_names_edge_cases.py)
 
 echo ""
-echo -e "${GREEN}[13/28] Generating multidim_mismatch.h5${NC}"
+echo -e "${GREEN}[14/28] Generating multidim_mismatch.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_multidim_mismatch_test.py)
 
-echo -e "${GREEN}[14/28] Generating many_groups.h5${NC}"
+echo -e "${GREEN}[15/28] Generating many_groups.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_many_groups_test.py)
 
 echo ""
-echo -e "${GREEN}[15/25] Generating nd_cache_test.h5${NC}"
+echo -e "${GREEN}[16/28] Generating nd_cache_test.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_nd_cache_test.py)
 
 echo ""
-echo -e "${GREEN}[16/27] Generating cache_boundaries.h5${NC}"
+echo -e "${GREEN}[17/28] Generating cache_boundaries.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_cache_boundaries_test.py)
 
 echo ""
-echo -e "${GREEN}[17/27] Generating partition_ownership.h5${NC}"
+echo -e "${GREEN}[18/28] Generating partition_ownership.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_partition_ownership_test.py)
 
 echo ""
-echo -e "${GREEN}[18/27] Generating sparse_pushdown_cache.h5${NC}"
+echo -e "${GREEN}[19/28] Generating sparse_pushdown_cache.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_sparse_pushdown_cache_test.py)
 
 echo ""
-echo -e "${GREEN}[19/27] Generating sparse_partition_pushdown.h5${NC}"
+echo -e "${GREEN}[20/28] Generating sparse_partition_pushdown.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_sparse_partition_pushdown_test.py)
 
 echo ""
-echo -e "${GREEN}[20/27] Generating wide_few_rows.h5${NC}"
+echo -e "${GREEN}[21/28] Generating wide_few_rows.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_wide_few_rows_test.py)
 
 echo ""
-echo -e "${GREEN}[21/27] Generating links.h5${NC}"
+echo -e "${GREEN}[22/28] Generating links.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_links_test.py)
 
 echo ""
-echo -e "${GREEN}[22/28] Generating complex_links.h5${NC}"
+echo -e "${GREEN}[23/28] Generating complex_links.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_complex_links_test.py)
 
 echo ""
-echo -e "${GREEN}[23/28] Generating h5_tree_traversal_hint_bug.h5${NC}"
+echo -e "${GREEN}[24/28] Generating h5_tree_traversal_hint_bug.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_h5_tree_traversal_hint_bug.py)
 
 echo ""
-echo -e "${GREEN}[24/28] Generating swmr test files${NC}"
+echo -e "${GREEN}[25/28] Generating swmr test files${NC}"
 (cd test/data && "$PYTHON_BIN" create_swmr_test.py)
 
 # ====================================================================
@@ -169,23 +177,23 @@ echo -e "${GREEN}[24/28] Generating swmr test files${NC}"
 # ====================================================================
 mkdir -p "$LARGE_DATA_DIR"
 echo ""
-echo -e "${GREEN}[25/28] Generating large_rse_test.h5 (16 MB)${NC}"
+echo -e "${GREEN}[26/28] Generating large_rse_test.h5 (16 MB)${NC}"
 (cd test/data && "$PYTHON_BIN" create_large_rse_test.py)
 
 echo ""
-echo -e "${GREEN}[26/28] Generating large_simple.h5 (1.3 GB)${NC}"
+echo -e "${GREEN}[27/28] Generating large_simple.h5 (1.3 GB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_simple.py")
 
 echo ""
-echo -e "${GREEN}[27/28] Generating large_multithreading.h5 (153 MB)${NC}"
+echo -e "${GREEN}[28/28] Generating large_multithreading.h5 (153 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_multithreading.py")
 
 echo ""
-echo -e "${GREEN}[28/28] Generating large_pushdown_test.h5 (115 MB)${NC}"
+echo -e "${GREEN}[29/28] Generating large_pushdown_test.h5 (115 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_pushdown.py")
 
 echo ""
-echo -e "${GREEN}[29/28] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
+echo -e "${GREEN}[30/28] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
 # ====================================================================
@@ -209,8 +217,10 @@ echo "    - rse_edge_cases.h5       (RSE edge cases)"
 echo "    - rse_invalid.h5          (RSE validation errors)"
 echo "    - unsupported_types.h5    (unsupported HDF5 types)"
 echo "    - attrs_edge_cases.h5     (attribute edge cases)"
-echo "    - root_attrs.h5           (root attributes + string-array attr edge case)"
+echo "    - invalid_string_array_attrs.h5 (invalid string-array attribute edge cases)"
+echo "    - root_attrs.h5           (root attributes + 1D array attrs)"
 echo "    - empty_scalar.h5         (empty + scalar datasets)"
+echo "    - h5_read_string_edge_cases.h5 (string padding + invalid text edge cases)"
 echo "    - names_edge_cases.h5     (dataset name edge cases)"
 echo "    - multidim_mismatch.h5    (multidim row-count mismatch)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"

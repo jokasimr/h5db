@@ -99,34 +99,12 @@ as additional columns with `h5_attr(...)`.
 - Projected attributes and dataset metadata are populated only for resolved local
   rows. Unresolved and external rows use projected defaults.
 
-**Projected Attribute Semantics:**
-- `h5_attr()` projects all attributes for the current object into one `MAP(VARCHAR, VARIANT)` column
-- `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
-- constant expressions such as `lower('STRING_ATTR')` are allowed
-- row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree`
-- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
-- `h5_attr()` uses `NULL::MAP(VARCHAR, VARIANT)` as its implicit default
-- if `default_value` is provided, it must be a bind-time constant expression with a concrete type
-- typed `NULL` defaults are allowed, e.g. `NULL::VARCHAR`
-- if `h5_attr()` is used on a resolved local row, `h5_tree` emits a map containing all attributes on that object
-- if an object has no attributes, `h5_attr()` emits an empty map
-- if `h5_attr()` is used on an unresolved or external row, `h5_tree` emits `NULL`
-- unsupported attribute values inside `h5_attr()` are included with `NULL` map values instead of failing the query
-- string attribute values with invalid UTF-8 are preserved as `BLOB` in `VARIANT`-typed projected attributes
-- text-typed projected attributes still fail on invalid UTF-8 string values
-- if an object has the projected attribute, `h5_tree` reads it using the same conversion rules as `h5_attributes()`
-  and casts it to the declared output type
-- if an object does not have the projected attribute, `h5_tree` emits `default_value` (or `NULL::VARIANT` for
-  `h5_attr(name)`)
-- projected output names must be unique; duplicate projected names or collisions with `path`, `type`, `dtype`, or
-  `shape` fail at bind time with DuckDB's duplicate-column error
-
-**Projected Attribute Limitations:**
-- scalar numeric attributes and scalar string attributes are supported
-- simple 1D numeric arrays are supported
-- multidimensional attribute dataspaces are not supported
-- string array attributes are not supported
-- other unsupported HDF5 attribute forms follow the same behavior as `h5_attributes()`
+**Projected Attributes:**
+- Projected attributes are declared with `h5_attr(...)` and may be renamed with `h5_alias(...)`.
+- Only resolved local rows read attribute values. Unresolved and external rows use projected defaults.
+- Projected output names must be unique; duplicate projected names or collisions with `path`, `type`, `dtype`, or
+  `shape` fail at bind time.
+- See `h5_attr(...)` below for bind-time rules, default handling, string behavior, and supported attribute forms.
 
 **Example:**
 ```sql
@@ -182,13 +160,14 @@ the requested group.
   - `h5_alias(alias_name, h5_attr(...))`
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
-**Returns:** Table with the same columns and projected-attribute semantics as `h5_tree()`
+**Returns:** Table with the same row shape as `h5_tree()`
 
 **Semantics:**
 - the path must resolve to a group, otherwise the function errors
 - only immediate children are returned; the requested group itself is not returned
 - external groups can be listed if the external target resolves successfully
-- row typing, `dtype`, `shape`, and projected-attribute rules are the same as `h5_tree()`
+- row typing, `dtype`, and `shape` are the same as `h5_tree()`
+- projected attributes use the same `h5_attr(...)` semantics
 
 **Examples:**
 ```sql
@@ -282,9 +261,10 @@ Reads attributes from an object or the file root.
 - Invalid UTF-8 string attribute values raise an error in `h5_attributes()`
 
 **Type Support:**
-- Numeric scalars, string scalars, and 1D numeric arrays
-- HDF5 `H5T_ARRAY`-typed attributes are supported only when they are 1D and numeric
-- String array attributes are not currently supported
+- Numeric scalars and string scalars
+- Simple 1D numeric and string arrays, returned as DuckDB `LIST`s
+- HDF5 `H5T_ARRAY`-typed attributes are supported when they are 1D
+- Empty numeric and string attribute arrays are supported
 
 **Examples:**
 ```sql
@@ -325,7 +305,7 @@ by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 - `group_path` must resolve to a group or the function errors
 - `NULL` `group_path` yields `NULL`
 - named parameters such as `swmr := true` are not supported in the scalar form
-- projected attribute semantics match table `h5_ls()` and `h5_tree()`
+- projected attributes use the same `h5_attr(...)` semantics as table `h5_ls()`
 
 **Examples:**
 ```sql
@@ -414,18 +394,39 @@ Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 
 **Returns:** STRUCT wrapper used by `h5_tree()` and `h5_ls()`
 
-**Notes:**
+**Bind-time rules:**
+- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
+- `h5_attr()` defaults to output column name `h5_attr`
+- `h5_attr(name)` and `h5_attr(name, default_value)` default to output column name `name`
+- `h5_alias(...)` overrides the default output name
+- `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
+- constant expressions such as `lower('STRING_ATTR')` are allowed
+- row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree()` and `h5_ls()`
+- if `default_value` is provided, it must be a bind-time constant expression with a concrete type
+- typed `NULL` defaults such as `NULL::VARCHAR` are allowed
+- untyped `NULL` defaults are rejected
+
+**Runtime behavior:**
 - `h5_attr()` projects all attributes into one `MAP(VARCHAR, VARIANT)` column named `h5_attr`
 - on resolved rows with no attributes, `h5_attr()` produces `{}`
 - on unresolved or external rows, `h5_attr()` produces `NULL`
 - unsupported attribute values inside `h5_attr()` become `NULL` map entries
-- `h5_attr(name)` is shorthand for `h5_attr(name, NULL::VARIANT)`
-- `VARIANT`-typed or `BLOB`-typed projected attributes preserve invalid UTF-8 string values as `BLOB`
-- `VARCHAR`-typed projected attributes still fail on invalid UTF-8 string values
-- typed `NULL` defaults such as `NULL::VARCHAR` are allowed
-- untyped `NULL` defaults are rejected
 - missing attributes use `default_value` or `NULL::VARIANT` when the default is omitted
-- present attributes are converted like `h5_attributes()` and then cast to the type of `default_value`
+- present attributes are first converted using the same nominal HDF5-to-DuckDB type rules as `h5_attributes()`
+- single-attribute projections are then cast to the type of `default_value`
+
+**String behavior:**
+- `VARIANT`-typed or `BLOB`-typed projected scalar string attributes preserve invalid UTF-8 values as `BLOB`
+- flexible projected string arrays preserve invalid elements as `BLOB`, including `VARIANT[]`, `VARIANT[N]`,
+  `BLOB[]`, and `BLOB[N]` outputs
+- text-typed projected attributes still fail on invalid UTF-8 string values
+
+**Supported attribute forms:**
+- numeric and string scalars
+- simple 1D numeric and string arrays
+- 1D `H5T_ARRAY`-typed attributes
+- empty numeric and string arrays
+- multidimensional attribute dataspaces are not supported
 
 **Example:**
 ```sql
@@ -581,8 +582,7 @@ All functions provide clear error messages for common issues:
 3. **Opaque, bitfield, reference, time-like, and non-string variable-length HDF5 type classes** are not supported
 4. **Datasets with >4 dimensions** are not supported
 5. **Multi-dimensional string datasets** are not supported
-6. **Attribute string arrays** are not supported
-7. **Attribute multidimensional dataspaces** are not supported (only scalar and 1D)
+6. **Attribute multidimensional dataspaces** are not supported (only scalar and 1D)
 
 ---
 

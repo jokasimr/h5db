@@ -21,6 +21,7 @@ struct AttributeInfo {
 	std::string name;
 	LogicalType type;
 	H5TypeHandle h5_type;
+	H5DataspaceHandle h5_space;
 };
 
 struct H5AttributesBindData : public TableFunctionData {
@@ -74,6 +75,7 @@ static herr_t attr_info_callback(hid_t location_id, const char *attr_name, const
 	info.name = attr_name;
 	info.type = duckdb_type;
 	info.h5_type = std::move(opened.type);
+	info.h5_space = std::move(opened.space);
 
 	attributes.push_back(std::move(info));
 
@@ -164,7 +166,8 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 		}
 
 		try {
-			auto value = H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.type, attr_info.name);
+			auto value =
+			    H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.h5_space.get(), attr_info.type, attr_info.name);
 			result_vector.SetValue(0, value);
 		} catch (const std::exception &ex) {
 			throw IOException(AppendRemoteError(H5NormalizeExceptionMessage(ex.what()), bind_data.filename));

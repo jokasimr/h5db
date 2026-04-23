@@ -546,8 +546,11 @@ h5db/
 │       └── *.py             # Data generation scripts
 │
 ├── docs/                    # Documentation
-│   ├── DEVELOPER.md         # This file
-│   └── UPDATING.md
+│   ├── README.md            # Documentation index
+│   ├── API.md               # Public API reference
+│   ├── RSE_USAGE.md         # RSE user guide
+│   ├── developer/           # Contributor docs
+│   └── internals/           # Internal design notes
 │
 ├── duckdb/                  # DuckDB submodule
 ├── extension-ci-tools/      # CI/CD tooling

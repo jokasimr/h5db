@@ -15,6 +15,12 @@ struct H5OpenedAttribute {
 	H5DataspaceHandle space;
 };
 
+// Validate whether a decoded HDF5 string satisfies its declared character set.
+bool H5StringMatchesCharset(const std::string &value, H5T_cset_t cset);
+
+// Decode a fixed-length HDF5 string according to its declared padding mode.
+std::string H5DecodeFixedLengthString(const char *raw_data, size_t raw_size, H5T_str_t strpad);
+
 // Helper function to get HDF5 type as string
 std::string H5TypeToString(hid_t type_id);
 
@@ -34,8 +40,10 @@ LogicalType H5ResolveAttributeLogicalType(hid_t type_id, hid_t space_id, const s
 // Returns false for unsupported attribute types/dataspaces and throws on genuine HDF5 inspection failures.
 bool H5TryResolveAttributeLogicalType(hid_t type_id, hid_t space_id, LogicalType &duckdb_type);
 
-// Read an HDF5 attribute into a DuckDB Value using a previously resolved DuckDB type.
-Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, const LogicalType &duckdb_type,
+// Read an HDF5 attribute into a DuckDB Value using a previously resolved DuckDB source type.
+// When TEXT_OR_BLOB is requested for string values, the returned Value may preserve invalid bytes as BLOB/VARIANT
+// instead of matching the nominal resolved type exactly.
+Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, const LogicalType &resolved_type,
                            const std::string &attribute_name,
                            H5StringDecodeMode string_decode_mode = H5StringDecodeMode::STRICT_TEXT);
 

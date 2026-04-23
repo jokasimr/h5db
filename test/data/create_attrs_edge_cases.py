@@ -25,6 +25,16 @@ with h5py.File("attrs_edge_cases.h5", "w") as f:
     ds = f.create_dataset("invalid_utf8_fixed_attr_dataset", data=np.arange(2, dtype=np.int32))
     ds.attrs.create("invalid_utf8_fixed_attr", b"\xff\x00A", dtype=h5py.string_dtype(encoding="ascii", length=3))
 
+    # Dataset with a valid fixed-length string attribute containing an interior NUL.
+    ds = f.create_dataset("nullpad_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs.create("nullpad_attr", b"A\x00B", dtype=h5py.string_dtype(encoding="ascii", length=3))
+
+    # Dataset with an invalid fixed-length string attribute after an interior NUL.
+    ds = f.create_dataset("invalid_utf8_after_nul_attr_dataset", data=np.arange(2, dtype=np.int32))
+    ds.attrs.create(
+        "invalid_utf8_after_nul_attr", b"A\x00\xff", dtype=h5py.string_dtype(encoding="ascii", length=3)
+    )
+
     # Dataset with unsupported multidimensional attribute (2D).
     ds = f.create_dataset("multidim_attr_dataset", data=np.arange(4, dtype=np.int32))
     ds.attrs["attr_2d"] = np.arange(6, dtype=np.int32).reshape(2, 3)

@@ -58,6 +58,18 @@ static string FormatRemoteDatasetReadError(const string &filename, const string 
 	return AppendRemoteError("Failed to read data from dataset: " + dataset_path, filename);
 }
 
+static string FormatInvalidDatasetStringError(const string &filename, const string &dataset_path) {
+	return AppendRemoteError("Invalid unicode (byte sequence mismatch) detected in dataset: " + dataset_path,
+	                         filename);
+}
+
+static string ValidateHDF5StringValue(string value, H5T_cset_t cset, const string &filename, const string &dataset_path) {
+	if (!H5StringMatchesCharset(value, cset)) {
+		throw IOException(FormatInvalidDatasetStringError(filename, dataset_path));
+	}
+	return value;
+}
+
 // =============================================================================
 // Type-safe index wrappers for projection pushdown
 // =============================================================================
@@ -438,11 +450,19 @@ static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file
 // Helper function to read HDF5 strings (handles both variable-length and fixed-length)
 // The callback is called for each string: callback(index, string_value)
 static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hid_t file_space, idx_t count,
+                            const string &filename, const string &dataset_path,
                             std::function<void(idx_t, const std::string &)> callback) {
 	if (count == 0) {
 		return;
 	}
 	htri_t is_variable = H5Tis_variable_str(h5_type);
+	if (is_variable < 0) {
+		throw IOException(AppendRemoteError("Failed to inspect string type for dataset: " + dataset_path, filename));
+	}
+	H5T_cset_t cset = H5Tget_cset(h5_type);
+	if (cset == H5T_CSET_ERROR) {
+		throw IOException(AppendRemoteError("Failed to inspect string charset for dataset: " + dataset_path, filename));
+	}
 
 	if (is_variable > 0) {
 		// Variable-length strings
@@ -452,41 +472,58 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		herr_t status = H5Dread(dataset_id, h5_type, mem_space, file_space, H5P_DEFAULT, string_data.data());
 
 		if (status < 0) {
-			throw IOException("Failed to read variable-length string data");
+			throw IOException(FormatRemoteDatasetReadError(filename, dataset_path));
 		}
 
-		// Process strings via callback
-		for (idx_t i = 0; i < count; i++) {
-			if (string_data[i]) {
-				callback(i, std::string(string_data[i]));
-			} else {
-				// Treat NULL strings as empty strings for consistency with h5py.
-				callback(i, std::string());
-			}
-		}
-
-		// Reclaim HDF5-allocated memory
 		hsize_t mem_dim = count;
 		H5DataspaceHandle reclaim_space(1, &mem_dim);
-		H5Dvlen_reclaim(h5_type, reclaim_space, H5P_DEFAULT, string_data.data());
+		auto reclaim = [&]() {
+			if (H5Dvlen_reclaim(h5_type, reclaim_space, H5P_DEFAULT, string_data.data()) < 0) {
+				throw IOException(AppendRemoteError(
+				    "Failed to reclaim variable-length string data from dataset: " + dataset_path, filename));
+			}
+		};
+
+		try {
+			// Process strings via callback
+			for (idx_t i = 0; i < count; i++) {
+				if (string_data[i]) {
+					callback(i, ValidateHDF5StringValue(string(string_data[i]), cset, filename, dataset_path));
+				} else {
+					// Treat NULL strings as empty strings for consistency with h5py.
+					callback(i, string());
+				}
+			}
+		} catch (...) {
+			try {
+				reclaim();
+			} catch (...) {
+			}
+			throw;
+		}
+		reclaim();
 
 	} else {
 		// Fixed-length strings
 		size_t str_len = H5Tget_size(h5_type);
+		H5T_str_t strpad = H5Tget_strpad(h5_type);
+		if (strpad == H5T_STR_ERROR) {
+			throw IOException(AppendRemoteError("Failed to inspect string padding for dataset: " + dataset_path, filename));
+		}
 		std::vector<char> buffer(count * str_len);
 
 		H5ErrorSuppressor suppress;
 		herr_t status = H5Dread(dataset_id, h5_type, mem_space, file_space, H5P_DEFAULT, buffer.data());
 
 		if (status < 0) {
-			throw IOException("Failed to read fixed-length string data");
+			throw IOException(FormatRemoteDatasetReadError(filename, dataset_path));
 		}
 
 		// Process strings via callback
 		for (idx_t i = 0; i < count; i++) {
-			char *str_ptr = buffer.data() + (i * str_len);
-			size_t actual_len = strnlen(str_ptr, str_len);
-			callback(i, std::string(str_ptr, actual_len));
+			auto *str_ptr = buffer.data() + (i * str_len);
+			auto decoded = H5DecodeFixedLengthString(str_ptr, str_len, strpad);
+			callback(i, ValidateHDF5StringValue(std::move(decoded), cset, filename, dataset_path));
 		}
 	}
 }
@@ -708,7 +745,7 @@ static RSEColumnState::RSEValueStorage LoadRSEValues(const string &filename, con
 		if constexpr (std::is_same_v<T, string>) {
 			std::vector<string> string_values;
 			string_values.reserve(num_values);
-			ReadHDF5Strings(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, num_values,
+			ReadHDF5Strings(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, num_values, filename, spec.values_path,
 			                [&](idx_t i, const std::string &str) { string_values.push_back(str); });
 			return string_values;
 		} else {
@@ -1126,7 +1163,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 				    ScalarColumnState scalar_state;
 				    if (spec.is_string) {
 					    std::string value;
-					    ReadHDF5Strings(dataset, spec.h5_type_id, H5S_ALL, H5S_ALL, 1,
+					    ReadHDF5Strings(dataset, spec.h5_type_id, H5S_ALL, H5S_ALL, 1, bind_data.filename, spec.path,
 					                    [&](idx_t, const std::string &str) { value = str; });
 					    scalar_state.value = value;
 				    } else {
@@ -1862,10 +1899,11 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 	// Read data based on type
 	if (spec.is_string) {
 		// Handle string data using helper
-		ReadHDF5Strings(
-		    dataset_id, spec.h5_type_id, mem_space, file_space, to_read, [&](idx_t i, const std::string &str) {
-			    FlatVector::GetData<string_t>(result_vector)[i] = StringVector::AddString(result_vector, str);
-		    });
+		ReadHDF5Strings(dataset_id, spec.h5_type_id, mem_space, file_space, to_read, bind_data.filename, spec.path,
+		                [&](idx_t i, const std::string &str) {
+			                FlatVector::GetData<string_t>(result_vector)[i] =
+			                    StringVector::AddString(result_vector, str);
+		                });
 
 	} else {
 		// Handle numeric data

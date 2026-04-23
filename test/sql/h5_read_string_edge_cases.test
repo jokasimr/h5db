@@ -1,0 +1,81 @@
+# name: test/sql/h5_read_string_edge_cases.test
+# description: h5_read string dataset edge cases
+# group: [sql]
+
+require h5db
+
+query II
+SELECT strlen(spacepad_fixed), hex(CAST(spacepad_fixed AS BLOB))
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/spacepad_fixed')
+ORDER BY 1;
+----
+1	61
+2	7879
+
+query II
+SELECT strlen(scalar_spacepad_fixed), hex(CAST(scalar_spacepad_fixed AS BLOB))
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_spacepad_fixed');
+----
+1	61
+
+query II
+SELECT strlen(nullterm_fixed), hex(CAST(nullterm_fixed AS BLOB))
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullterm_fixed')
+ORDER BY 1;
+----
+1	61
+2	7879
+
+query II
+SELECT strlen(nullpad_fixed_interior_nul), hex(CAST(nullpad_fixed_interior_nul AS BLOB))
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullpad_fixed_interior_nul');
+----
+3	410042
+
+query II
+SELECT strlen(scalar_nullpad_fixed_interior_nul), hex(CAST(scalar_nullpad_fixed_interior_nul AS BLOB))
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_nullpad_fixed_interior_nul');
+----
+3	410042
+
+query I
+SELECT column_type
+FROM (
+    DESCRIBE SELECT * FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var')
+);
+----
+VARCHAR
+
+statement error
+SELECT nullpad_fixed_invalid_after_nul
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullpad_fixed_invalid_after_nul');
+----
+<REGEX>:.*(Invalid unicode.*\/nullpad_fixed_invalid_after_nul|\/nullpad_fixed_invalid_after_nul.*Invalid unicode).*
+
+statement error
+SELECT fixed_invalid_no_nul
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/fixed_invalid_no_nul');
+----
+<REGEX>:.*(Invalid unicode.*\/fixed_invalid_no_nul|\/fixed_invalid_no_nul.*Invalid unicode).*
+
+statement error
+SELECT invalid_utf8_var
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var');
+----
+<REGEX>:.*(Invalid unicode.*\/invalid_utf8_var|\/invalid_utf8_var.*Invalid unicode).*
+
+statement error
+SELECT scalar_invalid_utf8_var
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_invalid_utf8_var');
+----
+<REGEX>:.*(Invalid unicode.*\/scalar_invalid_utf8_var|\/scalar_invalid_utf8_var.*Invalid unicode).*
+
+statement error
+SELECT *
+FROM h5_read(
+    'test/data/h5_read_string_edge_cases.h5',
+    '/rse_invalid/index',
+    h5_rse('/rse_invalid/run_starts', '/rse_invalid/values')
+);
+----
+<REGEX>:.*(Invalid unicode.*\/rse_invalid\/values|\/rse_invalid\/values.*Invalid unicode).*

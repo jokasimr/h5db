@@ -37,19 +37,26 @@ To ensure test data exists (generate only if missing):
 | `rse_edge_cases.h5` | `create_rse_edge_cases.py` | 168 KB | RSE edge cases (chunk boundaries, constants, etc.) |
 | `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
 | `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, float16, reference, non-string vlen, opaque, bitfield) |
-| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, string array, enum, compound, float16, reference, opaque, bitfield) |
-| `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling and unsupported string-array attrs |
+| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, enum, compound, float16, reference, opaque, bitfield) |
+| `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
+| `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling plus numeric/string array attrs, including empty arrays |
 | `empty_scalar.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets (row-count edge cases) |
+| `h5_read_string_edge_cases.h5` | `create_h5_read_string_edge_cases.py` | 13 KB | String padding and invalid-text dataset coverage for `h5_read` |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
+| `many_groups.h5` | `create_many_groups_test.py` | 135 MB | Large namespace listing and traversal coverage |
 | `nd_cache_test.h5` | `create_nd_cache_test.py` | 310 MB | N-D cache coverage with varied chunking |
 | `cache_boundaries.h5` | `create_cache_boundaries_test.py` | 8 KB | Regular cache row-count boundary coverage |
 | `partition_ownership.h5` | `create_partition_ownership_test.py` | 400 KB | Logical partition ownership boundary coverage |
 | `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
 | `sparse_partition_pushdown.h5` | `create_sparse_partition_pushdown_test.py` | 1.5 MB | Sparse pushdown across logical partitions and empty partitions |
 | `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
+| `links.h5` | `create_links_test.py` | 7.5 KB | Hard/soft/external link behavior for `h5_tree`/`h5_ls` |
+| `links_external_target.h5` | `create_links_test.py` | 5.7 KB | External-link target for `links.h5` |
 | `complex_links.h5` | `create_complex_links_test.py` | 6 KB | Complicated hard/soft link graph for `h5_tree`/`h5_ls` reasoning |
 | `h5_tree_traversal_hint_bug.h5` | `create_h5_tree_traversal_hint_bug.py` | 5 KB | `h5_tree` prefix traversal-root regression coverage |
+| `swmr_enabled.h5` | `create_swmr_test.py` | 2.1 KB | File with SWMR flag enabled |
+| `swmr_disabled.h5` | `create_swmr_test.py` | 2.1 KB | File with SWMR flag disabled |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
 
 ### Large Test Files (`test/data/large/`)
@@ -82,29 +89,40 @@ test/data/
 ├── create_rse_invalid_test.py         # Creates: rse_invalid.h5
 ├── create_unsupported_types_test.py   # Creates: unsupported_types.h5
 ├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
+├── create_invalid_string_array_attrs_test.py # Creates: invalid_string_array_attrs.h5
 ├── create_root_attrs_test.py          # Creates: root_attrs.h5
 ├── create_empty_scalar_test.py        # Creates: empty_scalar.h5
+├── create_h5_read_string_edge_cases.py # Creates: h5_read_string_edge_cases.h5
 ├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
+├── create_many_groups_test.py         # Creates: many_groups.h5
 ├── create_nd_cache_test.py            # Creates: nd_cache_test.h5
 ├── create_cache_boundaries_test.py    # Creates: cache_boundaries.h5
 ├── create_partition_ownership_test.py # Creates: partition_ownership.h5
 ├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
 ├── create_sparse_partition_pushdown_test.py # Creates: sparse_partition_pushdown.h5
 ├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
+├── create_links_test.py               # Creates: links.h5, links_external_target.h5
 ├── create_complex_links_test.py       # Creates: complex_links.h5
 ├── create_h5_tree_traversal_hint_bug.py # Creates: h5_tree_traversal_hint_bug.h5
+├── create_swmr_test.py                # Creates: swmr_enabled.h5, swmr_disabled.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │
 ├── simple.h5                          # Generated files (in .gitignore)
 ├── types.h5
 ├── multidim.h5
+├── h5_read_string_edge_cases.h5
+├── many_groups.h5
 ├── nd_cache_test.h5
 ├── cache_boundaries.h5
 ├── partition_ownership.h5
 ├── sparse_pushdown_cache.h5
 ├── sparse_partition_pushdown.h5
 ├── wide_few_rows.h5
+├── links.h5
+├── links_external_target.h5
+├── swmr_enabled.h5
+├── swmr_disabled.h5
 ├── large_rse_test.h5
 ├── ... (other .h5 files)
 │

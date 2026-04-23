@@ -14,15 +14,7 @@
 
 namespace duckdb {
 
-static bool H5TreeIsAliasStructType(const LogicalType &type) {
-	if (type.id() != LogicalTypeId::STRUCT) {
-		return false;
-	}
-	auto &children = StructType::GetChildTypes(type);
-	return children.size() == 3 && children[0].second == LogicalType::VARCHAR;
-}
-
-static bool H5TreeIsAttrStructType(const LogicalType &type) {
+static bool H5TreeIsTaggedStructType(const LogicalType &type) {
 	if (type.id() != LogicalTypeId::STRUCT) {
 		return false;
 	}
@@ -37,7 +29,7 @@ static string H5TreeProjectedAttributeUsage(const string &function_name) {
 
 static Value H5TreeUnwrapAliasSpec(const Value &input, std::optional<std::string> &alias_name) {
 	Value current = input;
-	while (H5TreeIsAliasStructType(current.type())) {
+	while (H5TreeIsTaggedStructType(current.type())) {
 		auto &children = StructValue::GetChildren(current);
 		if (children.size() != 3 || children[0].GetValue<string>() != "__alias__") {
 			break;
@@ -53,7 +45,7 @@ static Value H5TreeUnwrapAliasSpec(const Value &input, std::optional<std::string
 bool H5TreeIsProjectedAttributeArgument(const Value &input) {
 	std::optional<std::string> alias_name;
 	auto current = H5TreeUnwrapAliasSpec(input, alias_name);
-	if (!H5TreeIsAttrStructType(current.type())) {
+	if (!H5TreeIsTaggedStructType(current.type())) {
 		return false;
 	}
 	auto &children = StructValue::GetChildren(current);
@@ -103,10 +95,27 @@ static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5Tre
 	}
 }
 
+static bool H5TreeTypePreservesRawStringBytes(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::VARIANT:
+	case LogicalTypeId::BLOB:
+		return true;
+	case LogicalTypeId::LIST: {
+		auto &child_type = ListType::GetChildType(type);
+		return child_type.id() == LogicalTypeId::VARIANT || child_type.id() == LogicalTypeId::BLOB;
+	}
+	case LogicalTypeId::ARRAY: {
+		auto &child_type = ArrayType::GetChildType(type);
+		return child_type.id() == LogicalTypeId::VARIANT || child_type.id() == LogicalTypeId::BLOB;
+	}
+	default:
+		return false;
+	}
+}
+
 static H5StringDecodeMode H5TreeProjectedAttributeDecodeMode(const LogicalType &output_type) {
-	return output_type.id() == LogicalTypeId::VARIANT || output_type.id() == LogicalTypeId::BLOB
-	           ? H5StringDecodeMode::TEXT_OR_BLOB
-	           : H5StringDecodeMode::STRICT_TEXT;
+	return H5TreeTypePreservesRawStringBytes(output_type) ? H5StringDecodeMode::TEXT_OR_BLOB
+	                                                      : H5StringDecodeMode::STRICT_TEXT;
 }
 
 static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue &target, hid_t object_id,
@@ -123,7 +132,8 @@ static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue 
 
 	auto opened = H5OpenAttribute(object_id, spec.attribute_name);
 	auto source_type = H5ResolveAttributeLogicalType(opened.type.get(), opened.space.get(), spec.attribute_name);
-	auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), source_type, spec.attribute_name,
+	auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
+	                                  spec.attribute_name,
 	                                  H5TreeProjectedAttributeDecodeMode(spec.output_type));
 	Value cast_value;
 	string error_message;
@@ -165,7 +175,8 @@ static herr_t H5TreeAllAttributesCallback(hid_t location_id, const char *attr_na
 			return 0;
 		}
 
-		auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), source_type, attribute_name,
+		auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
+		                                  attribute_name,
 		                                  H5StringDecodeMode::TEXT_OR_BLOB);
 		string error_message;
 		if (!value.DefaultTryCastAs(LogicalType::VARIANT(), variant_value, &error_message, false)) {
@@ -209,7 +220,7 @@ std::string H5TreeNormalizeObjectPath(std::string object_path) {
 H5TreeProjectedAttributeSpec H5TreeParseProjectedAttributeSpec(const Value &input, const std::string &function_name) {
 	std::optional<std::string> alias_name;
 	auto current = H5TreeUnwrapAliasSpec(input, alias_name);
-	if (!H5TreeIsAttrStructType(current.type())) {
+	if (!H5TreeIsTaggedStructType(current.type())) {
 		throw InvalidInputException(H5TreeProjectedAttributeUsage(function_name));
 	}
 	auto &children = StructValue::GetChildren(current);
