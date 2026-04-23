@@ -133,8 +133,7 @@ static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue 
 	auto opened = H5OpenAttribute(object_id, spec.attribute_name);
 	auto source_type = H5ResolveAttributeLogicalType(opened.type.get(), opened.space.get(), spec.attribute_name);
 	auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
-	                                  spec.attribute_name,
-	                                  H5TreeProjectedAttributeDecodeMode(spec.output_type));
+	                                  spec.attribute_name, H5TreeProjectedAttributeDecodeMode(spec.output_type));
 	Value cast_value;
 	string error_message;
 	if (!value.DefaultTryCastAs(spec.output_type, cast_value, &error_message, false)) {
@@ -176,8 +175,7 @@ static herr_t H5TreeAllAttributesCallback(hid_t location_id, const char *attr_na
 		}
 
 		auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
-		                                  attribute_name,
-		                                  H5StringDecodeMode::TEXT_OR_BLOB);
+		                                  attribute_name, H5StringDecodeMode::TEXT_OR_BLOB);
 		string error_message;
 		if (!value.DefaultTryCastAs(LogicalType::VARIANT(), variant_value, &error_message, false)) {
 			return fail("Attribute '" + attribute_name + "' contains values that cannot be cast to VARIANT");

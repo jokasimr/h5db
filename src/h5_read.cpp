@@ -59,11 +59,11 @@ static string FormatRemoteDatasetReadError(const string &filename, const string 
 }
 
 static string FormatInvalidDatasetStringError(const string &filename, const string &dataset_path) {
-	return AppendRemoteError("Invalid unicode (byte sequence mismatch) detected in dataset: " + dataset_path,
-	                         filename);
+	return AppendRemoteError("Invalid unicode (byte sequence mismatch) detected in dataset: " + dataset_path, filename);
 }
 
-static string ValidateHDF5StringValue(string value, H5T_cset_t cset, const string &filename, const string &dataset_path) {
+static string ValidateHDF5StringValue(string value, H5T_cset_t cset, const string &filename,
+                                      const string &dataset_path) {
 	if (!H5StringMatchesCharset(value, cset)) {
 		throw IOException(FormatInvalidDatasetStringError(filename, dataset_path));
 	}
@@ -508,7 +508,8 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		size_t str_len = H5Tget_size(h5_type);
 		H5T_str_t strpad = H5Tget_strpad(h5_type);
 		if (strpad == H5T_STR_ERROR) {
-			throw IOException(AppendRemoteError("Failed to inspect string padding for dataset: " + dataset_path, filename));
+			throw IOException(
+			    AppendRemoteError("Failed to inspect string padding for dataset: " + dataset_path, filename));
 		}
 		std::vector<char> buffer(count * str_len);
 

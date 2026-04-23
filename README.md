@@ -31,6 +31,7 @@ stack or SFTP.
 - `h5_attributes(filename, object_path)`
   Reads attributes from an object or the file root as a single wide row.
 
+For a practical guide to the main workflows, see [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md).
 For the full API, see [docs/API.md](docs/API.md).
 
 ## Quick Start
@@ -233,6 +234,7 @@ For targeted test runs, test-data generation, and debugging workflows, see [docs
 ## Documentation
 
 - [docs/README.md](docs/README.md): documentation index
+- [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md): practical usage guide for the main workflows
 - [docs/API.md](docs/API.md): function reference, settings, type mapping, and limitations
 - [docs/RSE_USAGE.md](docs/RSE_USAGE.md): detailed guide to run-start encoding support
 - [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md): building, testing, debugging, and project layout

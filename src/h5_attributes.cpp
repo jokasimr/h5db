@@ -166,8 +166,8 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 		}
 
 		try {
-			auto value =
-			    H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.h5_space.get(), attr_info.type, attr_info.name);
+			auto value = H5ReadAttributeValue(attr, attr_info.h5_type.get(), attr_info.h5_space.get(), attr_info.type,
+			                                  attr_info.name);
 			result_vector.SetValue(0, value);
 		} catch (const std::exception &ex) {
 			throw IOException(AppendRemoteError(H5NormalizeExceptionMessage(ex.what()), bind_data.filename));

@@ -190,8 +190,7 @@ static bool H5StringDecodeModePreservesRawBytes(H5StringDecodeMode string_decode
 	return string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB;
 }
 
-static Value H5CreateDecodedStringValue(std::string result, H5T_cset_t cset,
-                                        H5StringDecodeMode string_decode_mode) {
+static Value H5CreateDecodedStringValue(std::string result, H5T_cset_t cset, H5StringDecodeMode string_decode_mode) {
 	if (!H5StringMatchesCharset(result, cset)) {
 		if (H5StringDecodeModePreservesRawBytes(string_decode_mode)) {
 			return Value::BLOB(const_data_ptr_cast(result.data()), result.size());
@@ -201,8 +200,8 @@ static Value H5CreateDecodedStringValue(std::string result, H5T_cset_t cset,
 	return Value(std::move(result));
 }
 
-static Value H5CreateDecodedStringValue(std::string result, const char *raw_data, size_t raw_size,
-                                        H5T_cset_t cset, H5StringDecodeMode string_decode_mode) {
+static Value H5CreateDecodedStringValue(std::string result, const char *raw_data, size_t raw_size, H5T_cset_t cset,
+                                        H5StringDecodeMode string_decode_mode) {
 	if (!H5StringMatchesCharset(result, cset)) {
 		if (H5StringDecodeModePreservesRawBytes(string_decode_mode)) {
 			return Value::BLOB(const_data_ptr_cast(raw_data), raw_size);
@@ -295,8 +294,7 @@ static LogicalType H5StringArrayElementType(H5StringDecodeMode string_decode_mod
 }
 
 static Value H5ReadStringArrayAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id,
-                                             const std::string &attribute_name,
-                                             H5StringDecodeMode string_decode_mode) {
+                                             const std::string &attribute_name, H5StringDecodeMode string_decode_mode) {
 	auto child_type = H5StringArrayElementType(string_decode_mode);
 	auto array_size = H5GetAttributeListLength(h5_type_id, h5_space_id, attribute_name);
 	if (array_size == 0) {
@@ -618,7 +616,7 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 		auto &child_type = ListType::GetChildType(resolved_type);
 		if (child_type.id() == LogicalTypeId::VARCHAR) {
 			return H5ReadStringArrayAttributeValue(attr_id, h5_type_id, h5_space_id, attribute_name,
-			                                      string_decode_mode);
+			                                       string_decode_mode);
 		}
 		auto array_size = H5GetAttributeListLength(h5_type_id, h5_space_id, attribute_name);
 		if (array_size == 0) {
