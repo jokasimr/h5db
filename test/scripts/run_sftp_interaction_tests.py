@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import logging
 import os
 import re
@@ -140,6 +141,7 @@ class SFTPInteractionTests(unittest.TestCase):
         cls.multi_key_all_known_hosts = cls.tempdir / "multi_key_all_known_hosts"
         cls.flaky_known_hosts = cls.tempdir / "flaky_known_hosts"
         cls.disconnect_on_stat_known_hosts = cls.tempdir / "disconnect_on_stat_known_hosts"
+        cls.password_host_key_fingerprint = hashlib.sha1(cls.rsa_host_key.asbytes()).hexdigest()
 
         write_known_host(cls.password_known_hosts, "127.0.0.1", cls.password_server.port, cls.rsa_host_key)
         write_known_host(cls.key_known_hosts, "127.0.0.1", cls.key_server.port, cls.rsa_host_key)
@@ -443,6 +445,25 @@ class SFTPInteractionTests(unittest.TestCase):
             f"SSH host key fingerprint mismatch for '127.0.0.1:{self.password_server.port}'",
         )
 
+    def test_host_key_fingerprint_only_success(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET fingerprint_only (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                HOST_KEY_FINGERPRINT '{self.password_host_key_fingerprint}',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("5", result.stdout, msg=result.output)
+
     def test_url_username_mismatch_error(self) -> None:
         sql = textwrap.dedent(
             f"""
@@ -653,6 +674,175 @@ class SFTPInteractionTests(unittest.TestCase):
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
         )
         self.assertGreater(read_calls, 0)
+
+    def test_single_query_reuses_sftp_connection_across_h5_tree_and_h5_ls(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET query_local_reuse_same_file (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('{url}')) AS tree_cnt,
+                (SELECT COUNT(*) FROM h5_ls('{url}', '/')) AS ls_cnt;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("10,5", result.stdout, msg=result.output)
+        connections, read_calls = self.password_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
+        )
+        self.assertGreater(read_calls, 0)
+
+    def test_single_query_reuses_public_key_sftp_connection(self) -> None:
+        url = f"sftp://127.0.0.1:{self.key_server.port}/simple.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET query_local_reuse_public_key (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                USERNAME 'h5db',
+                KEY_PATH '{self.client_key_path}',
+                KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                PORT {self.key_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('{url}')) AS tree_cnt,
+                (SELECT COUNT(*) FROM h5_ls('{url}', '/')) AS ls_cnt;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("10,5", result.stdout, msg=result.output)
+        connections, read_calls = self.key_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
+        )
+        self.assertEqual(connections[0].auth_method, "publickey", msg=str(connections[0]))
+        self.assertGreater(read_calls, 0)
+
+    def test_single_query_reuses_sftp_connection_across_different_files(self) -> None:
+        simple_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        with_attrs_url = f"sftp://127.0.0.1:{self.password_server.port}/with_attrs.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET query_local_reuse_different_files (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('{simple_url}')) AS tree_cnt,
+                (SELECT int32_attr FROM h5_attributes('{with_attrs_url}', '/dataset_with_attrs')) AS attr_value;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("10,123456", result.stdout, msg=result.output)
+        connections, read_calls = self.password_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
+        )
+        self.assertGreater(read_calls, 0)
+
+    def test_single_query_with_different_sftp_configs_opens_two_connections(self) -> None:
+        simple_url = f"sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5"
+        with_attrs_url = f"sftp://127.0.0.1:{self.multi_key_server.port}/with_attrs.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET file_specific_rsa (
+                TYPE sftp,
+                SCOPE '{simple_url}',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
+                PORT {self.multi_key_server.port},
+                HOST_KEY_ALGORITHMS 'ssh-rsa'
+            );
+            CREATE OR REPLACE TEMPORARY SECRET file_specific_ecdsa (
+                TYPE sftp,
+                SCOPE '{with_attrs_url}',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
+                PORT {self.multi_key_server.port},
+                HOST_KEY_ALGORITHMS 'ecdsa-sha2-nistp256'
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('{simple_url}')) AS tree_cnt,
+                (SELECT int32_attr FROM h5_attributes('{with_attrs_url}', '/dataset_with_attrs')) AS attr_value;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("10,123456", result.stdout, msg=result.output)
+        connections, read_calls = self.multi_key_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 2, msg=str([(record.negotiated_host_key, record.read_calls) for record in connections])
+        )
+        negotiated = sorted(record.negotiated_host_key for record in connections if record.negotiated_host_key)
+        self.assertEqual(negotiated, ["ecdsa-sha2-nistp256", "ssh-rsa"], msg=str(negotiated))
+        self.assertGreater(read_calls, 0)
+
+    def test_single_query_with_fifty_h5_calls_reuses_one_sftp_connection(self) -> None:
+        simple_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        with_attrs_url = f"sftp://127.0.0.1:{self.password_server.port}/with_attrs.h5"
+        query_specs = [
+            ("(SELECT COUNT(*) FROM h5_tree('{simple_url}'))", 10),
+            ("(SELECT COUNT(*) FROM h5_ls('{simple_url}', '/'))", 5),
+            ("(SELECT COUNT(*) FROM h5_read('{simple_url}', '/integers'))", 10),
+            ("(SELECT COUNT(*) FROM h5_attributes('{with_attrs_url}', '/dataset_with_attrs'))", 1),
+        ]
+        subqueries: list[str] = []
+        expected_total = 0
+        for idx in range(50):
+            sql_template, expected_value = query_specs[idx % len(query_specs)]
+            subqueries.append(sql_template.format(simple_url=simple_url, with_attrs_url=with_attrs_url))
+            expected_total += expected_value
+
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET query_local_reuse_fifty_calls (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT {' + '.join(subqueries)} AS total_calls_result;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn(str(expected_total), result.stdout, msg=result.output)
+        connections, read_calls = self.password_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
+        )
+        self.assertGreater(read_calls, 0)
+        handle_open_calls, handle_close_calls, current_open_handles, max_open_handles = (
+            self.password_server.telemetry.handle_snapshot()
+        )
+        self.assertGreater(handle_open_calls, 0)
+        self.assertEqual(handle_open_calls, handle_close_calls)
+        self.assertEqual(current_open_handles, 0)
+        self.assertGreater(max_open_handles, 0)
 
     def test_repeated_large_scan_still_reads_uncached_suffix(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/large/large_simple.h5"

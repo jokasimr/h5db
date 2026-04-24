@@ -23,9 +23,11 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/caching_file_system.hpp"
 
@@ -35,7 +37,6 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <tuple>
 #include <vector>
 
@@ -122,6 +123,8 @@ struct H5SftpUrl {
 	std::optional<int> port;
 };
 
+using SecretScopeCacheKey = std::pair<std::string, vector<string>>;
+
 struct H5SftpConfig {
 	std::string host;
 	int port = 22;
@@ -132,12 +135,12 @@ struct H5SftpConfig {
 	std::optional<std::string> known_hosts_path;
 	std::optional<std::string> host_key_fingerprint;
 	std::optional<std::string> host_key_algorithms;
-	std::string secret_scope_cache_key;
+	SecretScopeCacheKey secret_scope_cache_key;
 	std::string remote_path;
 };
 
 struct SftpHostKeyHintCacheKey {
-	std::string scope_key;
+	SecretScopeCacheKey scope_key;
 	std::string host;
 	int port;
 	std::string known_hosts_path;
@@ -151,16 +154,16 @@ struct SftpHostKeyHintCacheKey {
 	}
 };
 
-static std::mutex sftp_host_key_hint_lock;
+using H5SftpConnectionCacheKey = std::tuple<std::string, int, std::string, std::optional<hash_t>, std::string,
+                                            std::optional<hash_t>, std::string, std::string, std::string>;
+
+// Access to this process-global hint cache is currently serialized by hdf5_global_mutex.
+// H5SftpConnection is only constructed from the remote HDF5 VFD open path, and file opens happen while that
+// mutex is held. If the SFTP backend is ever used outside that path, this cache would need explicit synchronization.
 static std::map<SftpHostKeyHintCacheKey, std::string> sftp_host_key_hint_cache;
 
-static std::string BuildSecretScopeCacheKey(const BaseSecret &secret) {
-	std::ostringstream result;
-	result << secret.GetName() << '\n';
-	for (const auto &scope : secret.GetScope()) {
-		result << scope << '\n';
-	}
-	return result.str();
+static SecretScopeCacheKey BuildSecretScopeCacheKey(const BaseSecret &secret) {
+	return {secret.GetName(), secret.GetScope()};
 }
 
 static int HostKeyTypeToKnownHostMask(int hostkey_type) {
@@ -375,6 +378,25 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 	return config;
 }
 
+static std::optional<hash_t> HashOptionalSecret(const std::optional<std::string> &value) {
+	if (!value) {
+		return std::nullopt;
+	}
+	return Hash(value->c_str(), value->size());
+}
+
+static H5SftpConnectionCacheKey BuildSftpConnectionCacheKey(const H5SftpConfig &config) {
+	return {config.host,
+	        config.port,
+	        config.username,
+	        HashOptionalSecret(config.password),
+	        config.key_path.value_or(""),
+	        HashOptionalSecret(config.key_passphrase),
+	        config.known_hosts_path.value_or(""),
+	        config.host_key_fingerprint.value_or(""),
+	        config.host_key_algorithms.value_or("")};
+}
+
 class ScopedSocket {
 public:
 	explicit ScopedSocket(libssh2_socket_t fd_p) : fd(fd_p) {
@@ -392,180 +414,73 @@ private:
 	libssh2_socket_t fd;
 };
 
-class H5SftpFileEngine {
+class H5SftpConnection {
 public:
-	H5SftpFileEngine(ClientContext &context_p, const H5SftpUrl &url_p) : context(&context_p), url(url_p) {
-		config = ResolveSftpConfig(context_p, url);
+	H5SftpConnection(ClientContext &context_p, const H5SftpConfig &config_p) : config(config_p), context(&context_p) {
 		InitializeSocketApi();
 		InitializeLibssh2();
 		OpenVerifiedSession();
 		Authenticate();
-		OpenSftpHandle();
-		StatFile();
+		OpenSftpSession();
 	}
 
-	idx_t GetFileSize() const {
-		return file_size;
-	}
-
-	timestamp_t GetLastModifiedTime() const {
-		return last_modified;
-	}
-
-	void Read(idx_t offset, idx_t size, void *buf) {
-		ReadInternal(offset, size, buf);
-	}
-
-private:
-	void ReadInternal(idx_t offset, idx_t size, void *buf) {
-		auto &handle_slot = SelectReadHandle(offset);
-		if (profiling_enabled) {
-			stats.RecordRead(offset, size, handle_slot.index);
-		}
-		if (!handle_slot.current_offset || *handle_slot.current_offset != offset) {
-			libssh2_sftp_seek64(handle_slot.handle, offset);
-			handle_slot.current_offset = offset;
-		}
-		auto *out = static_cast<char *>(buf);
-		idx_t remaining = size;
-		while (remaining > 0) {
-			ThrowIfInterrupted();
-			auto nread = libssh2_sftp_read(handle_slot.handle, out, remaining);
-			if (nread == LIBSSH2_ERROR_EAGAIN) {
-				WaitForSessionIO();
-				continue;
-			}
-			if (nread < 0) {
-				throw IOException("Failed to read SFTP data: %s", LastSessionError());
-			}
-			if (nread == 0) {
-				throw IOException("Unexpected EOF while reading SFTP file");
-			}
-			if (profiling_enabled) {
-				stats.RecordSftpRead(handle_slot.index, UnsafeNumericCast<idx_t>(nread));
-			}
-			out += nread;
-			auto read_size = UnsafeNumericCast<idx_t>(nread);
-			remaining -= read_size;
-			handle_slot.current_offset = *handle_slot.current_offset + read_size;
-		}
-	}
-
-public:
-	~H5SftpFileEngine() {
-		if (profiling_enabled) {
-			stats.Print(config.remote_path);
-		}
+	~H5SftpConnection() {
 		ResetConnectionState();
 	}
 
+	LIBSSH2_SESSION *GetSession() const {
+		return session;
+	}
+
+	LIBSSH2_SFTP *GetSftpSession() const {
+		return sftp_session;
+	}
+
+	ClientContext *GetContext() const {
+		return context;
+	}
+
+	void ThrowIfDead() const {
+		if (IsDead()) {
+			throw IOException("SFTP connection is no longer usable");
+		}
+	}
+
+	void WaitForSessionIO() {
+		ThrowIfDead();
+		D_ASSERT(session);
+		auto directions = libssh2_session_block_directions(session);
+		auto wait_read = (directions & LIBSSH2_SESSION_BLOCK_INBOUND) != 0;
+		auto wait_write = (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) != 0;
+		if (!wait_read && !wait_write) {
+			wait_read = true;
+			wait_write = true;
+		}
+		WaitForSocketEvents(wait_read, wait_write);
+	}
+
+	std::string LastSessionError() const {
+		if (!session) {
+			return "unknown libssh2 error";
+		}
+		char *message = nullptr;
+		int message_len = 0;
+		libssh2_session_last_error(session, &message, &message_len, 0);
+		if (message && message_len > 0) {
+			return std::string(message, UnsafeNumericCast<size_t>(message_len));
+		}
+		return "unknown libssh2 error";
+	}
+
+	void MarkDead() {
+		dead = true;
+	}
+
+	bool IsDead() const {
+		return dead;
+	}
+
 private:
-	static constexpr idx_t SFTP_HANDLE_POOL_SIZE = 4;
-	static constexpr idx_t SFTP_HANDLE_LOCALITY_THRESHOLD = 2 * 1024 * 1024;
-	static constexpr int IO_WAIT_SLICE_MS = 100;
-
-	struct SftpReadHandle {
-		LIBSSH2_SFTP_HANDLE *handle = nullptr;
-		std::optional<idx_t> current_offset;
-		idx_t index = 0;
-
-		bool IsOpen() const {
-			return handle != nullptr;
-		}
-	};
-
-	struct SftpReadStats {
-		idx_t backend_read_calls = 0;
-		idx_t backend_bytes_requested = 0;
-		idx_t sequential_read_calls = 0;
-		idx_t backward_seek_calls = 0;
-		idx_t forward_seek_calls = 0;
-		idx_t open_handle_count = 0;
-		idx_t sftp_read_calls = 0;
-		idx_t sftp_bytes_read = 0;
-		idx_t largest_forward_gap = 0;
-		idx_t largest_backward_gap = 0;
-		std::optional<idx_t> next_expected_offset;
-		std::array<idx_t, SFTP_HANDLE_POOL_SIZE> handle_use_counts {};
-		std::array<idx_t, SFTP_HANDLE_POOL_SIZE> handle_sftp_read_counts {};
-		std::map<idx_t, idx_t> requested_size_histogram;
-		std::map<idx_t, idx_t> returned_size_histogram;
-
-		void RecordHandleOpened() {
-			open_handle_count++;
-		}
-
-		void RecordRead(idx_t offset, idx_t size, idx_t handle_index) {
-			backend_read_calls++;
-			backend_bytes_requested += size;
-			requested_size_histogram[size]++;
-			handle_use_counts[handle_index]++;
-			if (next_expected_offset) {
-				if (offset == *next_expected_offset) {
-					sequential_read_calls++;
-				} else if (offset > *next_expected_offset) {
-					forward_seek_calls++;
-					largest_forward_gap = MaxValue<idx_t>(largest_forward_gap, offset - *next_expected_offset);
-				} else {
-					backward_seek_calls++;
-					largest_backward_gap = MaxValue<idx_t>(largest_backward_gap, *next_expected_offset - offset);
-				}
-			}
-			next_expected_offset = offset + size;
-		}
-
-		void RecordSftpRead(idx_t handle_index, idx_t size) {
-			sftp_read_calls++;
-			sftp_bytes_read += size;
-			handle_sftp_read_counts[handle_index]++;
-			returned_size_histogram[size]++;
-		}
-
-		static void PrintHistogram(std::ostream &out, const char *label, const std::map<idx_t, idx_t> &histogram) {
-			out << "  " << label << ":";
-			if (histogram.empty()) {
-				out << " <empty>\n";
-				return;
-			}
-			out << '\n';
-			for (const auto &entry : histogram) {
-				out << "    " << entry.first << " bytes -> " << entry.second << " calls\n";
-			}
-		}
-
-		void Print(const std::string &path) const {
-			std::cerr << "H5DB SFTP profile for " << path << '\n';
-			std::cerr << "  backend_read_calls=" << backend_read_calls << '\n';
-			std::cerr << "  backend_bytes_requested=" << backend_bytes_requested << '\n';
-			if (backend_read_calls > 0) {
-				std::cerr << "  average_backend_read_size="
-				          << static_cast<double>(backend_bytes_requested) / static_cast<double>(backend_read_calls)
-				          << '\n';
-			}
-			std::cerr << "  sequential_read_calls=" << sequential_read_calls << '\n';
-			std::cerr << "  forward_seek_calls=" << forward_seek_calls << '\n';
-			std::cerr << "  backward_seek_calls=" << backward_seek_calls << '\n';
-			std::cerr << "  largest_forward_gap=" << largest_forward_gap << '\n';
-			std::cerr << "  largest_backward_gap=" << largest_backward_gap << '\n';
-			std::cerr << "  open_handle_count=" << open_handle_count << '\n';
-			std::cerr << "  sftp_read_calls=" << sftp_read_calls << '\n';
-			std::cerr << "  sftp_bytes_read=" << sftp_bytes_read << '\n';
-			if (sftp_read_calls > 0) {
-				std::cerr << "  average_sftp_read_size="
-				          << static_cast<double>(sftp_bytes_read) / static_cast<double>(sftp_read_calls) << '\n';
-			}
-			for (idx_t i = 0; i < SFTP_HANDLE_POOL_SIZE; i++) {
-				if (handle_use_counts[i] == 0 && handle_sftp_read_counts[i] == 0) {
-					continue;
-				}
-				std::cerr << "  handle[" << i << "] backend_reads=" << handle_use_counts[i]
-				          << " sftp_reads=" << handle_sftp_read_counts[i] << '\n';
-			}
-			PrintHistogram(std::cerr, "backend request sizes", requested_size_histogram);
-			PrintHistogram(std::cerr, "libssh2 read sizes", returned_size_histogram);
-		}
-	};
-
 	struct HostVerificationResult {
 		bool success = false;
 		bool retryable = false;
@@ -606,7 +521,7 @@ private:
 #endif
 	}
 
-	static std::vector<std::string> GetSupportedHostKeyAlgorithms() {
+	static const std::vector<std::string> &GetSupportedHostKeyAlgorithms() {
 		static std::once_flag supported_once;
 		static std::vector<std::string> supported_algorithms;
 
@@ -653,12 +568,9 @@ private:
 			add_attempt(*config.host_key_algorithms);
 		}
 
-		{
-			std::lock_guard<std::mutex> guard(sftp_host_key_hint_lock);
-			auto lookup = sftp_host_key_hint_cache.find(GetHostKeyHintCacheKey());
-			if (lookup != sftp_host_key_hint_cache.end()) {
-				add_attempt(lookup->second);
-			}
+		auto lookup = sftp_host_key_hint_cache.find(GetHostKeyHintCacheKey());
+		if (lookup != sftp_host_key_hint_cache.end()) {
+			add_attempt(lookup->second);
 		}
 
 		add_attempt("");
@@ -675,13 +587,6 @@ private:
 		}
 		if (abortive) {
 			socket_fd.reset();
-		}
-		for (auto &handle_slot : sftp_handles) {
-			if (handle_slot.handle) {
-				libssh2_sftp_close_handle(handle_slot.handle);
-				handle_slot.handle = nullptr;
-			}
-			handle_slot.current_offset.reset();
 		}
 		if (sftp_session) {
 			libssh2_sftp_shutdown(sftp_session);
@@ -812,18 +717,6 @@ private:
 			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(error_code));
 #endif
 		}
-	}
-
-	void WaitForSessionIO() {
-		D_ASSERT(session);
-		auto directions = libssh2_session_block_directions(session);
-		auto wait_read = (directions & LIBSSH2_SESSION_BLOCK_INBOUND) != 0;
-		auto wait_write = (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) != 0;
-		if (!wait_read && !wait_write) {
-			wait_read = true;
-			wait_write = true;
-		}
-		WaitForSocketEvents(wait_read, wait_write);
 	}
 
 	void ConnectSocket() {
@@ -1001,7 +894,6 @@ private:
 
 			auto verification = VerifyHost();
 			if (verification.success) {
-				std::lock_guard<std::mutex> guard(sftp_host_key_hint_lock);
 				sftp_host_key_hint_cache[GetHostKeyHintCacheKey()] = verification.negotiated_algorithm;
 				return;
 			}
@@ -1054,13 +946,295 @@ private:
 		}
 	}
 
+	void OpenSftpSession() {
+		while (true) {
+			sftp_session = libssh2_sftp_init(session);
+			if (sftp_session) {
+				return;
+			}
+			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
+			}
+			WaitForSessionIO();
+		}
+	}
+
+	H5SftpConfig config;
+	ClientContext *context = nullptr;
+	unique_ptr<ScopedSocket> socket_fd;
+	LIBSSH2_SESSION *session = nullptr;
+	LIBSSH2_SFTP *sftp_session = nullptr;
+	// This connection is only touched from the HDF5 VFD path while hdf5_global_mutex is held.
+	bool dead = false;
+	static constexpr int IO_WAIT_SLICE_MS = 100;
+};
+
+class H5SftpConnectionCacheState : public ClientContextState {
+public:
+	shared_ptr<H5SftpConnection> GetOrCreate(ClientContext &context, const H5SftpConfig &config) {
+		auto key = BuildSftpConnectionCacheKey(config);
+		auto lookup = connections.find(key);
+		if (lookup != connections.end()) {
+			if (lookup->second && !lookup->second->IsDead()) {
+				return lookup->second;
+			}
+			connections.erase(lookup);
+		}
+
+		auto created = make_shared_ptr<H5SftpConnection>(context, config);
+		connections[key] = created;
+		return created;
+	}
+
+	void QueryEnd() override {
+		connections.clear();
+	}
+
+private:
+	// Access to this query-local cache happens through the HDF5 VFD path while hdf5_global_mutex is held.
+	// QueryEnd runs after DuckDB has finished the active query, so no extra synchronization is needed here.
+	std::map<H5SftpConnectionCacheKey, shared_ptr<H5SftpConnection>> connections;
+};
+
+static shared_ptr<H5SftpConnection> GetOrCreateCachedSftpConnection(ClientContext &context,
+                                                                    const H5SftpConfig &config) {
+	auto cache_state = context.registered_state->GetOrCreate<H5SftpConnectionCacheState>("h5db_sftp_connection_cache");
+	return cache_state->GetOrCreate(context, config);
+}
+
+class H5SftpFileEngine {
+public:
+	explicit H5SftpFileEngine(shared_ptr<H5SftpConnection> connection_p, const H5SftpConfig &config_p)
+	    : connection(std::move(connection_p)), context(connection->GetContext()), remote_path(config_p.remote_path),
+	      profiling_enabled(std::getenv("H5DB_SFTP_PROFILE") != nullptr) {
+		for (idx_t i = 0; i < sftp_handles.size(); i++) {
+			sftp_handles[i].index = i;
+		}
+		try {
+			OpenReadHandle(0);
+			StatFile();
+		} catch (...) {
+			MarkConnectionDeadAfterFileEngineFailure();
+			throw;
+		}
+	}
+
+	~H5SftpFileEngine() {
+		if (profiling_enabled) {
+			stats.Print(remote_path);
+		}
+		for (auto &handle_slot : sftp_handles) {
+			CloseReadHandle(handle_slot);
+		}
+	}
+
+	idx_t GetFileSize() const {
+		return file_size;
+	}
+
+	timestamp_t GetLastModifiedTime() const {
+		return last_modified;
+	}
+
+	void Read(idx_t offset, idx_t size, void *buf) {
+		try {
+			ReadInternal(offset, size, buf);
+		} catch (const InterruptException &) {
+			throw;
+		} catch (...) {
+			MarkConnectionDeadAfterFileEngineFailure();
+			throw;
+		}
+	}
+
+private:
+	static constexpr idx_t SFTP_HANDLE_POOL_SIZE = 4;
+	static constexpr idx_t SFTP_HANDLE_LOCALITY_THRESHOLD = 2 * 1024 * 1024;
+
+	struct SftpReadHandle {
+		LIBSSH2_SFTP_HANDLE *handle = nullptr;
+		std::optional<idx_t> current_offset;
+		idx_t index = 0;
+
+		bool IsOpen() const {
+			return handle != nullptr;
+		}
+	};
+
+	struct SftpReadStats {
+		idx_t backend_read_calls = 0;
+		idx_t backend_bytes_requested = 0;
+		idx_t sequential_read_calls = 0;
+		idx_t backward_seek_calls = 0;
+		idx_t forward_seek_calls = 0;
+		idx_t open_handle_count = 0;
+		idx_t sftp_read_calls = 0;
+		idx_t sftp_bytes_read = 0;
+		idx_t largest_forward_gap = 0;
+		idx_t largest_backward_gap = 0;
+		std::optional<idx_t> next_expected_offset;
+		std::array<idx_t, SFTP_HANDLE_POOL_SIZE> handle_use_counts {};
+		std::array<idx_t, SFTP_HANDLE_POOL_SIZE> handle_sftp_read_counts {};
+		std::map<idx_t, idx_t> requested_size_histogram;
+		std::map<idx_t, idx_t> returned_size_histogram;
+
+		void RecordHandleOpened() {
+			open_handle_count++;
+		}
+
+		void RecordRead(idx_t offset, idx_t size, idx_t handle_index) {
+			backend_read_calls++;
+			backend_bytes_requested += size;
+			requested_size_histogram[size]++;
+			handle_use_counts[handle_index]++;
+			if (next_expected_offset) {
+				if (offset == *next_expected_offset) {
+					sequential_read_calls++;
+				} else if (offset > *next_expected_offset) {
+					forward_seek_calls++;
+					largest_forward_gap = MaxValue<idx_t>(largest_forward_gap, offset - *next_expected_offset);
+				} else {
+					backward_seek_calls++;
+					largest_backward_gap = MaxValue<idx_t>(largest_backward_gap, *next_expected_offset - offset);
+				}
+			}
+			next_expected_offset = offset + size;
+		}
+
+		void RecordSftpRead(idx_t handle_index, idx_t size) {
+			sftp_read_calls++;
+			sftp_bytes_read += size;
+			handle_sftp_read_counts[handle_index]++;
+			returned_size_histogram[size]++;
+		}
+
+		static void PrintHistogram(std::ostream &out, const char *label, const std::map<idx_t, idx_t> &histogram) {
+			out << "  " << label << ":";
+			if (histogram.empty()) {
+				out << " <empty>\n";
+				return;
+			}
+			out << '\n';
+			for (const auto &entry : histogram) {
+				out << "    " << entry.first << " bytes -> " << entry.second << " calls\n";
+			}
+		}
+
+		void Print(const std::string &path) const {
+			std::cerr << "H5DB SFTP profile for " << path << '\n';
+			std::cerr << "  backend_read_calls=" << backend_read_calls << '\n';
+			std::cerr << "  backend_bytes_requested=" << backend_bytes_requested << '\n';
+			if (backend_read_calls > 0) {
+				std::cerr << "  average_backend_read_size="
+				          << static_cast<double>(backend_bytes_requested) / static_cast<double>(backend_read_calls)
+				          << '\n';
+			}
+			std::cerr << "  sequential_read_calls=" << sequential_read_calls << '\n';
+			std::cerr << "  forward_seek_calls=" << forward_seek_calls << '\n';
+			std::cerr << "  backward_seek_calls=" << backward_seek_calls << '\n';
+			std::cerr << "  largest_forward_gap=" << largest_forward_gap << '\n';
+			std::cerr << "  largest_backward_gap=" << largest_backward_gap << '\n';
+			std::cerr << "  open_handle_count=" << open_handle_count << '\n';
+			std::cerr << "  sftp_read_calls=" << sftp_read_calls << '\n';
+			std::cerr << "  sftp_bytes_read=" << sftp_bytes_read << '\n';
+			if (sftp_read_calls > 0) {
+				std::cerr << "  average_sftp_read_size="
+				          << static_cast<double>(sftp_bytes_read) / static_cast<double>(sftp_read_calls) << '\n';
+			}
+			for (idx_t i = 0; i < SFTP_HANDLE_POOL_SIZE; i++) {
+				if (handle_use_counts[i] == 0 && handle_sftp_read_counts[i] == 0) {
+					continue;
+				}
+				std::cerr << "  handle[" << i << "] backend_reads=" << handle_use_counts[i]
+				          << " sftp_reads=" << handle_sftp_read_counts[i] << '\n';
+			}
+			PrintHistogram(std::cerr, "backend request sizes", requested_size_histogram);
+			PrintHistogram(std::cerr, "libssh2 read sizes", returned_size_histogram);
+		}
+	};
+
+	void ThrowIfInterrupted() const {
+		if (context && context->interrupted.load(std::memory_order_relaxed)) {
+			throw InterruptException();
+		}
+	}
+
+	void MarkConnectionDeadAfterFileEngineFailure() noexcept {
+		// Conservative v1 policy: we invalidate the shared connection on any file-engine failure
+		// instead of trying to distinguish file-local SFTP errors from transport/session failures here.
+		// That boundary could be made more selective later, but with a query-local cache and fail-fast
+		// query behavior the practical impact of over-invalidating is low.
+		connection->MarkDead();
+	}
+
+	void CloseReadHandle(SftpReadHandle &handle_slot) noexcept {
+		auto *handle = handle_slot.handle;
+		handle_slot.handle = nullptr;
+		handle_slot.current_offset.reset();
+		if (!handle) {
+			return;
+		}
+		try {
+			while (true) {
+				auto rc = libssh2_sftp_close_handle(handle);
+				if (rc == 0) {
+					return;
+				}
+				if (rc != LIBSSH2_ERROR_EAGAIN) {
+					connection->MarkDead();
+					return;
+				}
+				connection->WaitForSessionIO();
+			}
+		} catch (...) {
+			connection->MarkDead();
+		}
+	}
+
+	void ReadInternal(idx_t offset, idx_t size, void *buf) {
+		connection->ThrowIfDead();
+		auto &handle_slot = SelectReadHandle(offset);
+		if (profiling_enabled) {
+			stats.RecordRead(offset, size, handle_slot.index);
+		}
+		if (!handle_slot.current_offset || *handle_slot.current_offset != offset) {
+			libssh2_sftp_seek64(handle_slot.handle, offset);
+			handle_slot.current_offset = offset;
+		}
+		auto *out = static_cast<char *>(buf);
+		idx_t remaining = size;
+		while (remaining > 0) {
+			ThrowIfInterrupted();
+			auto nread = libssh2_sftp_read(handle_slot.handle, out, remaining);
+			if (nread == LIBSSH2_ERROR_EAGAIN) {
+				connection->WaitForSessionIO();
+				continue;
+			}
+			if (nread < 0) {
+				throw IOException("Failed to read SFTP data: %s", connection->LastSessionError());
+			}
+			if (nread == 0) {
+				throw IOException("Unexpected EOF while reading SFTP file");
+			}
+			if (profiling_enabled) {
+				stats.RecordSftpRead(handle_slot.index, UnsafeNumericCast<idx_t>(nread));
+			}
+			out += nread;
+			auto read_size = UnsafeNumericCast<idx_t>(nread);
+			remaining -= read_size;
+			handle_slot.current_offset = *handle_slot.current_offset + read_size;
+		}
+	}
+
 	SftpReadHandle &OpenReadHandle(idx_t handle_index) {
+		connection->ThrowIfDead();
 		auto &handle_slot = sftp_handles[handle_index];
 		if (handle_slot.handle) {
 			return handle_slot;
 		}
 		while (true) {
-			handle_slot.handle = libssh2_sftp_open(sftp_session, config.remote_path.c_str(), LIBSSH2_FXF_READ, 0);
+			handle_slot.handle =
+			    libssh2_sftp_open(connection->GetSftpSession(), remote_path.c_str(), LIBSSH2_FXF_READ, 0);
 			if (handle_slot.handle) {
 				handle_slot.current_offset.reset();
 				if (profiling_enabled) {
@@ -1068,31 +1242,15 @@ private:
 				}
 				return handle_slot;
 			}
-			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to open SFTP file '%s': %s", config.remote_path, LastSessionError());
+			if (libssh2_session_last_errno(connection->GetSession()) != LIBSSH2_ERROR_EAGAIN) {
+				throw IOException("Failed to open SFTP file '%s': %s", remote_path, connection->LastSessionError());
 			}
-			WaitForSessionIO();
+			connection->WaitForSessionIO();
 		}
-	}
-
-	void OpenSftpHandle() {
-		while (true) {
-			sftp_session = libssh2_sftp_init(session);
-			if (sftp_session) {
-				break;
-			}
-			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
-			}
-			WaitForSessionIO();
-		}
-		for (idx_t i = 0; i < sftp_handles.size(); i++) {
-			sftp_handles[i].index = i;
-		}
-		OpenReadHandle(0);
 	}
 
 	void StatFile() {
+		connection->ThrowIfDead();
 		LIBSSH2_SFTP_ATTRIBUTES attrs;
 		while (true) {
 			auto rc = libssh2_sftp_fstat_ex(sftp_handles[0].handle, &attrs, 0);
@@ -1100,12 +1258,12 @@ private:
 				break;
 			}
 			if (rc != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to stat SFTP file '%s': %s", config.remote_path, LastSessionError());
+				throw IOException("Failed to stat SFTP file '%s': %s", remote_path, connection->LastSessionError());
 			}
-			WaitForSessionIO();
+			connection->WaitForSessionIO();
 		}
 		if (!(attrs.flags & LIBSSH2_SFTP_ATTR_SIZE)) {
-			throw IOException("SFTP file '%s' did not report a file size", config.remote_path);
+			throw IOException("SFTP file '%s' did not report a file size", remote_path);
 		}
 		file_size = UnsafeNumericCast<idx_t>(attrs.filesize);
 		last_modified = (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME)
@@ -1160,24 +1318,11 @@ private:
 		return *nearest_any;
 	}
 
-	std::string LastSessionError() const {
-		char *message = nullptr;
-		int message_len = 0;
-		libssh2_session_last_error(session, &message, &message_len, 0);
-		if (message && message_len > 0) {
-			return std::string(message, UnsafeNumericCast<size_t>(message_len));
-		}
-		return "unknown libssh2 error";
-	}
-
-	H5SftpUrl url;
-	H5SftpConfig config;
+	shared_ptr<H5SftpConnection> connection;
 	ClientContext *context = nullptr;
-	const bool profiling_enabled = std::getenv("H5DB_SFTP_PROFILE") != nullptr;
+	std::string remote_path;
+	const bool profiling_enabled;
 	SftpReadStats stats;
-	unique_ptr<ScopedSocket> socket_fd;
-	LIBSSH2_SESSION *session = nullptr;
-	LIBSSH2_SFTP *sftp_session = nullptr;
 	std::array<SftpReadHandle, SFTP_HANDLE_POOL_SIZE> sftp_handles;
 	idx_t file_size = 0;
 	timestamp_t last_modified;
@@ -1197,7 +1342,7 @@ public:
 class H5SftpFileSystem : public FileSystem {
 public:
 	H5SftpFileSystem(ClientContext &context_p, const H5SftpUrl &url_p)
-	    : context(context_p), url(url_p), path(url_p.original_url) {
+	    : context(context_p), config(ResolveSftpConfig(context_p, url_p)), path(url_p.original_url) {
 	}
 
 protected:
@@ -1274,15 +1419,16 @@ public:
 private:
 	H5SftpFileEngine &GetOrCreateEngine() {
 		if (!engine) {
-			engine = make_shared_ptr<H5SftpFileEngine>(context, url);
+			auto connection = GetOrCreateCachedSftpConnection(context, config);
+			engine = make_uniq<H5SftpFileEngine>(std::move(connection), config);
 		}
 		return *engine;
 	}
 
 	ClientContext &context;
-	H5SftpUrl url;
+	H5SftpConfig config;
 	std::string path;
-	shared_ptr<H5SftpFileEngine> engine;
+	unique_ptr<H5SftpFileEngine> engine;
 };
 
 class H5SftpRemoteBackend : public H5RemoteBackend {

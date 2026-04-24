@@ -68,6 +68,10 @@ class ServerTelemetry:
         self.lock = threading.Lock()
         self.connections: list[ConnectionRecord] = []
         self.total_read_calls = 0
+        self.total_handle_open_calls = 0
+        self.total_handle_close_calls = 0
+        self.current_open_handles = 0
+        self.max_open_handles = 0
 
     def add_connection(self) -> ConnectionRecord:
         with self.lock:
@@ -81,15 +85,39 @@ class ServerTelemetry:
             record.read_calls += 1
             return self.total_read_calls
 
+    def record_handle_open(self) -> None:
+        with self.lock:
+            self.total_handle_open_calls += 1
+            self.current_open_handles += 1
+            self.max_open_handles = max(self.max_open_handles, self.current_open_handles)
+
+    def record_handle_close(self) -> None:
+        with self.lock:
+            self.total_handle_close_calls += 1
+            self.current_open_handles = max(0, self.current_open_handles - 1)
+
     def snapshot(self) -> tuple[list[ConnectionRecord], int]:
         with self.lock:
             copied = [ConnectionRecord(r.auth_method, r.negotiated_host_key, r.read_calls) for r in self.connections]
             return copied, self.total_read_calls
 
+    def handle_snapshot(self) -> tuple[int, int, int, int]:
+        with self.lock:
+            return (
+                self.total_handle_open_calls,
+                self.total_handle_close_calls,
+                self.current_open_handles,
+                self.max_open_handles,
+            )
+
     def reset(self) -> None:
         with self.lock:
             self.connections.clear()
             self.total_read_calls = 0
+            self.total_handle_open_calls = 0
+            self.total_handle_close_calls = 0
+            self.current_open_handles = 0
+            self.max_open_handles = 0
 
 
 class AuthServer(paramiko.ServerInterface):
@@ -138,6 +166,7 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
         self.telemetry = telemetry
         self.transport = transport
         self.record = record
+        self._close_recorded = False
 
     def stat(self):
         if self.config.stat_delay_ms > 0:
@@ -158,6 +187,12 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
             self.transport.close()
             return paramiko.SFTP_FAILURE
         return super().read(offset, length)
+
+    def close(self):
+        if not self._close_recorded:
+            self.telemetry.record_handle_close()
+            self._close_recorded = True
+        return super().close()
 
 
 class RootedSFTPServer(paramiko.SFTPServerInterface):
@@ -239,6 +274,7 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             local_path = self._resolve(path)
             handle = RootedSFTPHandle(flags, self.config, self.telemetry, self.transport, self.record)
             handle.readfile = open(local_path, "rb")
+            self.telemetry.record_handle_open()
             return handle
         except OSError as ex:
             return self._convert_error(ex)
