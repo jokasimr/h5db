@@ -24,6 +24,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/root_attrs.h5"
   "$PROJECT_ROOT/test/data/empty_scalar.h5"
   "$PROJECT_ROOT/test/data/h5_read_string_edge_cases.h5"
+  "$PROJECT_ROOT/test/data/h5_read_refresh_order.h5"
   "$PROJECT_ROOT/test/data/names_edge_cases.h5"
   "$PROJECT_ROOT/test/data/multidim_mismatch.h5"
   "$PROJECT_ROOT/test/data/nd_cache_test.h5"

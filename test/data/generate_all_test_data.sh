@@ -122,6 +122,10 @@ echo -e "${GREEN}[12b/28] Generating h5_read_string_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_h5_read_string_edge_cases.py)
 
 echo ""
+echo -e "${GREEN}[12c/28] Generating h5_read_refresh_order.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_h5_read_refresh_order_test.py)
+
+echo ""
 echo -e "${GREEN}[13/28] Generating names_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_names_edge_cases.py)
 

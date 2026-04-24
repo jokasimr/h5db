@@ -1,0 +1,33 @@
+# name: test/sql/h5_read_refresh_order.test
+# description: Correctness coverage for h5_read cache refresh order
+# group: [sql]
+
+require h5db
+
+query II
+SELECT first, second
+FROM h5_read('test/data/h5_read_refresh_order.h5', '/second', '/first')
+ORDER BY first
+LIMIT 3;
+----
+0	10000
+1	10001
+2	10002
+
+query II
+SELECT SUM(first), SUM(second)
+FROM h5_read('test/data/h5_read_refresh_order.h5', '/second', '/first');
+----
+130816	5250816
+
+query I
+SELECT SUM(first)
+FROM h5_read('test/data/h5_read_refresh_order.h5', '/second', '/first');
+----
+130816
+
+query I
+SELECT SUM(second)
+FROM h5_read('test/data/h5_read_refresh_order.h5', '/second', '/first');
+----
+5250816

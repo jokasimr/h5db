@@ -227,6 +227,7 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	// Projection pushdown support
 	vector<column_t> columns_to_scan;            // Global column indices (into bind_data.columns)
 	unordered_map<idx_t, idx_t> global_to_local; // Maps global column idx -> local column_states idx
+	vector<LocalColumnIdx> cache_refresh_order;  // Refreshable regular columns in file-friendly order
 
 	// Position tracking
 	// position is the next globally unclaimed logical partition start.
@@ -297,6 +298,12 @@ static GlobalColumnIdx GetGlobalIdx(const H5ReadGlobalState &gstate, LocalColumn
 static idx_t GetNumScannedColumns(const H5ReadGlobalState &gstate) {
 	return gstate.columns_to_scan.size();
 }
+
+struct CacheRefreshOrderEntry {
+	LocalColumnIdx local_idx;
+	std::optional<haddr_t> address;
+	idx_t original_order = 0;
+};
 
 // Helper: get base (non-array) type from a possibly nested array type
 static LogicalType GetBaseType(LogicalType type) {
@@ -422,6 +429,38 @@ static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, i
 		return 0;
 	}
 	return MinValue<idx_t>(chunk_size, total_rows);
+}
+
+static std::optional<haddr_t> TryGetDatasetReadOrderAddress(const RegularColumnSpec &spec, hid_t dataset_id) {
+	hid_t dcpl = H5Dget_create_plist(dataset_id);
+	if (dcpl < 0) {
+		return std::nullopt;
+	}
+
+	std::optional<haddr_t> result;
+	auto layout = H5Pget_layout(dcpl);
+	if (layout == H5D_CONTIGUOUS) {
+		auto address = H5Dget_offset(dataset_id);
+		if (address != HADDR_UNDEF) {
+			result = address;
+		}
+	} else if (layout == H5D_CHUNKED) {
+		// Use the first logical chunk as a cheap proxy for physical dataset order.
+		// This is only a heuristic, but it is enough to avoid obvious "wrong way around"
+		// refresh order for interleaved multi-dataset scans.
+		std::vector<hsize_t> chunk_origin(spec.ndims, 0);
+		unsigned filter_mask = 0;
+		haddr_t chunk_address = HADDR_UNDEF;
+		hsize_t chunk_size = 0;
+		if (H5Dget_chunk_info_by_coord(dataset_id, chunk_origin.data(), &filter_mask, &chunk_address, &chunk_size) >=
+		        0 &&
+		    chunk_address != HADDR_UNDEF && chunk_size > 0) {
+			result = chunk_address;
+		}
+	}
+
+	H5Pclose(dcpl);
+	return result;
 }
 
 // Helper function to open a dataset and get its type in one operation
@@ -1086,6 +1125,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	// Allocate DENSE column_states array - only for scanned columns
 	// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
 	result->column_states.reserve(GetNumScannedColumns(*result));
+	std::vector<CacheRefreshOrderEntry> cache_refresh_entries;
 	idx_t projected_numeric_row_bytes = 0;
 
 	// Process columns in scan order (builds dense array)
@@ -1142,6 +1182,10 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 								    chunk.chunk_size = chunk_size;
 							    }
 						    });
+
+						    cache_refresh_entries.push_back({local_idx,
+						                                     TryGetDatasetReadOrderAddress(spec, state.dataset.get()),
+						                                     cache_refresh_entries.size()});
 					    }
 				    }
 
@@ -1258,6 +1302,21 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 			    }
 		    },
 		    col);
+	}
+
+	std::stable_sort(cache_refresh_entries.begin(), cache_refresh_entries.end(),
+	                 [](const CacheRefreshOrderEntry &lhs, const CacheRefreshOrderEntry &rhs) {
+		                 if (lhs.address.has_value() != rhs.address.has_value()) {
+			                 return lhs.address.has_value();
+		                 }
+		                 if (lhs.address.has_value() && rhs.address.has_value() && *lhs.address != *rhs.address) {
+			                 return *lhs.address < *rhs.address;
+		                 }
+		                 return lhs.original_order < rhs.original_order;
+	                 });
+	result->cache_refresh_order.reserve(cache_refresh_entries.size());
+	for (const auto &entry : cache_refresh_entries) {
+		result->cache_refresh_order.push_back(entry.local_idx);
 	}
 
 	if (projected_numeric_row_bytes > 0) {
@@ -1793,23 +1852,11 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
 		try {
-			// Only refresh cache for columns being scanned (projection pushdown)
-			// Uses LOCAL indexing (dense array)
-			for (idx_t i = 0; i < GetNumScannedColumns(gstate); i++) {
-				LocalColumnIdx local_idx(i);
+			for (auto local_idx : gstate.cache_refresh_order) {
 				GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
-				const auto &col_spec = bind_data.columns[global_idx];
-				auto &col_state = gstate.column_states[local_idx];
-				if (!std::holds_alternative<RegularColumnSpec>(col_spec) ||
-				    !std::holds_alternative<RegularColumnState>(col_state)) {
-					continue;
-				}
-
-				const auto &spec = std::get<RegularColumnSpec>(col_spec);
-				auto &state = std::get<RegularColumnState>(col_state);
-				if (!state.chunk_cache) {
-					continue;
-				}
+				const auto &spec = std::get<RegularColumnSpec>(bind_data.columns[global_idx]);
+				auto &state = std::get<RegularColumnState>(gstate.column_states[local_idx]);
+				D_ASSERT(state.chunk_cache);
 
 				TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(), gstate.valid_row_ranges,
 				              gstate.position_done, bind_data.num_rows, spec, bind_data.filename);
