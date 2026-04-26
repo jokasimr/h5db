@@ -44,17 +44,19 @@ FROM h5_tree('test/data/glob_order/order_1.h5') LIMIT 1;
 /	group	NULL	NULL
 
 query IIIII
+SELECT path, type, dtype, shape, replace(filename, '\', '/')
 FROM h5_tree('test/data/glob_order/order_1.h5', filename=true) LIMIT 1;
 ----
 /	group	NULL	NULL	test/data/glob_order/order_1.h5
 
 query IIIII
+SELECT path, type, dtype, shape, replace(source, '\', '/')
 FROM h5_tree('test/data/glob_order/order_1.h5', filename='source') LIMIT 1;
 ----
 /	group	NULL	NULL	test/data/glob_order/order_1.h5
 
 query II
-SELECT filename, path
+SELECT replace(filename, '\', '/') AS filename, path
 FROM h5_tree('test/data/glob_order/order_*.h5')
 WHERE path LIKE '/marker_%'
 ORDER BY filename, path;
@@ -64,7 +66,7 @@ test/data/glob_order/order_10.h5	/marker_10
 test/data/glob_order/order_2.h5	/marker_2
 
 query II
-SELECT source, path
+SELECT replace(source, '\', '/') AS source, path
 FROM h5_tree('test/data/glob_order/order_*.h5', filename='source')
 WHERE path LIKE '/marker_%'
 ORDER BY source, path;
@@ -80,7 +82,7 @@ FROM h5_tree('test/data/glob_order/order_1.h5', filename='source');
 <REGEX>:.*filename.*not found.*
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_tree('test/data/glob_order/order_1.h5', filename=false)
 WHERE path = '/marker_1';
 ----
@@ -92,7 +94,7 @@ FROM h5_tree('test/data/glob_order/order_1.h5', filename=NULL);
 Invalid Input Error: Cannot use NULL as argument for "filename"
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_tree([
     'test/data/glob_order/order_1.h5',
     'test/data/glob_order/order_1.h5'
@@ -189,17 +191,19 @@ FROM h5_ls('test/data/glob_order/order_1.h5', '/') LIMIT 1;
 /marker_1	dataset	int32	[1]
 
 query IIIII
+SELECT path, type, dtype, shape, replace(filename, '\', '/')
 FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=true) LIMIT 1;
 ----
 /marker_1	dataset	int32	[1]	test/data/glob_order/order_1.h5
 
 query IIIII
+SELECT path, type, dtype, shape, replace(source, '\', '/')
 FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source') LIMIT 1;
 ----
 /marker_1	dataset	int32	[1]	test/data/glob_order/order_1.h5
 
 query II
-SELECT filename, path
+SELECT replace(filename, '\', '/') AS filename, path
 FROM h5_ls('test/data/glob_order/order_*.h5', '/')
 WHERE path LIKE '/marker_%'
 ORDER BY filename, path;
@@ -209,7 +213,7 @@ test/data/glob_order/order_10.h5	/marker_10
 test/data/glob_order/order_2.h5	/marker_2
 
 query II
-SELECT source, path
+SELECT replace(source, '\', '/') AS source, path
 FROM h5_ls('test/data/glob_order/order_*.h5', '/', filename='source')
 WHERE path LIKE '/marker_%'
 ORDER BY source, path;
@@ -225,7 +229,7 @@ FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source');
 <REGEX>:.*filename.*not found.*
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=false)
 WHERE path = '/marker_1';
 ----
@@ -237,7 +241,7 @@ FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=NULL);
 Invalid Input Error: Cannot use NULL as argument for "filename"
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_ls([
     'test/data/glob_order/order_1.h5',
     'test/data/glob_order/order_1.h5'
@@ -327,23 +331,25 @@ FROM h5_read('test/data/glob_order/order_1.h5', '/values');
 1
 
 query II
+SELECT values, replace(filename, '\', '/')
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=true);
 ----
 1	test/data/glob_order/order_1.h5
 
 query II
+SELECT values, replace(source, '\', '/')
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
 ----
 1	test/data/glob_order/order_1.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_order/order_1.h5', '/values');
 ----
 test/data/glob_order/order_1.h5
 
 query I
-SELECT source
+SELECT replace(source, '\', '/') AS source
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
 ----
 test/data/glob_order/order_1.h5
@@ -355,7 +361,7 @@ FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
 <REGEX>:.*filename.*not found.*
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=false);
 ----
 test/data/glob_order/order_1.h5
@@ -366,7 +372,7 @@ FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=NULL);
 Invalid Input Error: Cannot use NULL as argument for "filename"
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read([
     'test/data/glob_order/order_1.h5',
     'test/data/glob_order/order_1.h5'
@@ -377,7 +383,7 @@ test/data/glob_order/order_1.h5
 test/data/glob_order/order_1.h5
 
 query III
-SELECT filename, idx, values
+SELECT replace(filename, '\', '/') AS filename, idx, values
 FROM h5_read(
     'test/data/glob_order/order_*.h5',
     h5_alias('idx', h5_index()),
@@ -390,7 +396,7 @@ test/data/glob_order/order_10.h5	0	10
 test/data/glob_order/order_2.h5	0	2
 
 query III
-SELECT values, filename, idx
+SELECT values, replace(filename, '\', '/') AS filename, idx
 FROM h5_read(
     'test/data/glob_order/order_*.h5',
     '/values',
@@ -404,7 +410,7 @@ ORDER BY filename;
 2	test/data/glob_order/order_2.h5	0
 
 query III
-SELECT source, idx, values
+SELECT replace(source, '\', '/') AS source, idx, values
 FROM h5_read(
     'test/data/glob_order/order_*.h5',
     h5_alias('idx', h5_index()),

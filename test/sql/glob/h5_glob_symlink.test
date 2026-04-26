@@ -89,29 +89,29 @@ SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/broken*.h5', '/values');
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/]link_dir[\\\\/].*
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/**/');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/].*
 
 statement error
 SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/*/', '/');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/]link_dir[\\\\/].*
 
 statement error
 SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/**/', '/');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/].*
 
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/*/', '/values');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/]link_dir[\\\\/].*
 
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/**/', '/values');
 ----
-<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink[\\\\/].*

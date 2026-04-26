@@ -153,7 +153,7 @@ SELECT
 4	4	6
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_deep/**/deep_*.h5', '/values')
 ORDER BY filename;
 ----
@@ -163,7 +163,7 @@ test/data/glob_deep/alpha/deep_1.h5
 test/data/glob_deep/deep_0.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_tree('test/data/glob_hidden/*')
 WHERE path LIKE '/marker_%'
 ORDER BY filename;
@@ -172,7 +172,7 @@ test/data/glob_hidden/.hidden_root.h5
 test/data/glob_hidden/visible.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_ls('test/data/glob_hidden/*', '/')
 WHERE path LIKE '/marker_%'
 ORDER BY filename;
@@ -181,7 +181,7 @@ test/data/glob_hidden/.hidden_root.h5
 test/data/glob_hidden/visible.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_hidden/*', '/values')
 ORDER BY filename;
 ----
@@ -189,7 +189,7 @@ test/data/glob_hidden/.hidden_root.h5
 test/data/glob_hidden/visible.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_hidden/*/*.h5', '/values')
 ORDER BY filename;
 ----
@@ -197,7 +197,7 @@ test/data/glob_hidden/.hidden_dir/in_hidden_dir.h5
 test/data/glob_hidden/visible_dir/inside_visible.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_hidden/**/*.h5', '/values')
 ORDER BY filename;
 ----
@@ -209,7 +209,7 @@ test/data/glob_hidden/visible_dir/.nested_hidden/in_nested_hidden.h5
 test/data/glob_hidden/visible_dir/inside_visible.h5
 
 query I
-SELECT filename
+SELECT replace(filename, '\', '/') AS filename
 FROM h5_read('test/data/glob_hidden/.*', '/values')
 ORDER BY filename;
 ----

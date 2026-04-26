@@ -205,7 +205,9 @@ def main() -> None:
     link_or_copy_file(GLOB_DIR / "glob_same_1.h5", GLOB_SYMLINK_DIR / "real" / "nested.h5")
     link_or_copy_file(GLOB_DIR / "glob_same_2.h5", GLOB_SYMLINK_DIR / "root_file.h5")
     create_symlink("real/nested.h5", GLOB_SYMLINK_DIR / "link_file.h5")
-    create_symlink("missing.h5", GLOB_SYMLINK_DIR / "broken_link.h5")
+    remove_existing_path(GLOB_SYMLINK_DIR / "broken_link.h5")
+    if os.name != "nt":
+        create_symlink("missing.h5", GLOB_SYMLINK_DIR / "broken_link.h5")
     create_symlink("real", GLOB_SYMLINK_DIR / "link_dir", target_is_directory=True)
 
     write_order_file(GLOB_ORDER_DIR / "order_2.h5", 2, "marker_2")
