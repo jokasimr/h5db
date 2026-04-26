@@ -10,6 +10,7 @@ static unique_ptr<BaseSecret> CreateH5SftpSecretFromConfig(ClientContext &, Crea
 	secret->TrySetValue("username", input);
 	secret->TrySetValue("password", input);
 	secret->TrySetValue("key_path", input);
+	secret->TrySetValue("use_agent", input);
 	secret->TrySetValue("key_passphrase", input);
 	secret->TrySetValue("port", input);
 	secret->TrySetValue("known_hosts_path", input);
@@ -23,11 +24,16 @@ static unique_ptr<BaseSecret> CreateH5SftpSecretFromConfig(ClientContext &, Crea
 
 	auto has_password = secret->TryGetValue("password", value);
 	auto has_key_path = secret->TryGetValue("key_path", value);
-	if (!has_password && !has_key_path) {
-		throw InvalidInputException("sftp secret requires either PASSWORD or KEY_PATH");
+	auto use_agent = secret->TryGetValue("use_agent", value) && value.GetValue<bool>();
+	auto auth_mode_count = UnsafeNumericCast<idx_t>(has_password) + UnsafeNumericCast<idx_t>(has_key_path) +
+	                       UnsafeNumericCast<idx_t>(use_agent);
+	if (auth_mode_count != 1) {
+		throw InvalidInputException("sftp secret requires exactly one of PASSWORD, KEY_PATH or USE_AGENT");
 	}
-	if (has_password && has_key_path) {
-		throw InvalidInputException("sftp secret requires exactly one of PASSWORD or KEY_PATH");
+
+	auto has_key_passphrase = secret->TryGetValue("key_passphrase", value);
+	if (has_key_passphrase && !has_key_path) {
+		throw InvalidInputException("sftp secret KEY_PASSPHRASE requires KEY_PATH");
 	}
 
 	auto has_known_hosts = secret->TryGetValue("known_hosts_path", value);
@@ -61,6 +67,7 @@ void RegisterH5SftpSecrets(ExtensionLoader &loader) {
 	config_fun.named_parameters["username"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["password"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["key_path"] = LogicalType::VARCHAR;
+	config_fun.named_parameters["use_agent"] = LogicalType::BOOLEAN;
 	config_fun.named_parameters["key_passphrase"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["port"] = LogicalType::INTEGER;
 	config_fun.named_parameters["known_hosts_path"] = LogicalType::VARCHAR;

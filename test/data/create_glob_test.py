@@ -17,6 +17,9 @@ PUSHDOWN_DIR = SCRIPT_DIR / "glob_pushdown"
 PUSHDOWN_NESTED_DIR = PUSHDOWN_DIR / "nested"
 GLOB_SYMLINK_DIR = SCRIPT_DIR / "glob_symlink"
 GLOB_ORDER_DIR = SCRIPT_DIR / "glob_order"
+GLOB_DEEP_DIR = SCRIPT_DIR / "glob_deep"
+GLOB_HIDDEN_DIR = SCRIPT_DIR / "glob_hidden"
+GLOB_LITERAL_META_DIR = SCRIPT_DIR / "glob_literal_meta"
 LARGE_GLOB_DIR = SCRIPT_DIR / "glob_large"
 MANY_SMALL_DIR = SCRIPT_DIR / "glob_many_small"
 SOURCE_RSE_FILE = SCRIPT_DIR / "multithreading_test.h5"
@@ -150,6 +153,9 @@ def main() -> None:
     PUSHDOWN_NESTED_DIR.mkdir(parents=True, exist_ok=True)
     GLOB_SYMLINK_DIR.mkdir(parents=True, exist_ok=True)
     GLOB_ORDER_DIR.mkdir(parents=True, exist_ok=True)
+    GLOB_DEEP_DIR.mkdir(parents=True, exist_ok=True)
+    GLOB_HIDDEN_DIR.mkdir(parents=True, exist_ok=True)
+    GLOB_LITERAL_META_DIR.mkdir(parents=True, exist_ok=True)
     LARGE_GLOB_DIR.mkdir(parents=True, exist_ok=True)
     MANY_SMALL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -207,6 +213,24 @@ def main() -> None:
     write_order_file(GLOB_ORDER_DIR / "order_1.h5", 1, "marker_1")
     write_order_file(GLOB_ORDER_DIR / "nested" / "order_0.h5", 0, "marker_0")
     write_order_file(GLOB_ORDER_DIR / "z" / "order_99.h5", 99, "marker_99")
+
+    write_order_file(GLOB_DEEP_DIR / "deep_0.h5", 0, "marker_0")
+    write_order_file(GLOB_DEEP_DIR / "alpha" / "deep_1.h5", 1, "marker_1")
+    write_order_file(GLOB_DEEP_DIR / "alpha" / "beta" / "gamma" / "deep_2.h5", 2, "marker_2")
+    write_order_file(
+        GLOB_DEEP_DIR / "alpha" / "beta" / "gamma" / "delta" / "epsilon" / "deep_3.h5",
+        3,
+        "marker_3",
+    )
+
+    write_order_file(GLOB_HIDDEN_DIR / "visible.h5", 1, "marker_1")
+    write_order_file(GLOB_HIDDEN_DIR / ".hidden_root.h5", 2, "marker_2")
+    write_order_file(GLOB_HIDDEN_DIR / ".hidden_dir" / "in_hidden_dir.h5", 10, "marker_10")
+    write_order_file(GLOB_HIDDEN_DIR / "visible_dir" / "inside_visible.h5", 20, "marker_20")
+    write_order_file(GLOB_HIDDEN_DIR / "visible_dir" / ".nested_hidden" / "in_nested_hidden.h5", 30, "marker_30")
+    write_order_file(GLOB_HIDDEN_DIR / ".hidden_parent" / "visible_child" / "in_hidden_parent.h5", 40, "marker_40")
+    write_order_file(GLOB_LITERAL_META_DIR / "literal[1].h5", 1, "marker_1")
+    write_order_file(GLOB_LITERAL_META_DIR / "dir[1]" / "nested.h5", 2, "marker_2")
 
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_1.h5")
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_2.h5")

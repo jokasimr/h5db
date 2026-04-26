@@ -63,6 +63,7 @@ class ConnectionRecord:
     auth_method: Optional[str] = None
     negotiated_host_key: Optional[str] = None
     read_calls: int = 0
+    publickey_attempts: int = 0
 
 
 class ServerTelemetry:
@@ -100,7 +101,10 @@ class ServerTelemetry:
 
     def snapshot(self) -> tuple[list[ConnectionRecord], int]:
         with self.lock:
-            copied = [ConnectionRecord(r.auth_method, r.negotiated_host_key, r.read_calls) for r in self.connections]
+            copied = [
+                ConnectionRecord(r.auth_method, r.negotiated_host_key, r.read_calls, r.publickey_attempts)
+                for r in self.connections
+            ]
             return copied, self.total_read_calls
 
     def handle_snapshot(self) -> tuple[int, int, int, int]:
@@ -135,6 +139,7 @@ class AuthServer(paramiko.ServerInterface):
         return paramiko.AUTH_FAILED
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey):
+        self.record.publickey_attempts += 1
         if username == self.config.username and key.asbytes() in self.config.allowed_public_key_blobs:
             self.record.auth_method = "publickey"
             return paramiko.AUTH_SUCCESSFUL

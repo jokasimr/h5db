@@ -274,11 +274,12 @@ class SFTPInteractionTests(unittest.TestCase):
                 continue
             server.telemetry.reset()
 
-    def run_sql(self, sql: str) -> DuckDBResult:
+    def run_sql(self, sql: str, env: dict[str, str] | None = None) -> DuckDBResult:
         try:
             completed = subprocess.run(
                 [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-c", sql],
                 cwd=self.project_root,
+                env=env,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -296,6 +297,79 @@ class SFTPInteractionTests(unittest.TestCase):
 
     def assertOutputContains(self, result: DuckDBResult, needle: str) -> None:
         self.assertIn(needle, result.output, msg=result.output)
+
+    def start_ssh_agent(self) -> dict[str, str]:
+        if os.name == "nt":
+            self.skipTest("ssh-agent interaction test is currently Unix-only")
+        if shutil.which("ssh-agent") is None or shutil.which("ssh-add") is None:
+            self.skipTest("ssh-agent and ssh-add are required for SSH agent interaction tests")
+
+        completed = subprocess.run(
+            ["ssh-agent", "-s"],
+            cwd=self.project_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"ssh-agent failed:\n{completed.stdout}{completed.stderr}")
+
+        output = completed.stdout + completed.stderr
+        sock_match = re.search(r"SSH_AUTH_SOCK=([^;]+);", output)
+        pid_match = re.search(r"SSH_AGENT_PID=([0-9]+);", output)
+        if not sock_match or not pid_match:
+            raise AssertionError(f"Unable to parse ssh-agent environment:\n{output}")
+
+        agent_env = os.environ.copy()
+        agent_env["SSH_AUTH_SOCK"] = sock_match.group(1)
+        agent_env["SSH_AGENT_PID"] = pid_match.group(1)
+        return agent_env
+
+    def stop_ssh_agent(self, agent_env: dict[str, str]) -> None:
+        subprocess.run(
+            ["ssh-agent", "-k"],
+            cwd=self.project_root,
+            env=agent_env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+    def add_ssh_agent_identity(self, agent_env: dict[str, str], key_path: Path) -> None:
+        completed = subprocess.run(
+            ["ssh-add", str(key_path)],
+            cwd=self.project_root,
+            env=agent_env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"ssh-add failed:\n{completed.stdout}{completed.stderr}")
+
+    def clear_ssh_agent_identities(self, agent_env: dict[str, str]) -> None:
+        completed = subprocess.run(
+            ["ssh-add", "-D"],
+            cwd=self.project_root,
+            env=agent_env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"ssh-add -D failed:\n{completed.stdout}{completed.stderr}")
 
     def replace_mutable_fixture(self, fixture_name: str, mtime_seconds: int) -> None:
         temp_path = self.mutable_root / "mutable.tmp"
@@ -383,6 +457,133 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertIn("5", result.stdout)
         connections, _ = self.key_server.telemetry.snapshot()
         self.assertTrue(any(record.auth_method == "publickey" for record in connections))
+
+    def test_ssh_agent_auth_success(self) -> None:
+        agent_env = self.start_ssh_agent()
+        try:
+            self.add_ssh_agent_identity(agent_env, self.client_key_path)
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET agent_auth (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                    USERNAME 'h5db',
+                    USE_AGENT true,
+                    KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                    PORT {self.key_server.port}
+                );
+                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
+                """
+            ).strip()
+            result = self.run_sql(sql, env=agent_env)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertIn("5", result.stdout)
+            connections, _ = self.key_server.telemetry.snapshot()
+            self.assertTrue(any(record.auth_method == "publickey" for record in connections))
+        finally:
+            self.stop_ssh_agent(agent_env)
+
+    def test_missing_ssh_agent_error(self) -> None:
+        if os.name == "nt":
+            self.skipTest("SSH_AUTH_SOCK-specific agent error test is currently Unix-only")
+        env = os.environ.copy()
+        env.pop("SSH_AUTH_SOCK", None)
+        env.pop("SSH_AGENT_PID", None)
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET missing_agent_auth (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                USERNAME 'h5db',
+                USE_AGENT true,
+                KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                PORT {self.key_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql, env=env)
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(result, "SSH agent authentication setup failed for 'h5db'")
+
+    def test_ssh_agent_with_no_identities_error(self) -> None:
+        agent_env = self.start_ssh_agent()
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET empty_agent_auth (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                    USERNAME 'h5db',
+                    USE_AGENT true,
+                    KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                    PORT {self.key_server.port}
+                );
+                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
+                """
+            ).strip()
+            result = self.run_sql(sql, env=agent_env)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertOutputContains(result, "SSH agent authentication failed for 'h5db': agent has no identities")
+        finally:
+            self.stop_ssh_agent(agent_env)
+
+    def test_ssh_agent_can_skip_rejected_identity_and_use_later_one(self) -> None:
+        agent_env = self.start_ssh_agent()
+        try:
+            self.add_ssh_agent_identity(agent_env, self.wrong_client_key_path)
+            self.add_ssh_agent_identity(agent_env, self.client_key_path)
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET agent_auth_two_identities (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                    USERNAME 'h5db',
+                    USE_AGENT true,
+                    KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                    PORT {self.key_server.port}
+                );
+                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
+                """
+            ).strip()
+            result = self.run_sql(sql, env=agent_env)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertIn("5", result.stdout)
+            connections, _ = self.key_server.telemetry.snapshot()
+            self.assertTrue(any(record.auth_method == "publickey" for record in connections))
+            self.assertTrue(any(record.publickey_attempts >= 2 for record in connections))
+        finally:
+            self.clear_ssh_agent_identities(agent_env)
+            self.stop_ssh_agent(agent_env)
+
+    def test_ssh_agent_all_loaded_identities_can_fail(self) -> None:
+        agent_env = self.start_ssh_agent()
+        try:
+            self.add_ssh_agent_identity(agent_env, self.wrong_client_key_path)
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET wrong_agent_auth (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                    USERNAME 'h5db',
+                    USE_AGENT true,
+                    KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                    PORT {self.key_server.port}
+                );
+                SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.key_server.port}/simple.h5', '/');
+                """
+            ).strip()
+            result = self.run_sql(sql, env=agent_env)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertOutputContains(result, "SSH agent authentication failed for 'h5db':")
+        finally:
+            self.clear_ssh_agent_identities(agent_env)
+            self.stop_ssh_agent(agent_env)
 
     def test_wrong_key_passphrase_error(self) -> None:
         sql = textwrap.dedent(

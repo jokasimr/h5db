@@ -128,10 +128,13 @@ struct H5SftpUrl {
 
 using SecretScopeCacheKey = std::pair<std::string, vector<string>>;
 
+enum class H5SftpAuthMethod : uint8_t { PASSWORD, KEY_FILE, SSH_AGENT };
+
 struct H5SftpConfig {
 	std::string host;
 	int port = 22;
 	std::string username;
+	H5SftpAuthMethod auth_method = H5SftpAuthMethod::PASSWORD;
 	std::optional<std::string> password;
 	std::optional<std::string> key_path;
 	std::optional<std::string> key_passphrase;
@@ -157,8 +160,8 @@ struct SftpHostKeyHintCacheKey {
 	}
 };
 
-using H5SftpConnectionCacheKey = std::tuple<std::string, int, std::string, std::optional<hash_t>, std::string,
-                                            std::optional<hash_t>, std::string, std::string, std::string>;
+using H5SftpConnectionCacheKey = std::tuple<std::string, int, std::string, H5SftpAuthMethod, std::optional<hash_t>,
+                                            std::string, std::optional<hash_t>, std::string, std::string, std::string>;
 
 // Access to this process-global hint cache is currently serialized by hdf5_global_mutex.
 // H5SftpConnection is only constructed from the remote HDF5 VFD open path, and file opens happen while that
@@ -365,6 +368,7 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 	if (secret.TryGetValue("host_key_algorithms", value)) {
 		config.host_key_algorithms = value.GetValue<string>();
 	}
+	auto use_agent = secret.TryGetValue("use_agent", value) && value.GetValue<bool>();
 
 	if (url.username && *url.username != config.username) {
 		throw InvalidConfigurationException("sftp URL username '%s' does not match secret username '%s'", *url.username,
@@ -374,13 +378,26 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 		throw InvalidConfigurationException("sftp URL port '%d' does not match secret port '%d'", *url.port,
 		                                    config.port);
 	}
-	if (config.password.has_value() == config.key_path.has_value()) {
-		throw InvalidConfigurationException("sftp secret for '%s' must contain exactly one of PASSWORD or KEY_PATH",
+	auto auth_mode_count = UnsafeNumericCast<idx_t>(config.password.has_value()) +
+	                       UnsafeNumericCast<idx_t>(config.key_path.has_value()) + UnsafeNumericCast<idx_t>(use_agent);
+	if (auth_mode_count != 1) {
+		throw InvalidConfigurationException(
+		    "sftp secret for '%s' must contain exactly one of PASSWORD, KEY_PATH or USE_AGENT", url.original_url);
+	}
+	if (config.key_passphrase && !config.key_path) {
+		throw InvalidConfigurationException("sftp secret for '%s' requires KEY_PATH when KEY_PASSPHRASE is set",
 		                                    url.original_url);
 	}
 	if (!config.known_hosts_path && !config.host_key_fingerprint) {
 		throw InvalidConfigurationException(
 		    "sftp secret for '%s' must contain KNOWN_HOSTS_PATH or HOST_KEY_FINGERPRINT", url.original_url);
+	}
+	if (config.password) {
+		config.auth_method = H5SftpAuthMethod::PASSWORD;
+	} else if (config.key_path) {
+		config.auth_method = H5SftpAuthMethod::KEY_FILE;
+	} else {
+		config.auth_method = H5SftpAuthMethod::SSH_AGENT;
 	}
 	return config;
 }
@@ -396,6 +413,7 @@ static H5SftpConnectionCacheKey BuildSftpConnectionCacheKey(const H5SftpConfig &
 	return {config.host,
 	        config.port,
 	        config.username,
+	        config.auth_method,
 	        HashOptionalSecret(config.password),
 	        config.key_path.value_or(""),
 	        HashOptionalSecret(config.key_passphrase),
@@ -923,34 +941,105 @@ private:
 	}
 
 	void Authenticate() {
-		if (config.password) {
-			while (true) {
-				auto rc = libssh2_userauth_password(session, config.username.c_str(), config.password->c_str());
-				if (rc == 0) {
-					return;
-				}
-				if (rc != LIBSSH2_ERROR_EAGAIN) {
-					throw IOException("SSH password authentication failed for '%s': %s", config.username,
-					                  LastSessionError());
-				}
-				WaitForSessionIO();
+		// Keep the entire authentication phase in blocking mode. This matches libssh2's documented/examples
+		// usage better than a mixed model, and keeps the backend's nonblocking session logic confined to the
+		// post-auth SFTP/data path where WaitForSessionIO() is the correct wait primitive.
+		struct NonBlockingSessionRestore {
+			explicit NonBlockingSessionRestore(LIBSSH2_SESSION *session_p) : session(session_p) {
+				libssh2_session_set_blocking(session, 1);
 			}
+			~NonBlockingSessionRestore() {
+				libssh2_session_set_blocking(session, 0);
+			}
+			LIBSSH2_SESSION *session;
+		} blocking_guard(session);
+
+		switch (config.auth_method) {
+		case H5SftpAuthMethod::PASSWORD:
+			AuthenticateWithPassword();
+			return;
+		case H5SftpAuthMethod::KEY_FILE:
+			AuthenticateWithKeyFile();
+			return;
+		case H5SftpAuthMethod::SSH_AGENT:
+			AuthenticateWithAgent();
+			return;
+		default:
+			throw InternalException("Unknown SFTP auth method");
 		}
-		auto passphrase = config.key_passphrase ? config.key_passphrase->c_str() : nullptr;
+	}
+
+	void AuthenticateWithPassword() {
+		D_ASSERT(config.password.has_value());
+		auto rc = libssh2_userauth_password(session, config.username.c_str(), config.password->c_str());
+		if (rc != 0) {
+			throw IOException("SSH password authentication failed for '%s': %s", config.username, LastSessionError());
+		}
+	}
+
+	void AuthenticateWithKeyFile() {
 		D_ASSERT(config.key_path.has_value());
+		auto passphrase = config.key_passphrase ? config.key_passphrase->c_str() : nullptr;
 		const auto &key_path = config.key_path.value();
+		auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr, key_path.c_str(),
+		                                              passphrase);
+		if (rc != 0) {
+			throw IOException("SSH public key authentication failed for '%s': %s", config.username, LastSessionError());
+		}
+	}
+
+	static bool IsRetriableAgentIdentityAuthFailure(int rc) {
+		return rc == LIBSSH2_ERROR_AUTHENTICATION_FAILED || rc == LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED ||
+		       rc == LIBSSH2_ERROR_ALGO_UNSUPPORTED;
+	}
+
+	void AuthenticateWithAgent() {
+		auto agent =
+		    unique_ptr<LIBSSH2_AGENT, decltype(&libssh2_agent_free)>(libssh2_agent_init(session), &libssh2_agent_free);
+		if (!agent) {
+			throw IOException("Failed to initialize SSH agent support for '%s'", config.username);
+		}
+		if (libssh2_agent_connect(agent.get()) != 0) {
+			throw IOException("SSH agent authentication setup failed for '%s': %s", config.username,
+			                  LastSessionError());
+		}
+		if (libssh2_agent_list_identities(agent.get()) != 0) {
+			throw IOException("Failed to list SSH agent identities for '%s': %s", config.username, LastSessionError());
+		}
+
+		bool attempted_identity = false;
+		string last_identity_error;
+		struct libssh2_agent_publickey *identity = nullptr;
+		struct libssh2_agent_publickey *prev_identity = nullptr;
 		while (true) {
-			auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr, key_path.c_str(),
-			                                              passphrase);
+			auto rc = libssh2_agent_get_identity(agent.get(), &identity, prev_identity);
+			if (rc == 1) {
+				break;
+			}
+			if (rc < 0) {
+				throw IOException("Failed to enumerate SSH agent identities for '%s': %s", config.username,
+				                  LastSessionError());
+			}
+			prev_identity = identity;
+			attempted_identity = true;
+
+			rc = libssh2_agent_userauth(agent.get(), config.username.c_str(), identity);
 			if (rc == 0) {
 				return;
 			}
-			if (rc != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("SSH public key authentication failed for '%s': %s", config.username,
-				                  LastSessionError());
+			if (!IsRetriableAgentIdentityAuthFailure(rc)) {
+				throw IOException("SSH agent authentication failed for '%s': %s", config.username, LastSessionError());
 			}
-			WaitForSessionIO();
+			last_identity_error = LastSessionError();
 		}
+
+		if (!attempted_identity) {
+			throw IOException("SSH agent authentication failed for '%s': agent has no identities", config.username);
+		}
+		if (!last_identity_error.empty()) {
+			throw IOException("SSH agent authentication failed for '%s': %s", config.username, last_identity_error);
+		}
+		throw IOException("SSH agent authentication failed for '%s'", config.username);
 	}
 
 	void OpenSftpSession() {
@@ -1049,6 +1138,70 @@ static H5SftpRemotePattern ParseSftpRemotePattern(const std::string &remote_path
 	return result;
 }
 
+static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, const std::string &path, int stat_type,
+                              LIBSSH2_SFTP_ATTRIBUTES &attrs) {
+	connection->ThrowIfDead();
+	while (true) {
+		auto rc = libssh2_sftp_stat_ex(connection->GetSftpSession(), path.c_str(),
+		                               UnsafeNumericCast<unsigned int>(path.size()), stat_type, &attrs);
+		if (rc == 0) {
+			return true;
+		}
+		if (rc == LIBSSH2_ERROR_EAGAIN) {
+			connection->WaitForSessionIO();
+			continue;
+		}
+		auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
+		if (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH) {
+			return false;
+		}
+		throw IOException("Failed to stat SFTP path '%s': %s", path, connection->LastSessionError());
+	}
+}
+
+static bool H5SftpPathAttrsAreDirectory(const LIBSSH2_SFTP_ATTRIBUTES &attrs) {
+	return (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) && LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
+}
+
+static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+	connection->ThrowIfDead();
+	while (true) {
+		auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
+		if (dir_handle) {
+			while (true) {
+				auto rc = libssh2_sftp_closedir(dir_handle);
+				if (rc == 0) {
+					return true;
+				}
+				if (rc != LIBSSH2_ERROR_EAGAIN) {
+					connection->MarkDead();
+					return true;
+				}
+				connection->WaitForSessionIO();
+			}
+		}
+		if (libssh2_session_last_errno(connection->GetSession()) == LIBSSH2_ERROR_EAGAIN) {
+			connection->WaitForSessionIO();
+			continue;
+		}
+		return false;
+	}
+}
+
+static bool H5SftpExactNonDirectoryPathExists(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+	LIBSSH2_SFTP_ATTRIBUTES attrs {};
+	if (!H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs)) {
+		return false;
+	}
+	if (H5SftpPathAttrsAreDirectory(attrs)) {
+		return false;
+	}
+	if (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) {
+		return true;
+	}
+	return !H5SftpCanOpenDirectory(connection, path);
+}
+
 struct H5SftpListEntry {
 	std::string name;
 	bool is_directory = false;
@@ -1095,6 +1248,11 @@ private:
 		return H5SftpPathKind::OTHER;
 	}
 
+	static bool IsIgnorableGlobDirectoryFailure(unsigned long sftp_error) {
+		return sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH ||
+		       sftp_error == LIBSSH2_FX_PERMISSION_DENIED || sftp_error == LIBSSH2_FX_FAILURE;
+	}
+
 	H5SftpPathKind TryGetPathKind(const std::string &path, int stat_type) const {
 		LIBSSH2_SFTP_ATTRIBUTES attrs {};
 		if (!TryStatPath(path, stat_type, attrs)) {
@@ -1115,12 +1273,11 @@ private:
 				continue;
 			}
 			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
-			if (allow_probe_failure && (sftp_error == LIBSSH2_FX_NO_SUCH_FILE ||
-			                            sftp_error == LIBSSH2_FX_NO_SUCH_PATH || sftp_error == LIBSSH2_FX_FAILURE)) {
-				// Servers commonly report "not a directory" from OPENDIR as a generic
-				// failure. This probe only runs after STAT confirmed that the path exists
-				// but omitted type bits, so treat generic open failure as "not a
-				// traversable directory" rather than as a hard error.
+			if (allow_probe_failure && IsIgnorableGlobDirectoryFailure(sftp_error)) {
+				// During glob expansion, match DuckDB's local filesystem semantics:
+				// unreadable, missing, or non-directory paths are treated as simply not
+				// traversable instead of raising a glob error. Some servers report both
+				// "not a directory" and permission failures as a generic FX_FAILURE.
 				return nullptr;
 			}
 			throw IOException("Failed to open SFTP directory '%s': %s", path, connection->LastSessionError());
@@ -1218,7 +1375,10 @@ private:
 	}
 
 	vector<H5SftpListEntry> ListDirectory(const std::string &path) const {
-		LIBSSH2_SFTP_HANDLE *dir_handle = OpenDirectoryHandle(path);
+		LIBSSH2_SFTP_HANDLE *dir_handle = OpenDirectoryHandle(path, true);
+		if (!dir_handle) {
+			return {};
+		}
 
 		vector<H5SftpListEntry> result;
 		std::array<char, 4096> name_buffer {};
@@ -1256,7 +1416,8 @@ private:
 		return result;
 	}
 
-	void ExpandFrom(const std::string &current_path, idx_t split_index, vector<std::string> &result) const {
+	void ExpandFrom(const std::string &current_path, idx_t split_index, vector<std::string> &result,
+	                const vector<H5SftpListEntry> *prelisted_entries = nullptr) const {
 		if (split_index >= remote_components.size()) {
 			return;
 		}
@@ -1283,8 +1444,9 @@ private:
 				CrawlFiles(current_path, result);
 				return;
 			}
-			ExpandFrom(current_path, split_index + 1, result);
-			for (const auto &entry : ListDirectory(current_path)) {
+			auto entries = ListDirectory(current_path);
+			ExpandFrom(current_path, split_index + 1, result, &entries);
+			for (const auto &entry : entries) {
 				if (!entry.is_directory || entry.is_symbolic_link) {
 					continue;
 				}
@@ -1293,7 +1455,12 @@ private:
 			return;
 		}
 
-		for (const auto &entry : ListDirectory(current_path)) {
+		vector<H5SftpListEntry> owned_entries;
+		if (!prelisted_entries) {
+			owned_entries = ListDirectory(current_path);
+			prelisted_entries = &owned_entries;
+		}
+		for (const auto &entry : *prelisted_entries) {
 			if (!Glob(entry.name.c_str(), entry.name.size(), component.c_str(), component.size())) {
 				continue;
 			}
@@ -1859,8 +2026,15 @@ H5ExpandedFileList ExpandH5SftpFilePattern(ClientContext &context, const std::st
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 	auto config = ResolveSftpConfig(context, url);
 	auto connection = GetOrCreateCachedSftpConnection(context, config);
-	result.filenames = H5SftpGlobExpander(std::move(connection), url.authority, std::move(pattern)).Expand();
+	result.filenames = H5SftpGlobExpander(connection, url.authority, std::move(pattern)).Expand();
 	if (result.filenames.empty()) {
+		// Match DuckDB reader semantics for local paths: if glob expansion finds
+		// nothing, fall back to treating the full input as an exact path.
+		if (H5SftpExactNonDirectoryPathExists(connection, url.remote_path)) {
+			result.filenames.push_back(path_pattern);
+			result.had_glob = true;
+			return result;
+		}
 		throw IOException("No files found that match the pattern \"%s\"", path_pattern);
 	}
 	result.had_glob = true;

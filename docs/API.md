@@ -5,8 +5,7 @@ This document describes all functions provided by the h5db extension.
 ## Remote Access
 
 The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
-parameter, but remote paths are opened through the DuckDB-backed remote VFD as immutable snapshots, so
-`H5F_ACC_SWMR_READ` is not used there.
+parameter, but remote paths are opened as immutable snapshots, so `H5F_ACC_SWMR_READ` is not used there.
 
 All h5db functions accept single local paths or remote URLs as `filename`.
 
@@ -48,6 +47,10 @@ Globbing is supported for local paths and `sftp://` URLs.
 - All matched files in `h5_read(...)` must have compatible column definitions.
 - `h5_attributes(...)` and scalar `h5_ls(...)` operate on one file at a time and
   do not accept filename lists or glob patterns.
+- For local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
+  expansion follows the same semantics as DuckDB's other multi-file readers
+  such as `read_parquet(...)`. In particular, recursive `**` does not traverse
+  symlink directories.
 
 **Examples:**
 
@@ -76,7 +79,7 @@ CREATE OR REPLACE SECRET beamline_sftp (
     TYPE sftp,
     SCOPE 'sftp://beamline.example.org/',
     USERNAME 'alice',
-    PASSWORD 'secret',
+    USE_AGENT true,
     KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
 );
 
@@ -88,7 +91,7 @@ SELECT * FROM h5_read(
 
 **Required secret fields:**
 - `USERNAME`
-- exactly one of `PASSWORD` or `KEY_PATH`
+- exactly one of `PASSWORD`, `KEY_PATH`, or `USE_AGENT`
 - at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
 
 **Optional secret fields:**
@@ -99,6 +102,11 @@ SELECT * FROM h5_read(
 
 **Notes:**
 - `HOST_KEY_FINGERPRINT` is the lowercase hex SHA1 host-key fingerprint.
+- Password auth via `PASSWORD` and explicit key-file auth via `KEY_PATH` with
+  optional `KEY_PASSPHRASE` are also supported.
+- `USE_AGENT` uses libssh2's SSH agent support. On Unix-like systems this uses
+  the agent exposed through `SSH_AUTH_SOCK`. On Windows, libssh2 uses its
+  supported agent backends (for example Pageant/OpenSSH) when available.
 - If a username or port is embedded in the `sftp://` URL, it must match the selected secret.
 
 ## Table Functions
@@ -132,7 +140,7 @@ as additional columns with `h5_attr(...)`.
   - `link` for dangling or otherwise unresolved local links
   - `external` for external links
 - `dtype` (VARCHAR): Data type for datasets (e.g., `int32`, `float64`, `string`)
-- `shape` (LIST<UBIGINT>): Dataset dimensions
+- `shape` (UBIGINT[]): Dataset dimensions
   - `NULL` for non-dataset rows
   - `[]` for scalar datasets
   - `[d0, d1, ...]` for array datasets

@@ -158,7 +158,7 @@ FROM h5_read('runs/run_*.h5', '/counts');
 FROM h5_tree('runs/**/*.h5');
 ```
 
-You can also pass an explicit `LIST(VARCHAR)` when you want a defined expansion
+You can also pass an explicit `VARCHAR[]` when you want a defined expansion
 order or want to mix exact files with patterns:
 
 ```sql
@@ -180,6 +180,10 @@ Useful mental models:
   and replaces the hidden `filename` binding with that visible name
 - a pattern that matches no files raises an error
 - `h5_read(...)` requires compatible column definitions across all matched files
+- for local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
+  expansion follows the same semantics as DuckDB's other multi-file readers
+  such as `read_parquet(...)`
+- in particular, recursive `**` does not traverse symlink directories
 
 When you need to keep track of which file produced a row, ask for `filename`
 explicitly:
@@ -325,6 +329,16 @@ FROM h5_read('s3://bucket/data.h5', '/measurements');
 
 For `sftp://` URLs, you first create a DuckDB secret of type `sftp`.
 
+Available authentication methods are:
+
+- `USE_AGENT true`
+- `PASSWORD '...'`
+- `KEY_PATH '...'` with optional `KEY_PASSPHRASE '...'`
+
+Recommended default: if you already use an SSH agent / OS keychain integration, prefer `USE_AGENT true`. It avoids
+storing the SSH password or private-key passphrase in the DuckDB secret. Password and explicit key-file auth are also
+supported.
+
 Example:
 
 ```sql
@@ -332,7 +346,7 @@ CREATE OR REPLACE SECRET beamline_sftp (
     TYPE sftp,
     SCOPE 'sftp://beamline.example.org/',
     USERNAME 'alice',
-    PASSWORD 'secret',
+    USE_AGENT true,
     KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
 );
 ```

@@ -13,7 +13,7 @@ stack or SFTP.
 - Supports projection pushdown in `h5_read(...)`.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
 - Table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` accept single files, local/SFTP glob patterns, or
-  `LIST(VARCHAR)` filename inputs.
+  `VARCHAR[]` filename inputs.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
@@ -127,7 +127,7 @@ All h5db functions accept single local paths or remote URLs as `filename`.
 The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` also accept:
 
 - a local or `sftp://` glob pattern
-- a `LIST(VARCHAR)` of exact filenames/URLs and/or glob patterns
+- a `VARCHAR[]` of exact filenames/URLs and/or glob patterns
 
 Multi-file semantics:
 
@@ -144,8 +144,12 @@ Multi-file semantics:
 - `h5_read(...)` requires compatible column definitions across all matched files
 - `h5_attributes(...)` and the scalar `h5_ls(...)` still operate on one file at a time
 
-Globs support the usual `*`, `?`, and bracket classes, plus one recursive `**`
-segment per pattern. A pattern that matches no files raises an error.
+For local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
+expansion follows the same semantics as DuckDB's other multi-file readers such
+as `read_parquet(...)`. In particular, recursive `**` does not traverse
+symlink directories. Globs support the usual `*`, `?`, and bracket classes,
+plus one recursive `**` segment per pattern. A pattern that matches no files
+raises an error.
 
 When several files contain the same HDF5 path, use `filename` to distinguish them:
 
@@ -163,17 +167,33 @@ FROM h5_read('runs/run_*.h5', '/entry/data', filename := true);
 - Remote opens are treated as immutable snapshots. `swmr := true` is accepted for API consistency, but remote paths do
   not use `H5F_ACC_SWMR_READ`.
 
-To read over SFTP, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access:
+To read over SFTP, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access.
+
+Available authentication methods are:
+
+- `USE_AGENT true`
+- `PASSWORD '...'`
+- `KEY_PATH '...'` with optional `KEY_PASSPHRASE '...'`
+
+Recommended default: if you already use an SSH agent / OS keychain integration, prefer `USE_AGENT true`. It avoids
+storing the SSH password or private-key passphrase in the DuckDB secret. Password and explicit key-file auth are also
+supported.
+
+Example:
 
 ```sql
 CREATE OR REPLACE SECRET beamline_sftp (
     TYPE sftp,
     SCOPE 'sftp://beamline.example.org/',
     USERNAME 'alice',
-    PASSWORD 'secret',
+    USE_AGENT true,
     KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
 );
+```
 
+Then query the file normally:
+
+```sql
 FROM h5_read(
     'sftp://beamline.example.org/data/run001.h5',
     '/entry/data'
@@ -188,7 +208,7 @@ FROM h5_read(
 SFTP secrets require:
 
 - `USERNAME`
-- exactly one of `PASSWORD` or `KEY_PATH`
+- exactly one of `PASSWORD`, `KEY_PATH`, or `USE_AGENT`
 - at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
 
 Optional SFTP secret fields:
@@ -197,9 +217,10 @@ Optional SFTP secret fields:
 - `PORT` (default `22`)
 - `HOST_KEY_ALGORITHMS`
 
-For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. If you use
-`HOST_KEY_FINGERPRINT`, provide the lowercase hex SHA1 host-key fingerprint. See [docs/API.md](docs/API.md) for the
-full SFTP secret reference.
+For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. For agent-based auth, use
+`USE_AGENT true`. On Unix-like systems libssh2 resolves the agent through `SSH_AUTH_SOCK`; on Windows it uses the
+supported agent backends available through libssh2. If you use `HOST_KEY_FINGERPRINT`, provide the lowercase hex SHA1
+host-key fingerprint. See [docs/API.md](docs/API.md) for the full SFTP secret reference.
 
 ## Build From Source
 

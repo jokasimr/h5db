@@ -144,6 +144,87 @@ FROM h5_read('test/data/glob_order/**/order_*.h5', '/values');
 2
 99
 
+query III
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_deep/**/deep_*.h5') WHERE path LIKE '/marker_%'),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_deep/**/deep_*.h5', '/') WHERE path LIKE '/marker_%'),
+    (SELECT SUM(values) FROM h5_read('test/data/glob_deep/**/deep_*.h5', '/values'));
+----
+4	4	6
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_deep/**/deep_*.h5', '/values')
+ORDER BY filename;
+----
+test/data/glob_deep/alpha/beta/gamma/deep_2.h5
+test/data/glob_deep/alpha/beta/gamma/delta/epsilon/deep_3.h5
+test/data/glob_deep/alpha/deep_1.h5
+test/data/glob_deep/deep_0.h5
+
+query I
+SELECT filename
+FROM h5_tree('test/data/glob_hidden/*')
+WHERE path LIKE '/marker_%'
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_root.h5
+test/data/glob_hidden/visible.h5
+
+query I
+SELECT filename
+FROM h5_ls('test/data/glob_hidden/*', '/')
+WHERE path LIKE '/marker_%'
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_root.h5
+test/data/glob_hidden/visible.h5
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_hidden/*', '/values')
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_root.h5
+test/data/glob_hidden/visible.h5
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_hidden/*/*.h5', '/values')
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_dir/in_hidden_dir.h5
+test/data/glob_hidden/visible_dir/inside_visible.h5
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_hidden/**/*.h5', '/values')
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_dir/in_hidden_dir.h5
+test/data/glob_hidden/.hidden_parent/visible_child/in_hidden_parent.h5
+test/data/glob_hidden/.hidden_root.h5
+test/data/glob_hidden/visible.h5
+test/data/glob_hidden/visible_dir/.nested_hidden/in_nested_hidden.h5
+test/data/glob_hidden/visible_dir/inside_visible.h5
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_hidden/.*', '/values')
+ORDER BY filename;
+----
+test/data/glob_hidden/.hidden_root.h5
+
+query I
+SELECT COUNT(*) FROM h5_read('test/data/glob_literal_meta/literal[1].h5', '/values');
+----
+1
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/glob_literal_meta/dir[1]');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob_literal_meta/dir\[1\]".*
+
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob/no_such_*.h5');
 ----

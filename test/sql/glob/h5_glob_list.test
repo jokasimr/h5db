@@ -53,3 +53,10 @@ SELECT COUNT(*) FROM h5_tree([
 ]);
 ----
 <REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
+
+query I
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_literal_meta/literal[1].h5'
+], '/values');
+----
+1
