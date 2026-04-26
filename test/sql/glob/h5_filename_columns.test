@@ -30,6 +30,14 @@ dtype	VARCHAR	YES	NULL	NULL	NULL
 shape	UBIGINT[]	YES	NULL	NULL	NULL
 source	VARCHAR	YES	NULL	NULL	NULL
 
+query TTTTTT
+DESCRIBE FROM h5_tree('test/data/glob_order/order_1.h5', filename=false);
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+
 query IIII
 FROM h5_tree('test/data/glob_order/order_1.h5') LIMIT 1;
 ----
@@ -71,6 +79,13 @@ FROM h5_tree('test/data/glob_order/order_1.h5', filename='source');
 ----
 <REGEX>:.*filename.*not found.*
 
+query I
+SELECT filename
+FROM h5_tree('test/data/glob_order/order_1.h5', filename=false)
+WHERE path = '/marker_1';
+----
+test/data/glob_order/order_1.h5
+
 statement error
 FROM h5_tree('test/data/glob_order/order_1.h5', filename=NULL);
 ----
@@ -106,6 +121,34 @@ FROM h5_tree(
 ----
 Binder Error: Option filename adds column "source", but that column name is already present in h5_tree output
 
+statement error
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('FiLeNaMe', h5_attr('string_attr')),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_tree output
+
+statement error
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('SoUrCe', h5_attr('string_attr')),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_tree output
+
+query I
+SELECT filename
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('filename', h5_attr('string_attr'))
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!
+
 query TTTTTT
 DESCRIBE FROM h5_ls('test/data/glob_order/order_1.h5', '/');
 ----
@@ -131,6 +174,14 @@ type	VARCHAR	YES	NULL	NULL	NULL
 dtype	VARCHAR	YES	NULL	NULL	NULL
 shape	UBIGINT[]	YES	NULL	NULL	NULL
 source	VARCHAR	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=false);
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
 
 query IIII
 FROM h5_ls('test/data/glob_order/order_1.h5', '/') LIMIT 1;
@@ -173,6 +224,13 @@ FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source');
 ----
 <REGEX>:.*filename.*not found.*
 
+query I
+SELECT filename
+FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=false)
+WHERE path = '/marker_1';
+----
+test/data/glob_order/order_1.h5
+
 statement error
 FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=NULL);
 ----
@@ -210,6 +268,37 @@ FROM h5_ls(
 ----
 Binder Error: Option filename adds column "source", but that column name is already present in h5_ls output
 
+statement error
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('FiLeNaMe', h5_attr('string_attr')),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_ls output
+
+statement error
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('SoUrCe', h5_attr('string_attr')),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_ls output
+
+query I
+SELECT filename
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('filename', h5_attr('group_string_attr'))
+)
+WHERE path = '/group_with_attrs';
+----
+I am a group
+
 query TTTTTT
 DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values');
 ----
@@ -226,6 +315,11 @@ DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='so
 ----
 values	INTEGER	YES	NULL	NULL	NULL
 source	VARCHAR	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=false);
+----
+values	INTEGER	YES	NULL	NULL	NULL
 
 query I
 FROM h5_read('test/data/glob_order/order_1.h5', '/values');
@@ -259,6 +353,12 @@ SELECT filename
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
 ----
 <REGEX>:.*filename.*not found.*
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=false);
+----
+test/data/glob_order/order_1.h5
 
 statement error
 FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=NULL);
@@ -334,3 +434,30 @@ FROM h5_read(
 );
 ----
 Binder Error: Option filename adds column "source", but that column name is already present in h5_read output
+
+statement error
+FROM h5_read(
+    'test/data/glob_order/order_1.h5',
+    h5_alias('FiLeNaMe', '/values'),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_read output
+
+statement error
+FROM h5_read(
+    'test/data/glob_order/order_1.h5',
+    h5_alias('SoUrCe', '/values'),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_read output
+
+query I
+SELECT filename
+FROM h5_read(
+    'test/data/glob_order/order_1.h5',
+    h5_alias('filename', '/values')
+);
+----
+1
