@@ -1115,9 +1115,8 @@ private:
 				continue;
 			}
 			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
-			if (allow_probe_failure &&
-			    (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH ||
-			     sftp_error == LIBSSH2_FX_FAILURE)) {
+			if (allow_probe_failure && (sftp_error == LIBSSH2_FX_NO_SUCH_FILE ||
+			                            sftp_error == LIBSSH2_FX_NO_SUCH_PATH || sftp_error == LIBSSH2_FX_FAILURE)) {
 				// Servers commonly report "not a directory" from OPENDIR as a generic
 				// failure. This probe only runs after STAT confirmed that the path exists
 				// but omitted type bits, so treat generic open failure as "not a
@@ -1226,8 +1225,7 @@ private:
 		try {
 			while (true) {
 				LIBSSH2_SFTP_ATTRIBUTES attrs {};
-				auto rc =
-				    libssh2_sftp_readdir(dir_handle, name_buffer.data(), name_buffer.size(), &attrs);
+				auto rc = libssh2_sftp_readdir(dir_handle, name_buffer.data(), name_buffer.size(), &attrs);
 				if (rc == LIBSSH2_ERROR_EAGAIN) {
 					connection->WaitForSessionIO();
 					continue;

@@ -1,6 +1,6 @@
 # name: test/sql/glob/h5_glob_list.test
 # description: LIST(VARCHAR) filename argument coverage for h5_tree, h5_ls, and h5_read
-# group: [sql]
+# group: [glob]
 
 require h5db
 

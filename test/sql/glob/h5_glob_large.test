@@ -1,6 +1,6 @@
 # name: test/sql/glob/h5_glob_large.test
 # description: large multi-file globbing coverage for h5_read
-# group: [large]
+# group: [glob]
 
 require h5db
 

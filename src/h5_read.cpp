@@ -51,8 +51,7 @@ static T &GetStructChild(unique_ptr<T> &child) {
 }
 
 static constexpr idx_t H5_READ_LOGICAL_PARTITION_MULTIPLIER = 10;
-static constexpr idx_t H5_READ_LOGICAL_PARTITION_SIZE =
-    H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
+static constexpr idx_t H5_READ_LOGICAL_PARTITION_SIZE = H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
 static constexpr idx_t H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
 
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
@@ -1052,12 +1051,14 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Get dataspace to determine dimensions - RAII handles cleanup
 			H5DataspaceHandle space(dataset);
 			if (!space.is_valid()) {
-				throw IOException(AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result.filename));
+				throw IOException(
+				    AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result.filename));
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
-				throw IOException(AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result.filename));
+				throw IOException(
+				    AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result.filename));
 			}
 			if (ds_info.is_string && ds_info.ndims > 1) {
 				throw IOException("String datasets with more than 1 dimension are not supported");
@@ -1530,8 +1531,8 @@ static idx_t ComputeProjectedNumericRowBytes(const H5ReadBindData &bind_data, co
 	const auto &columns = GetCanonicalColumns(bind_data);
 	idx_t projected_numeric_row_bytes = 0;
 	for (auto column_id : data_column_ids) {
-		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]); regular_spec &&
-		    !regular_spec->is_string) {
+		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
+		    regular_spec && !regular_spec->is_string) {
 			projected_numeric_row_bytes += NumericCast<idx_t>(regular_spec->element_size);
 		}
 	}
@@ -2133,8 +2134,8 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 	if (spec.is_string) {
 		D_ASSERT(spec.string_h5_type.has_value());
 		// Handle string data using helper
-		ReadHDF5Strings(dataset_id, *spec.string_h5_type, mem_space, file_space, to_read, bind_data.filename,
-		                spec.path, [&](idx_t i, const std::string &str) {
+		ReadHDF5Strings(dataset_id, *spec.string_h5_type, mem_space, file_space, to_read, bind_data.filename, spec.path,
+		                [&](idx_t i, const std::string &str) {
 			                FlatVector::GetData<string_t>(result_vector)[i] =
 			                    StringVector::AddString(result_vector, str);
 		                });
@@ -2305,8 +2306,7 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 		for (const auto &file_bind_data : bind_data.file_bind_data) {
 			max_num_rows = MaxValue<idx_t>(max_num_rows, file_bind_data.num_rows);
 		}
-		if (projected_numeric_row_bytes >= H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD &&
-		    max_num_rows < STANDARD_VECTOR_SIZE) {
+		if (projected_numeric_row_bytes >= H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD && max_num_rows < STANDARD_VECTOR_SIZE) {
 			result->max_threads = 1;
 		}
 	}

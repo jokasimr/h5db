@@ -1,6 +1,6 @@
 # name: test/sql/glob/h5_filename_columns.test
 # description: hidden and visible filename columns for h5_tree, h5_ls, and h5_read
-# group: [sql]
+# group: [glob]
 
 require h5db
 

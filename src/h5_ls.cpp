@@ -304,7 +304,8 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	if (shape_output_idx.has_value()) {
 		ListVector::SetListSize(output.data[*shape_output_idx], shape_offset);
 	}
-	H5LsPopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs, output);
+	H5LsPopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs,
+	                            output);
 	gstate.offset += count;
 }
 

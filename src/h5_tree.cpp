@@ -452,8 +452,8 @@ static void H5TreeOpenFileScanner(ClientContext &context, const H5TreeBindData &
                                   idx_t file_idx) {
 	D_ASSERT(file_idx < bind_data.filenames.size());
 	state.file_idx = file_idx;
-	state.scanner =
-	    make_uniq<H5TreeScanner>(context, bind_data.filenames[file_idx], bind_data.swmr, bind_data.projected_attributes);
+	state.scanner = make_uniq<H5TreeScanner>(context, bind_data.filenames[file_idx], bind_data.swmr,
+	                                         bind_data.projected_attributes);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, TableFunctionInitInput &input) {
