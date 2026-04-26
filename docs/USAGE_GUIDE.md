@@ -150,7 +150,9 @@ within the current file's dataset, so it starts at `0` for each file.
 The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` can read more
 than one file at a time.
 
-For local paths and `sftp://` URLs, you can use glob patterns:
+You can use glob patterns with local paths and `sftp://` URLs, and with
+DuckDB-backed remote schemes when the underlying DuckDB filesystem supports
+globbing:
 
 ```sql
 FROM h5_read('runs/run_*.h5', '/counts');
@@ -180,9 +182,11 @@ Useful mental models:
   and replaces the hidden `filename` binding with that visible name
 - a pattern that matches no files raises an error
 - `h5_read(...)` requires compatible column definitions across all matched files
-- for local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
-  expansion follows the same semantics as DuckDB's other multi-file readers
-  such as `read_parquet(...)`
+- for local paths and DuckDB-backed remote schemes, glob expansion uses
+  DuckDB's filesystem stack
+- for `sftp://` URLs, glob expansion is handled by h5db's SFTP backend
+- in both cases, glob expansion follows the same semantics as DuckDB's other
+  multi-file readers such as `read_parquet(...)`
 - in particular, recursive `**` does not traverse symlink directories
 
 When you need to keep track of which file produced a row, ask for `filename`

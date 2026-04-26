@@ -12,7 +12,7 @@ stack or SFTP.
 - Scalar datasets are treated as constant columns.
 - Supports projection pushdown in `h5_read(...)`.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
-- Table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` accept single files, local/SFTP glob patterns, or
+- Table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` accept single files, glob patterns, or
   `VARCHAR[]` filename inputs.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
@@ -126,7 +126,7 @@ All h5db functions accept single local paths or remote URLs as `filename`.
 
 The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` also accept:
 
-- a local or `sftp://` glob pattern
+- a glob pattern
 - a `VARCHAR[]` of exact filenames/URLs and/or glob patterns
 
 Multi-file semantics:
@@ -144,12 +144,13 @@ Multi-file semantics:
 - `h5_read(...)` requires compatible column definitions across all matched files
 - `h5_attributes(...)` and the scalar `h5_ls(...)` still operate on one file at a time
 
-For local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
-expansion follows the same semantics as DuckDB's other multi-file readers such
-as `read_parquet(...)`. In particular, recursive `**` does not traverse
-symlink directories. Globs support the usual `*`, `?`, and bracket classes,
-plus one recursive `**` segment per pattern. A pattern that matches no files
-raises an error.
+For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's
+filesystem stack. For `sftp://` URLs, glob expansion is handled by h5db's SFTP
+backend. In both cases, h5db follows DuckDB's other multi-file reader
+semantics such as `read_parquet(...)`. In particular, recursive `**` does not
+traverse symlink directories. Globs support the usual `*`, `?`, and bracket
+classes, plus one recursive `**` segment per pattern. A pattern that matches
+no files raises an error.
 
 When several files contain the same HDF5 path, use `filename` to distinguish them:
 

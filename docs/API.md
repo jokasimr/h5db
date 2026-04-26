@@ -24,7 +24,8 @@ accept:
 - a glob pattern (`VARCHAR`)
 - a list of exact filenames/URLs and/or glob patterns (`VARCHAR[]`)
 
-Globbing is supported for local paths and `sftp://` URLs.
+Globbing is supported for local paths, for `sftp://` URLs, and for DuckDB-backed
+remote schemes when the underlying DuckDB filesystem supports globbing.
 
 **Glob syntax:**
 - `*`
@@ -47,10 +48,12 @@ Globbing is supported for local paths and `sftp://` URLs.
 - All matched files in `h5_read(...)` must have compatible column definitions.
 - `h5_attributes(...)` and scalar `h5_ls(...)` operate on one file at a time and
   do not accept filename lists or glob patterns.
-- For local paths, and for `sftp://` URLs handled by h5db's SFTP backend, glob
-  expansion follows the same semantics as DuckDB's other multi-file readers
-  such as `read_parquet(...)`. In particular, recursive `**` does not traverse
-  symlink directories.
+- For local paths and DuckDB-backed remote schemes, glob expansion uses
+  DuckDB's filesystem stack. For `sftp://` URLs, glob expansion is handled by
+  h5db's SFTP backend.
+- In both cases, glob expansion follows DuckDB's other multi-file reader
+  semantics such as `read_parquet(...)`. In particular, recursive `**` does not
+  traverse symlink directories.
 
 **Examples:**
 
@@ -119,7 +122,7 @@ resolve to the same underlying object. Selected HDF5 attributes can be projected
 as additional columns with `h5_attr(...)`.
 
 **Parameters:**
-- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
   pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
   - `h5_attr()`
@@ -220,7 +223,7 @@ returns the same row shape as `h5_tree()`, but only for the immediate children o
 the requested group.
 
 **Parameters:**
-- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
   pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
@@ -269,7 +272,7 @@ FROM h5_ls(
 Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
-- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
   pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
