@@ -1,0 +1,89 @@
+# name: test/sql/h5_list_inputs.test
+# description: LIST(VARCHAR) filename argument coverage that does not rely on glob expansion
+# group: [sql]
+
+require h5db
+
+query I
+SELECT path
+FROM h5_tree([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_1.h5'
+])
+WHERE path LIKE '/marker_%';
+----
+/marker_2
+/marker_1
+
+query I
+SELECT path
+FROM h5_ls([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_1.h5'
+], '/')
+WHERE path LIKE '/marker_%';
+----
+/marker_2
+/marker_1
+
+query II
+SELECT idx, values
+FROM h5_read(
+    [
+        'test/data/glob_order/order_2.h5',
+        'test/data/glob_order/order_1.h5'
+    ],
+    h5_alias('idx', h5_index()),
+    '/values'
+);
+----
+0	2
+0	1
+
+query III
+SELECT
+    (SELECT COUNT(*) FROM h5_tree([
+        'test/data/glob_order/order_1.h5',
+        'test/data/glob_order/order_1.h5'
+    ]) WHERE path = '/marker_1'),
+    (SELECT COUNT(*) FROM h5_ls([
+        'test/data/glob_order/order_1.h5',
+        'test/data/glob_order/order_1.h5'
+    ], '/') WHERE path = '/marker_1'),
+    (SELECT COUNT(*) FROM h5_read([
+        'test/data/glob_order/order_1.h5',
+        'test/data/glob_order/order_1.h5'
+    ], '/values'));
+----
+2	2	2
+
+statement error
+SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR[]);
+----
+Parser Error: h5_tree cannot take NULL list as parameter
+
+statement error
+SELECT * FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values');
+----
+<REGEX>:.*h5_read matched file '.*' with an incompatible schema.*
+
+statement error
+SELECT COUNT(*) FROM h5_tree([]::VARCHAR[]);
+----
+IO Error: h5_tree needs at least one file to read
+
+statement error
+SELECT COUNT(*) FROM h5_read([1]::INTEGER[], '/values');
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_read\(INTEGER\[\], VARCHAR\)'.*
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_order/order_1.h5',
+    NULL
+], '/values');
+----
+Parser Error: h5_read reader cannot take NULL input as parameter

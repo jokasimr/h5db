@@ -1,8 +1,11 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "h5_raii.hpp"
+#include "h5_remote_backend.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/error_manager.hpp"
 #include "duckdb/main/config.hpp"
@@ -54,6 +57,68 @@ bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &name
 	}
 
 	return false;
+}
+
+H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &named_parameters) {
+	H5FilenameColumnOption result;
+	auto it = named_parameters.find("filename");
+	if (it == named_parameters.end()) {
+		return result;
+	}
+	auto &value = it->second;
+	if (value.IsNull()) {
+		throw InvalidInputException("Cannot use NULL as argument for \"filename\"");
+	}
+	if (value.type() == LogicalType::VARCHAR) {
+		result.include = true;
+		result.column_name = StringValue::Get(value);
+		return result;
+	}
+
+	Value boolean_value;
+	string error_message;
+	if (value.DefaultTryCastAs(LogicalType::BOOLEAN, boolean_value, &error_message)) {
+		result.include = BooleanValue::Get(boolean_value);
+	}
+	return result;
+}
+
+H5ExpandedFileList H5ExpandFilePattern(ClientContext &context, const std::string &pattern) {
+	if (StringUtil::StartsWith(StringUtil::Lower(pattern), "sftp://")) {
+		return ExpandH5SftpFilePattern(context, pattern);
+	}
+
+	H5ExpandedFileList result;
+	if (!FileSystem::HasGlob(pattern)) {
+		result.filenames.push_back(pattern);
+		return result;
+	}
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto expanded = fs.GlobFiles(pattern, FileGlobOptions::DISALLOW_EMPTY);
+	result.had_glob = true;
+	result.filenames.reserve(expanded.size());
+	for (auto &file : expanded) {
+		result.filenames.push_back(std::move(file.path));
+	}
+	std::sort(result.filenames.begin(), result.filenames.end());
+	return result;
+}
+
+H5ExpandedFileList H5ExpandFilePatterns(ClientContext &context, const Value &input, const std::string &function_name) {
+	auto reader = MultiFileReader::CreateDefault(function_name);
+	auto patterns = reader->ParsePaths(input);
+	if (patterns.empty()) {
+		throw IOException("%s needs at least one file to read", function_name);
+	}
+
+	H5ExpandedFileList result;
+	for (const auto &pattern : patterns) {
+		auto expanded = H5ExpandFilePattern(context, pattern);
+		result.had_glob = result.had_glob || expanded.had_glob;
+		std::move(expanded.filenames.begin(), expanded.filenames.end(), std::back_inserter(result.filenames));
+	}
+	return result;
 }
 
 std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,

@@ -1,0 +1,126 @@
+# name: test/sql/glob/h5_glob_pushdown.test
+# description: predicate pushdown coverage for globbed h5_read over RSE columns
+# group: [sql]
+
+require h5db
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_glob_pushdown_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/glob_pushdown/pushdown_*.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values = 30;
+----
+400
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('h5db_glob_pushdown_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 400'
+);
+----
+1
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_glob_pushdown_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/glob_pushdown/pushdown_*.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values = 30 AND regular > 450;
+----
+298
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('h5db_glob_pushdown_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 400'
+);
+----
+1
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_glob_pushdown_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/glob_pushdown/**/pushdown_*.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values'),
+    h5_rse('/float_rse_starts', '/float_rse_values')
+)
+WHERE int_rse_values = 30 AND float_rse_values = 3.5;
+----
+600
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('h5db_glob_pushdown_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 600'
+);
+----
+1
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_glob_pushdown_profile.json';
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/glob_pushdown/**/pushdown_*.h5',
+    '/regular',
+    h5_rse('/int_rse_starts', '/int_rse_values')
+)
+WHERE int_rse_values = 10 OR int_rse_values = 50;
+----
+1200
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('h5db_glob_pushdown_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 3000'
+);
+----
+1

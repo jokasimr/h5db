@@ -142,6 +142,56 @@ This is often useful for:
 - joining against derived tables
 - checking row alignment between datasets
 
+If `h5_read(...)` reads multiple files, `h5_index()` still means the row index
+within the current file's dataset, so it starts at `0` for each file.
+
+### Read multiple files
+
+The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` can read more
+than one file at a time.
+
+For local paths and `sftp://` URLs, you can use glob patterns:
+
+```sql
+FROM h5_read('runs/run_*.h5', '/counts');
+
+FROM h5_tree('runs/**/*.h5');
+```
+
+You can also pass an explicit `LIST(VARCHAR)` when you want a defined expansion
+order or want to mix exact files with patterns:
+
+```sql
+FROM h5_read(
+    ['runs/calibration.h5', 'runs/run_*.h5'],
+    '/counts'
+);
+```
+
+Useful mental models:
+
+- `h5_read(...)` concatenates rows file by file
+- `h5_index()` is per file, not across the combined multi-file result
+- list entries are expanded left-to-right
+- duplicate files are preserved
+- table `h5_tree(...)`, table `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual `filename` column
+- `filename := true` adds `filename` to the visible output schema
+- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
+  and replaces the hidden `filename` binding with that visible name
+- a pattern that matches no files raises an error
+- `h5_read(...)` requires compatible column definitions across all matched files
+
+When you need to keep track of which file produced a row, ask for `filename`
+explicitly:
+
+```sql
+SELECT filename, path
+FROM h5_tree('runs/**/*.h5')
+WHERE path = '/entry/data';
+
+FROM h5_read('runs/run_*.h5', '/counts', filename := true);
+```
+
 ### Rename output columns
 
 Some HDF5 paths are long or repetitive. Use `h5_alias(...)` to make query output
@@ -292,6 +342,11 @@ Then query the file normally:
 ```sql
 FROM h5_read(
     'sftp://beamline.example.org/data/run001.h5',
+    '/entry/data'
+);
+
+FROM h5_read(
+    'sftp://beamline.example.org/data/run_*.h5',
     '/entry/data'
 );
 ```

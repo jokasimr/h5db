@@ -39,6 +39,42 @@ required_files=(
   "$PROJECT_ROOT/test/data/links_external_target.h5"
   "$PROJECT_ROOT/test/data/swmr_enabled.h5"
   "$PROJECT_ROOT/test/data/swmr_disabled.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_same_1.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_same_2.h5"
+  "$PROJECT_ROOT/test/data/glob/nested/glob_same_3.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_mismatch.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_strings_1_ascii.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_strings_2_utf8.h5"
+  "$PROJECT_ROOT/test/data/glob/rse_same_1.h5"
+  "$PROJECT_ROOT/test/data/glob/rse_same_2.h5"
+  "$PROJECT_ROOT/test/data/glob_pushdown/pushdown_1.h5"
+  "$PROJECT_ROOT/test/data/glob_pushdown/pushdown_2.h5"
+  "$PROJECT_ROOT/test/data/glob_pushdown/nested/pushdown_3.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_with_attrs_1.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_with_attrs_2.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_attrs_edge_1.h5"
+  "$PROJECT_ROOT/test/data/glob/glob_attrs_edge_2.h5"
+  "$PROJECT_ROOT/test/data/glob/equiv/equiv_1.h5"
+  "$PROJECT_ROOT/test/data/glob/equiv/equiv_2.h5"
+  "$PROJECT_ROOT/test/data/glob/equiv/nested/equiv_3.h5"
+  "$PROJECT_ROOT/test/data/glob_symlink/root_file.h5"
+  "$PROJECT_ROOT/test/data/glob_symlink/real/nested.h5"
+  "$PROJECT_ROOT/test/data/glob_symlink/link_file.h5"
+  "$PROJECT_ROOT/test/data/glob_symlink/broken_link.h5"
+  "$PROJECT_ROOT/test/data/glob_symlink/link_dir/nested.h5"
+  "$PROJECT_ROOT/test/data/glob_order/order_1.h5"
+  "$PROJECT_ROOT/test/data/glob_order/order_2.h5"
+  "$PROJECT_ROOT/test/data/glob_order/order_10.h5"
+  "$PROJECT_ROOT/test/data/glob_order/nested/order_0.h5"
+  "$PROJECT_ROOT/test/data/glob_order/z/order_99.h5"
+  "$PROJECT_ROOT/test/data/glob_large/large_same_1.h5"
+  "$PROJECT_ROOT/test/data/glob_large/large_same_2.h5"
+  "$PROJECT_ROOT/test/data/glob_large/large_order_1.h5"
+  "$PROJECT_ROOT/test/data/glob_large/large_order_2.h5"
+  "$PROJECT_ROOT/test/data/glob_large/large_order_10.h5"
+  "$PROJECT_ROOT/test/data/glob_many_small/combined.h5"
+  "$PROJECT_ROOT/test/data/glob_many_small/part_0001.h5"
+  "$PROJECT_ROOT/test/data/glob_many_small/part_1000.h5"
   "$PROJECT_ROOT/test/data/large_rse_test.h5"
   "$PROJECT_ROOT/test/data/large/large_simple.h5"
   "$PROJECT_ROOT/test/data/large/large_multithreading.h5"
@@ -49,7 +85,7 @@ required_files=(
 
 missing=()
 for file in "${required_files[@]}"; do
-  if [ ! -f "$file" ]; then
+  if [ ! -f "$file" ] && [ ! -L "$file" ]; then
     missing+=("$file")
   fi
 done

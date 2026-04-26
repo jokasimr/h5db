@@ -15,6 +15,11 @@ struct H5OpenedAttribute {
 	H5DataspaceHandle space;
 };
 
+struct H5ExpandedFileList {
+	vector<string> filenames;
+	bool had_glob = false;
+};
+
 // Validate whether a decoded HDF5 string satisfies its declared character set.
 bool H5StringMatchesCharset(const std::string &value, H5T_cset_t cset);
 
@@ -49,6 +54,11 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 
 // Open an attribute and inspect its HDF5 type and dataspace.
 H5OpenedAttribute H5OpenAttribute(hid_t object_id, const std::string &attribute_name);
+
+// Expand the first filename argument for HDF5 table functions using DuckDB glob semantics.
+// Exact paths are returned unchanged; glob patterns are expanded eagerly at bind time.
+H5ExpandedFileList H5ExpandFilePattern(ClientContext &context, const std::string &pattern);
+H5ExpandedFileList H5ExpandFilePatterns(ClientContext &context, const Value &input, const std::string &function_name);
 
 // Table function for listing HDF5 file contents
 void RegisterH5TreeFunction(ExtensionLoader &loader);

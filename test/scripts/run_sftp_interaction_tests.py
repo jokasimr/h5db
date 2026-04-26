@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import textwrap
@@ -137,6 +138,7 @@ class SFTPInteractionTests(unittest.TestCase):
 
         cls.password_known_hosts = cls.tempdir / "password_known_hosts"
         cls.key_known_hosts = cls.tempdir / "key_known_hosts"
+        cls.ipv6_known_hosts = cls.tempdir / "ipv6_known_hosts"
         cls.multi_key_rsa_known_hosts = cls.tempdir / "multi_key_rsa_known_hosts"
         cls.multi_key_all_known_hosts = cls.tempdir / "multi_key_all_known_hosts"
         cls.flaky_known_hosts = cls.tempdir / "flaky_known_hosts"
@@ -153,6 +155,24 @@ class SFTPInteractionTests(unittest.TestCase):
             [cls.rsa_host_key, cls.ecdsa_host_key],
         )
         write_known_host(cls.flaky_known_hosts, "127.0.0.1", cls.flaky_server.port, cls.rsa_host_key)
+
+        cls.ipv6_server = None
+        if socket.has_ipv6:
+            try:
+                cls.ipv6_server = SFTPTestServer(
+                    "::1",
+                    0,
+                    SFTPServerConfig(
+                        root_dir=cls.data_dir,
+                        username="h5db",
+                        password="h5db",
+                        host_keys=[cls.rsa_host_key],
+                    ),
+                )
+                cls.ipv6_server.start()
+                write_known_host(cls.ipv6_known_hosts, "::1", cls.ipv6_server.port, cls.rsa_host_key)
+            except OSError:
+                cls.ipv6_server = None
 
         cls.disconnect_on_stat_server = SFTPTestServer(
             "127.0.0.1",
@@ -192,6 +212,36 @@ class SFTPInteractionTests(unittest.TestCase):
             cls.rsa_host_key,
         )
 
+        cls.symlink_known_hosts = cls.tempdir / "symlink_known_hosts"
+        cls.symlink_server = None
+        try:
+            cls.symlink_root = cls.tempdir / "symlink_root"
+            real_dir = cls.symlink_root / "real"
+            real_dir.mkdir(parents=True)
+            shutil.copyfile(Path(cls.data_dir) / "glob" / "glob_same_1.h5", real_dir / "nested.h5")
+            shutil.copyfile(Path(cls.data_dir) / "glob" / "glob_same_2.h5", cls.symlink_root / "root_file.h5")
+            os.symlink("real/nested.h5", cls.symlink_root / "link_file.h5")
+            os.symlink("real", cls.symlink_root / "link_dir", target_is_directory=True)
+            cls.symlink_server = SFTPTestServer(
+                "127.0.0.1",
+                0,
+                SFTPServerConfig(
+                    root_dir=str(cls.symlink_root),
+                    username="h5db",
+                    password="h5db",
+                    host_keys=[cls.rsa_host_key],
+                ),
+            )
+            cls.symlink_server.start()
+            write_known_host(
+                cls.symlink_known_hosts,
+                "127.0.0.1",
+                cls.symlink_server.port,
+                cls.rsa_host_key,
+            )
+        except (OSError, NotImplementedError):
+            cls.symlink_server = None
+
     @classmethod
     def tearDownClass(cls) -> None:
         for server in (
@@ -199,9 +249,13 @@ class SFTPInteractionTests(unittest.TestCase):
             cls.key_server,
             cls.multi_key_server,
             cls.flaky_server,
+            cls.ipv6_server,
             cls.disconnect_on_stat_server,
             cls.mutable_server,
+            cls.symlink_server,
         ):
+            if server is None:
+                continue
             server.stop()
         shutil.rmtree(cls.tempdir, ignore_errors=True)
 
@@ -211,9 +265,13 @@ class SFTPInteractionTests(unittest.TestCase):
             self.key_server,
             self.multi_key_server,
             self.flaky_server,
+            self.ipv6_server,
             self.disconnect_on_stat_server,
             self.mutable_server,
+            self.symlink_server,
         ):
+            if server is None:
+                continue
             server.telemetry.reset()
 
     def run_sql(self, sql: str) -> DuckDBResult:
@@ -702,6 +760,132 @@ class SFTPInteractionTests(unittest.TestCase):
         )
         self.assertGreater(read_calls, 0)
 
+    def test_single_query_reuses_sftp_connection_across_glob_listing_and_reads(self) -> None:
+        pattern = f"sftp://127.0.0.1:{self.password_server.port}/glob/glob_same_*.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET query_local_glob_reuse (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('{pattern}')) AS tree_cnt,
+                (SELECT COUNT(*) FROM h5_ls('{pattern}', '/')) AS ls_cnt,
+                (SELECT COUNT(*) FROM h5_read('{pattern}', '/values')) AS read_cnt;
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("12,8,5", result.stdout, msg=result.output)
+        connections, read_calls = self.password_server.telemetry.snapshot()
+        self.assertEqual(
+            len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
+        )
+        self.assertGreater(read_calls, 0)
+
+    def test_sftp_glob_crawl_handles_missing_readdir_permissions(self) -> None:
+        self.password_server.config.list_folder_omit_permissions = True
+        try:
+            pattern = f"sftp://127.0.0.1:{self.password_server.port}/glob/**/glob_same_*.h5"
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET readdir_permissions_fallback (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_read('{pattern}', '/values');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertEqual(result.stdout.strip().splitlines()[-1], "6", msg=result.output)
+        finally:
+            self.password_server.config.list_folder_omit_permissions = False
+
+    def test_sftp_glob_literal_directory_component_handles_missing_stat_permissions(self) -> None:
+        self.password_server.config.stat_omit_permissions = True
+        try:
+            pattern = f"sftp://127.0.0.1:{self.password_server.port}/glob/nested/glob_same_*.h5"
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET stat_permissions_fallback (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_read('{pattern}', '/values');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertEqual(result.stdout.strip().splitlines()[-1], "1", msg=result.output)
+        finally:
+            self.password_server.config.stat_omit_permissions = False
+
+    def test_sftp_ipv6_exact_path_and_remote_glob_route_through_sftp_backend(self) -> None:
+        if self.ipv6_server is None:
+            self.skipTest("IPv6 SFTP test fixture not available on this platform")
+
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET ipv6_sftp (
+                TYPE sftp,
+                SCOPE 'sftp://[::1]:{self.ipv6_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.ipv6_known_hosts}',
+                PORT {self.ipv6_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_tree('sftp://[::1]:{self.ipv6_server.port}/simple.h5')),
+                (SELECT COUNT(*) FROM h5_read('sftp://[::1]:{self.ipv6_server.port}/glob/glob_same_*.h5', '/values'));
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "10,5", msg=result.output)
+
+    def test_sftp_glob_matches_duckdb_symlink_semantics(self) -> None:
+        if self.symlink_server is None:
+            self.skipTest("symlink test fixture not available on this platform")
+
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET sftp_symlink_glob (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.symlink_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.symlink_known_hosts}',
+                PORT {self.symlink_server.port}
+            );
+            SELECT
+                (SELECT COUNT(*) FROM h5_read('sftp://127.0.0.1:{self.symlink_server.port}/*.h5', '/values')),
+                (SELECT COUNT(*) FROM h5_read('sftp://127.0.0.1:{self.symlink_server.port}/*/nested.h5', '/values')),
+                (SELECT COUNT(*) FROM h5_read('sftp://127.0.0.1:{self.symlink_server.port}/**/nested.h5', '/values')),
+                (SELECT COUNT(*) FROM h5_read('sftp://127.0.0.1:{self.symlink_server.port}/**/*.h5', '/values'));
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "5,6,3,8", msg=result.output)
+
     def test_single_query_reuses_public_key_sftp_connection(self) -> None:
         url = f"sftp://127.0.0.1:{self.key_server.port}/simple.h5"
         sql = textwrap.dedent(
@@ -843,6 +1027,54 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertEqual(handle_open_calls, handle_close_calls)
         self.assertEqual(current_open_handles, 0)
         self.assertGreater(max_open_handles, 0)
+
+    def test_single_h5_read_list_can_span_two_sftp_remotes(self) -> None:
+        password_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        key_url = f"sftp://127.0.0.1:{self.key_server.port}/simple.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET password_remote_list_read (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            CREATE OR REPLACE TEMPORARY SECRET key_remote_list_read (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.key_server.port}/',
+                USERNAME 'h5db',
+                KEY_PATH '{self.client_key_path}',
+                KNOWN_HOSTS_PATH '{self.key_known_hosts}',
+                PORT {self.key_server.port}
+            );
+            SELECT COUNT(*), SUM(integers)
+            FROM h5_read(['{password_url}', '{key_url}'], '/integers');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertIn("20,90", result.stdout, msg=result.output)
+
+        password_connections, password_read_calls = self.password_server.telemetry.snapshot()
+        self.assertEqual(
+            len(password_connections),
+            1,
+            msg=str([(record.auth_method, record.read_calls) for record in password_connections]),
+        )
+        self.assertEqual(password_connections[0].auth_method, "password", msg=str(password_connections[0]))
+        self.assertGreater(password_read_calls, 0)
+
+        key_connections, key_read_calls = self.key_server.telemetry.snapshot()
+        self.assertEqual(
+            len(key_connections),
+            1,
+            msg=str([(record.auth_method, record.read_calls) for record in key_connections]),
+        )
+        self.assertEqual(key_connections[0].auth_method, "publickey", msg=str(key_connections[0]))
+        self.assertGreater(key_read_calls, 0)
 
     def test_repeated_large_scan_still_reads_uncached_suffix(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/large/large_simple.h5"

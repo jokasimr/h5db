@@ -1,0 +1,63 @@
+# name: test/sql/glob/h5_tree_glob.test
+# description: h5_tree glob coverage for projected attributes and scanner reset
+# group: [sql]
+
+require h5db
+
+query IIIIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE path = '/dataset_with_attrs' AND string_attr = 'Hello HDF5!'),
+    COUNT(*) FILTER (WHERE path = '/group_with_attrs' AND group_int_attr = 999),
+    COUNT(*) FILTER (WHERE path = '/' AND missing_attr = 'fallback'),
+    COUNT(*) FILTER (WHERE path = '/dataset_with_attrs' AND missing_attr = 'fallback'),
+    COUNT(*) FILTER (WHERE path = '/group_with_attrs' AND string_attr IS NULL)
+FROM h5_tree(
+    'test/data/glob/glob_with_attrs_*.h5',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('missing_attr', 'fallback'::VARCHAR)
+);
+----
+6	2	2	2	2	2
+
+query I
+SELECT COUNT(*)
+FROM (FROM h5_tree('test/data/glob/glob_with_attrs_*.h5') LIMIT 1);
+----
+1
+
+query II
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE path = '/')
+FROM h5_tree('test/data/glob/glob_with_attrs_*.h5');
+----
+6	2
+
+statement error
+SELECT *
+FROM h5_tree(
+    'test/data/glob/glob_attrs_edge_*.h5',
+    h5_attr('attr_2d', [0, 0, 0]::INTEGER[])
+);
+----
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+
+query II
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE path = '/multidim_attr_dataset')
+FROM h5_tree('test/data/glob/glob_attrs_edge_*.h5');
+----
+32	2
+
+query I
+SELECT COUNT(*)
+FROM h5_tree(
+    'test/data/glob/glob_attrs_edge_*.h5',
+    h5_alias('valid_blob', h5_attr('vlen_str_attr', NULL::VARCHAR))
+)
+WHERE path = '/string_attrs' AND valid_blob = 'variable';
+----
+2

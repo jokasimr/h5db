@@ -4,6 +4,8 @@
 
 namespace duckdb {
 
+struct H5ExpandedFileList;
+
 enum class H5RemoteBackendType : uint8_t { DUCKDB_FS, SFTP };
 
 struct H5RemoteBackendDescriptor {
@@ -22,5 +24,6 @@ public:
 bool IsH5RemotePath(const std::string &path);
 H5RemoteBackendDescriptor DescribeH5RemotePath(const std::string &path);
 unique_ptr<H5RemoteBackend> OpenH5RemoteBackend(ClientContext &context, const std::string &path);
+H5ExpandedFileList ExpandH5SftpFilePattern(ClientContext &context, const std::string &path_pattern);
 
 } // namespace duckdb

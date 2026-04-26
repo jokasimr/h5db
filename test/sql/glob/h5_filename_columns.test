@@ -1,0 +1,336 @@
+# name: test/sql/glob/h5_filename_columns.test
+# description: hidden and visible filename columns for h5_tree, h5_ls, and h5_read
+# group: [sql]
+
+require h5db
+
+query TTTTTT
+DESCRIBE FROM h5_tree('test/data/glob_order/order_1.h5');
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_tree('test/data/glob_order/order_1.h5', filename=true);
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+filename	VARCHAR	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_tree('test/data/glob_order/order_1.h5', filename='source');
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+source	VARCHAR	YES	NULL	NULL	NULL
+
+query IIII
+FROM h5_tree('test/data/glob_order/order_1.h5') LIMIT 1;
+----
+/	group	NULL	NULL
+
+query IIIII
+FROM h5_tree('test/data/glob_order/order_1.h5', filename=true) LIMIT 1;
+----
+/	group	NULL	NULL	test/data/glob_order/order_1.h5
+
+query IIIII
+FROM h5_tree('test/data/glob_order/order_1.h5', filename='source') LIMIT 1;
+----
+/	group	NULL	NULL	test/data/glob_order/order_1.h5
+
+query II
+SELECT filename, path
+FROM h5_tree('test/data/glob_order/order_*.h5')
+WHERE path LIKE '/marker_%'
+ORDER BY filename, path;
+----
+test/data/glob_order/order_1.h5	/marker_1
+test/data/glob_order/order_10.h5	/marker_10
+test/data/glob_order/order_2.h5	/marker_2
+
+query II
+SELECT source, path
+FROM h5_tree('test/data/glob_order/order_*.h5', filename='source')
+WHERE path LIKE '/marker_%'
+ORDER BY source, path;
+----
+test/data/glob_order/order_1.h5	/marker_1
+test/data/glob_order/order_10.h5	/marker_10
+test/data/glob_order/order_2.h5	/marker_2
+
+statement error
+SELECT filename
+FROM h5_tree('test/data/glob_order/order_1.h5', filename='source');
+----
+<REGEX>:.*filename.*not found.*
+
+statement error
+FROM h5_tree('test/data/glob_order/order_1.h5', filename=NULL);
+----
+Invalid Input Error: Cannot use NULL as argument for "filename"
+
+query I
+SELECT filename
+FROM h5_tree([
+    'test/data/glob_order/order_1.h5',
+    'test/data/glob_order/order_1.h5'
+])
+WHERE path = '/marker_1'
+ORDER BY ALL;
+----
+test/data/glob_order/order_1.h5
+test/data/glob_order/order_1.h5
+
+statement error
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('filename', h5_attr('string_attr')),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_tree output
+
+statement error
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('source', h5_attr('string_attr')),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_tree output
+
+query TTTTTT
+DESCRIBE FROM h5_ls('test/data/glob_order/order_1.h5', '/');
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=true);
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+filename	VARCHAR	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source');
+----
+path	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+dtype	VARCHAR	YES	NULL	NULL	NULL
+shape	UBIGINT[]	YES	NULL	NULL	NULL
+source	VARCHAR	YES	NULL	NULL	NULL
+
+query IIII
+FROM h5_ls('test/data/glob_order/order_1.h5', '/') LIMIT 1;
+----
+/marker_1	dataset	int32	[1]
+
+query IIIII
+FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=true) LIMIT 1;
+----
+/marker_1	dataset	int32	[1]	test/data/glob_order/order_1.h5
+
+query IIIII
+FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source') LIMIT 1;
+----
+/marker_1	dataset	int32	[1]	test/data/glob_order/order_1.h5
+
+query II
+SELECT filename, path
+FROM h5_ls('test/data/glob_order/order_*.h5', '/')
+WHERE path LIKE '/marker_%'
+ORDER BY filename, path;
+----
+test/data/glob_order/order_1.h5	/marker_1
+test/data/glob_order/order_10.h5	/marker_10
+test/data/glob_order/order_2.h5	/marker_2
+
+query II
+SELECT source, path
+FROM h5_ls('test/data/glob_order/order_*.h5', '/', filename='source')
+WHERE path LIKE '/marker_%'
+ORDER BY source, path;
+----
+test/data/glob_order/order_1.h5	/marker_1
+test/data/glob_order/order_10.h5	/marker_10
+test/data/glob_order/order_2.h5	/marker_2
+
+statement error
+SELECT filename
+FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename='source');
+----
+<REGEX>:.*filename.*not found.*
+
+statement error
+FROM h5_ls('test/data/glob_order/order_1.h5', '/', filename=NULL);
+----
+Invalid Input Error: Cannot use NULL as argument for "filename"
+
+query I
+SELECT filename
+FROM h5_ls([
+    'test/data/glob_order/order_1.h5',
+    'test/data/glob_order/order_1.h5'
+], '/')
+WHERE path = '/marker_1'
+ORDER BY ALL;
+----
+test/data/glob_order/order_1.h5
+test/data/glob_order/order_1.h5
+
+statement error
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('filename', h5_attr('string_attr')),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_ls output
+
+statement error
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('source', h5_attr('string_attr')),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_ls output
+
+query TTTTTT
+DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values');
+----
+values	INTEGER	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=true);
+----
+values	INTEGER	YES	NULL	NULL	NULL
+filename	VARCHAR	YES	NULL	NULL	NULL
+
+query TTTTTT
+DESCRIBE FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
+----
+values	INTEGER	YES	NULL	NULL	NULL
+source	VARCHAR	YES	NULL	NULL	NULL
+
+query I
+FROM h5_read('test/data/glob_order/order_1.h5', '/values');
+----
+1
+
+query II
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=true);
+----
+1	test/data/glob_order/order_1.h5
+
+query II
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
+----
+1	test/data/glob_order/order_1.h5
+
+query I
+SELECT filename
+FROM h5_read('test/data/glob_order/order_1.h5', '/values');
+----
+test/data/glob_order/order_1.h5
+
+query I
+SELECT source
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
+----
+test/data/glob_order/order_1.h5
+
+statement error
+SELECT filename
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename='source');
+----
+<REGEX>:.*filename.*not found.*
+
+statement error
+FROM h5_read('test/data/glob_order/order_1.h5', '/values', filename=NULL);
+----
+Invalid Input Error: Cannot use NULL as argument for "filename"
+
+query I
+SELECT filename
+FROM h5_read([
+    'test/data/glob_order/order_1.h5',
+    'test/data/glob_order/order_1.h5'
+], '/values')
+ORDER BY ALL;
+----
+test/data/glob_order/order_1.h5
+test/data/glob_order/order_1.h5
+
+query III
+SELECT filename, idx, values
+FROM h5_read(
+    'test/data/glob_order/order_*.h5',
+    h5_alias('idx', h5_index()),
+    '/values'
+)
+ORDER BY filename, idx;
+----
+test/data/glob_order/order_1.h5	0	1
+test/data/glob_order/order_10.h5	0	10
+test/data/glob_order/order_2.h5	0	2
+
+query III
+SELECT values, filename, idx
+FROM h5_read(
+    'test/data/glob_order/order_*.h5',
+    '/values',
+    h5_alias('idx', h5_index())
+)
+WHERE idx = 0
+ORDER BY filename;
+----
+1	test/data/glob_order/order_1.h5	0
+10	test/data/glob_order/order_10.h5	0
+2	test/data/glob_order/order_2.h5	0
+
+query III
+SELECT source, idx, values
+FROM h5_read(
+    'test/data/glob_order/order_*.h5',
+    h5_alias('idx', h5_index()),
+    '/values',
+    filename='source'
+)
+ORDER BY source, idx;
+----
+test/data/glob_order/order_1.h5	0	1
+test/data/glob_order/order_10.h5	0	10
+test/data/glob_order/order_2.h5	0	2
+
+statement error
+FROM h5_read(
+    'test/data/glob_order/order_1.h5',
+    h5_alias('filename', '/values'),
+    filename=true
+);
+----
+Binder Error: Option filename adds column "filename", but that column name is already present in h5_read output
+
+statement error
+FROM h5_read(
+    'test/data/glob_order/order_1.h5',
+    h5_alias('source', '/values'),
+    filename='source'
+);
+----
+Binder Error: Option filename adds column "source", but that column name is already present in h5_read output

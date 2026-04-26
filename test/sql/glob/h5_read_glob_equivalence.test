@@ -1,0 +1,218 @@
+# name: test/sql/glob/h5_read_glob_equivalence.test
+# description: equivalence checks between globbed and explicit h5_read queries
+# group: [sql]
+
+require h5db
+
+query II
+WITH globbed AS (
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/equiv_*.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE value >= 4
+      AND more_value < 19
+      AND (status_code >= 7 OR tag_name LIKE 'u%' OR scale_value = 5)
+),
+regular AS (
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/equiv_1.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE value >= 4
+      AND more_value < 19
+      AND (status_code >= 7 OR tag_name LIKE 'u%' OR scale_value = 5)
+    UNION ALL
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/equiv_2.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE value >= 4
+      AND more_value < 19
+      AND (status_code >= 7 OR tag_name LIKE 'u%' OR scale_value = 5)
+),
+diff AS (
+    SELECT * FROM (
+        SELECT * FROM globbed
+        EXCEPT ALL
+        SELECT * FROM regular
+    ) lhs
+    UNION ALL
+    SELECT * FROM (
+        SELECT * FROM regular
+        EXCEPT ALL
+        SELECT * FROM globbed
+    ) rhs
+)
+SELECT
+    (SELECT COUNT(*) FROM diff),
+    (SELECT COUNT(*) FROM globbed);
+----
+0	4
+
+query II
+WITH globbed AS (
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/**/equiv_*.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE more_value <= 18
+      AND (status_code >= 8 OR scale_value = 5 OR tag_name = 'zz')
+),
+regular AS (
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/equiv_1.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE more_value <= 18
+      AND (status_code >= 8 OR scale_value = 5 OR tag_name = 'zz')
+    UNION ALL
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/equiv_2.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE more_value <= 18
+      AND (status_code >= 8 OR scale_value = 5 OR tag_name = 'zz')
+    UNION ALL
+    SELECT idx, value, more_value, scale_value, status_code, tag_name
+    FROM h5_read(
+        'test/data/glob/equiv/nested/equiv_3.h5',
+        h5_alias('idx', h5_index()),
+        h5_alias('value', '/values'),
+        h5_alias('more_value', '/more'),
+        h5_alias('scale_value', '/scale'),
+        h5_alias('status_code', h5_rse('/status_run_starts', '/status_values')),
+        h5_alias('tag_name', '/tag')
+    )
+    WHERE more_value <= 18
+      AND (status_code >= 8 OR scale_value = 5 OR tag_name = 'zz')
+),
+diff AS (
+    SELECT * FROM (
+        SELECT * FROM globbed
+        EXCEPT ALL
+        SELECT * FROM regular
+    ) lhs
+    UNION ALL
+    SELECT * FROM (
+        SELECT * FROM regular
+        EXCEPT ALL
+        SELECT * FROM globbed
+    ) rhs
+)
+SELECT
+    (SELECT COUNT(*) FROM diff),
+    (SELECT COUNT(*) FROM globbed);
+----
+0	7
+
+query II
+WITH globbed AS (
+    SELECT names, tag
+    FROM h5_read('test/data/glob/glob_strings_*.h5', '/names', '/tag')
+),
+regular AS (
+    SELECT names, tag
+    FROM h5_read('test/data/glob/glob_strings_1_ascii.h5', '/names', '/tag')
+    UNION ALL
+    SELECT names, tag
+    FROM h5_read('test/data/glob/glob_strings_2_utf8.h5', '/names', '/tag')
+),
+diff AS (
+    SELECT * FROM (
+        SELECT * FROM globbed
+        EXCEPT ALL
+        SELECT * FROM regular
+    ) lhs
+    UNION ALL
+    SELECT * FROM (
+        SELECT * FROM regular
+        EXCEPT ALL
+        SELECT * FROM globbed
+    ) rhs
+)
+SELECT
+    (SELECT COUNT(*) FROM diff),
+    (SELECT COUNT(*) FROM globbed);
+----
+0	2
+
+query II
+WITH globbed AS (
+    SELECT values
+    FROM h5_read('test/data/glob_many_small/part_*.h5', '/values')
+    WHERE values % 10 = 0 OR values IN (1, 2999)
+),
+regular AS (
+    SELECT values
+    FROM h5_read('test/data/glob_many_small/combined.h5', '/values')
+    WHERE values % 10 = 0 OR values IN (1, 2999)
+),
+diff AS (
+    SELECT * FROM (
+        SELECT * FROM globbed
+        EXCEPT ALL
+        SELECT * FROM regular
+    ) lhs
+    UNION ALL
+    SELECT * FROM (
+        SELECT * FROM regular
+        EXCEPT ALL
+        SELECT * FROM globbed
+    ) rhs
+)
+SELECT
+    (SELECT COUNT(*) FROM diff),
+    (SELECT COUNT(*) FROM globbed);
+----
+0	302
+
+query IIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE idx = 0),
+    MAX(idx),
+    SUM(values)
+FROM h5_read(
+    'test/data/glob_many_small/part_*.h5',
+    h5_alias('idx', h5_index()),
+    '/values'
+);
+----
+3000	1000	2	4498500

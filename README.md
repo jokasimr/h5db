@@ -12,6 +12,8 @@ stack or SFTP.
 - Scalar datasets are treated as constant columns.
 - Supports projection pushdown in `h5_read(...)`.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
+- Table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` accept single files, local/SFTP glob patterns, or
+  `LIST(VARCHAR)` filename inputs.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
@@ -19,13 +21,13 @@ stack or SFTP.
 
 ## Core Functions
 
-- `h5_read(filename, datasets_or_definitions...)`
+- `h5_read(filename_or_filenames, datasets_or_definitions...)`
   Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
   "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`).
-- `h5_tree(filename, projected_attributes...)`
+- `h5_tree(filename_or_filenames, projected_attributes...)`
   Recursively lists namespace entries with `path`, `type`, `dtype`, and `shape`. Output is path-oriented: if multiple
   paths resolve to the same object, each path appears as its own row.
-- `h5_ls(filename[, group_path], projected_attributes...)`
+- `h5_ls(filename_or_filenames[, group_path], projected_attributes...)`
   Lists only the immediate children of a group. The table form returns the same row shape as `h5_tree`; the scalar
   form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
 - `h5_attributes(filename, object_path)`
@@ -57,6 +59,15 @@ FROM h5_read('data.h5', h5_index(), '/measurements');
 
 -- Read a remote file
 FROM h5_read('https://example.com/data.h5', '/dataset_name');
+
+-- Read matching local files
+FROM h5_read('runs/run_*.h5', '/counts');
+
+-- Expand an explicit list of exact files and/or patterns in order
+FROM h5_tree([
+    'runs/calibration.h5',
+    'runs/run_*.h5'
+]);
 
 -- Inspect the file structure
 FROM h5_tree('data.h5');
@@ -111,7 +122,40 @@ FROM h5_tree(
 
 ## Remote Access
 
-All h5db functions accept local paths or remote URLs as `filename`.
+All h5db functions accept single local paths or remote URLs as `filename`.
+
+The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` also accept:
+
+- a local or `sftp://` glob pattern
+- a `LIST(VARCHAR)` of exact filenames/URLs and/or glob patterns
+
+Multi-file semantics:
+
+- a single glob expands to lexicographically sorted matches
+- list entries are expanded left-to-right
+- duplicate files are preserved and are processed more than once
+- `h5_read(...)` concatenates rows file by file
+- `h5_index()` is the outermost-dimension row index within each matched file, so it starts at `0` for each file
+- table `h5_tree(...)`, table `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual `filename` column; refer to
+  it explicitly when you need file provenance
+- `filename := true` adds `filename` to the visible output schema, so it appears in `FROM ...` / `SELECT *`
+- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
+  and replaces the hidden `filename` binding with that visible name
+- `h5_read(...)` requires compatible column definitions across all matched files
+- `h5_attributes(...)` and the scalar `h5_ls(...)` still operate on one file at a time
+
+Globs support the usual `*`, `?`, and bracket classes, plus one recursive `**`
+segment per pattern. A pattern that matches no files raises an error.
+
+When several files contain the same HDF5 path, use `filename` to distinguish them:
+
+```sql
+SELECT filename, path
+FROM h5_tree('runs/**/*.h5')
+WHERE path = '/entry/data';
+
+FROM h5_read('runs/run_*.h5', '/entry/data', filename := true);
+```
 
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
   `gs://`, and `hf://` use DuckDB's filesystem stack and benefit from DuckDB's remote caching features.
@@ -132,6 +176,11 @@ CREATE OR REPLACE SECRET beamline_sftp (
 
 FROM h5_read(
     'sftp://beamline.example.org/data/run001.h5',
+    '/entry/data'
+);
+
+FROM h5_read(
+    'sftp://beamline.example.org/data/run_*.h5',
     '/entry/data'
 );
 ```

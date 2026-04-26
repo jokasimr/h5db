@@ -14,7 +14,12 @@ true
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR);
 ----
-Invalid Input Error: h5_tree filename must not be NULL
+Parser Error: h5_tree cannot take NULL list as parameter
+
+statement error
+SELECT * FROM h5_read(NULL::VARCHAR, '/values');
+----
+Parser Error: h5_read cannot take NULL list as parameter
 
 statement error
 SELECT * FROM h5_read('test/data/simple.h5', NULL::VARCHAR);

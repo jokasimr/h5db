@@ -1,7 +1,9 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "h5_tree_shared.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -9,6 +11,7 @@
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #else
 #include "duckdb/common/types/vector.hpp"
 #endif
@@ -19,15 +22,38 @@
 namespace duckdb {
 
 struct H5LsBindData : public TableFunctionData {
-	std::string filename;
+	vector<string> filenames;
 	std::string group_path;
 	vector<H5TreeProjectedAttributeSpec> projected_attributes;
 	bool swmr = false;
+	std::optional<idx_t> visible_filename_idx;
+	bool had_glob = false;
+
+	bool SupportStatementCache() const override {
+		return !had_glob;
+	}
+};
+
+struct H5LsOutputColumn {
+	idx_t output_idx;
+	column_t column_id;
+};
+
+struct H5LsScanLayout {
+	vector<H5LsOutputColumn> projected_columns;
+	vector<idx_t> filename_output_idxs;
+	std::optional<idx_t> shape_output_idx;
 };
 
 struct H5LsGlobalState : public GlobalTableFunctionState {
 	std::vector<H5TreeNamedRow> rows;
 	idx_t offset = 0;
+	idx_t file_idx = 0;
+	H5LsScanLayout output_layout;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
 };
 
 struct H5LsScalarBindData : public FunctionData {
@@ -64,6 +90,53 @@ struct H5LsScalarBindData : public FunctionData {
 		return true;
 	}
 };
+
+static bool H5LsOutputHasColumnName(const vector<string> &names, const string &column_name) {
+	return std::any_of(names.begin(), names.end(),
+	                   [&](const string &name) { return StringUtil::CIEquals(name, column_name); });
+}
+
+static virtual_column_map_t H5GetFilenameVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
+	virtual_column_map_t result;
+	if (bind_data_p && bind_data_p->Cast<H5LsBindData>().visible_filename_idx.has_value()) {
+		return result;
+	}
+	result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
+	return result;
+}
+
+static bool H5LsIsFilenameColumn(const H5LsBindData &bind_data, column_t column_id) {
+	return column_id == MultiFileReader::COLUMN_IDENTIFIER_FILENAME ||
+	       (bind_data.visible_filename_idx.has_value() && column_id == *bind_data.visible_filename_idx);
+}
+
+static void H5LsPopulateFilenameColumns(const string &filename, const vector<idx_t> &filename_output_idxs,
+                                        DataChunk &output) {
+	if (output.size() == 0) {
+		return;
+	}
+	for (auto output_idx : filename_output_idxs) {
+		auto &vector = output.data[output_idx];
+		vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::GetData<string_t>(vector)[0] = StringVector::AddString(vector, filename);
+	}
+}
+
+static H5LsScanLayout H5LsBuildOutputLayout(const H5LsBindData &bind_data, const vector<column_t> &column_ids) {
+	H5LsScanLayout result;
+	for (idx_t output_idx = 0; output_idx < column_ids.size(); output_idx++) {
+		auto column_id = column_ids[output_idx];
+		if (H5LsIsFilenameColumn(bind_data, column_id)) {
+			result.filename_output_idxs.push_back(output_idx);
+			continue;
+		}
+		if (column_id == 3) {
+			result.shape_output_idx = output_idx;
+		}
+		result.projected_columns.push_back({output_idx, column_id});
+	}
+	return result;
+}
 
 static void H5LsGetReturnSchema(const vector<H5TreeProjectedAttributeSpec> &projected_attributes, vector<string> &names,
                                 vector<LogicalType> &return_types) {
@@ -134,12 +207,11 @@ static Value H5LsBuildMapValue(const std::vector<H5TreeNamedRow> &rows,
 
 static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
-	if (input.inputs.empty()) {
-		throw InvalidInputException("h5_ls requires at least 1 argument: filename");
-	}
 	auto result = make_uniq<H5LsBindData>();
-	result->filename = GetRequiredStringArgument(input.inputs[0], "h5_ls", "filename");
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
+	auto expanded = H5ExpandFilePatterns(context, input.inputs[0], "h5_ls");
+	result->filenames = std::move(expanded.filenames);
+	result->had_glob = expanded.had_glob;
 
 	idx_t projected_attr_start = 1;
 	if (input.inputs.size() >= 2 && input.inputs[1].IsNull()) {
@@ -155,15 +227,38 @@ static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBi
 	H5LsGetReturnSchema(result->projected_attributes, names, return_types);
 	H5TreeBindProjectedAttributes("h5_ls", input.inputs, projected_attr_start, names, return_types,
 	                              result->projected_attributes);
+	auto filename_option = ResolveFilenameColumnOption(input.named_parameters);
+	if (filename_option.include) {
+		if (H5LsOutputHasColumnName(names, filename_option.column_name)) {
+			throw BinderException("Option filename adds column \"%s\", but that column name is already present in "
+			                      "h5_ls output",
+			                      filename_option.column_name);
+		}
+		result->visible_filename_idx = names.size();
+		names.push_back(filename_option.column_name);
+		return_types.push_back(LogicalType::VARCHAR);
+	}
 	return std::move(result);
+}
+
+static void H5LsLoadFileRows(ClientContext &context, const H5LsBindData &bind_data, idx_t file_idx,
+                             H5LsGlobalState &state) {
+	ThrowIfInterrupted(context);
+	D_ASSERT(file_idx < bind_data.filenames.size());
+	state.file_idx = file_idx;
+	state.rows.clear();
+	state.offset = 0;
+	H5TreeFileReader reader(context, bind_data.filenames[file_idx], bind_data.swmr, bind_data.projected_attributes);
+	H5TreeListImmediateEntries(reader, bind_data.group_path, state.rows);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5LsInit(ClientContext &context, TableFunctionInitInput &input) {
 	ThrowIfInterrupted(context);
 	auto &bind_data = input.bind_data->Cast<H5LsBindData>();
 	auto result = make_uniq<H5LsGlobalState>();
-	H5TreeFileReader reader(context, bind_data.filename, bind_data.swmr, bind_data.projected_attributes);
-	H5TreeListImmediateEntries(reader, bind_data.group_path, result->rows);
+	result->output_layout = H5LsBuildOutputLayout(bind_data, input.column_ids);
+	D_ASSERT(!bind_data.filenames.empty());
+	H5LsLoadFileRows(context, bind_data, 0, *result);
 	return std::move(result);
 }
 
@@ -171,32 +266,45 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	ThrowIfInterrupted(context);
 	auto &bind_data = input.bind_data->Cast<H5LsBindData>();
 	auto &gstate = input.global_state->Cast<H5LsGlobalState>();
-	if (gstate.offset >= gstate.rows.size()) {
-		output.SetCardinality(0);
-		return;
+	while (gstate.offset >= gstate.rows.size()) {
+		auto next_file_idx = gstate.file_idx + 1;
+		if (next_file_idx >= bind_data.filenames.size()) {
+			output.SetCardinality(0);
+			return;
+		}
+		H5LsLoadFileRows(context, bind_data, next_file_idx, gstate);
 	}
 
 	auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.offset);
 	output.SetCardinality(count);
 
 	idx_t total_shape_elems = 0;
-	for (idx_t i = 0; i < count; i++) {
-		if (gstate.rows[gstate.offset + i].row.has_shape) {
-			total_shape_elems += gstate.rows[gstate.offset + i].row.shape.size();
-		}
-	}
-
-	auto &shape_vector = output.data[3];
-	ListVector::Reserve(shape_vector, total_shape_elems);
-	auto &child = ListVector::GetEntry(shape_vector);
-	auto *shape_data = FlatVector::GetData<uint64_t>(child);
 	idx_t shape_offset = 0;
+	uint64_t *shape_data = nullptr;
+	auto shape_output_idx = gstate.output_layout.shape_output_idx;
+	if (shape_output_idx.has_value()) {
+		for (idx_t i = 0; i < count; i++) {
+			if (gstate.rows[gstate.offset + i].row.has_shape) {
+				total_shape_elems += gstate.rows[gstate.offset + i].row.shape.size();
+			}
+		}
+		auto &shape_vector = output.data[*shape_output_idx];
+		ListVector::Reserve(shape_vector, total_shape_elems);
+		auto &child = ListVector::GetEntry(shape_vector);
+		shape_data = FlatVector::GetData<uint64_t>(child);
+	}
 
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-		H5TreeWriteRow(gstate.rows[gstate.offset + row_idx].row, bind_data.projected_attributes, output, row_idx,
-		               shape_offset, shape_data);
+		for (const auto &output_column : gstate.output_layout.projected_columns) {
+			H5TreeWriteProjectedValue(gstate.rows[gstate.offset + row_idx].row, bind_data.projected_attributes,
+			                          output_column.column_id, output.data[output_column.output_idx], row_idx,
+			                          shape_offset, shape_data);
+		}
 	}
-	ListVector::SetListSize(shape_vector, shape_offset);
+	if (shape_output_idx.has_value()) {
+		ListVector::SetListSize(output.data[*shape_output_idx], shape_offset);
+	}
+	H5LsPopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs, output);
 	gstate.offset += count;
 }
 
@@ -236,7 +344,7 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 			if (!H5TreeIsProjectedAttributeArgument(values[i])) {
 				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), "
 				                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named "
-				                            "parameters such as swmr := true are not supported");
+				                            "parameters are not supported");
 			}
 		}
 	}
@@ -292,10 +400,13 @@ static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 }
 
 void RegisterH5LsFunctions(ExtensionLoader &loader) {
-	TableFunction h5_ls_table("h5_ls", {LogicalType::VARCHAR}, H5LsScan, H5LsBind, H5LsInit);
-	h5_ls_table.varargs = LogicalType::ANY;
-	h5_ls_table.named_parameters["swmr"] = LogicalType::BOOLEAN;
-	loader.RegisterFunction(h5_ls_table);
+	TableFunction h5_ls_table_function("h5_ls", {LogicalType::VARCHAR}, H5LsScan, H5LsBind, H5LsInit);
+	h5_ls_table_function.varargs = LogicalType::ANY;
+	h5_ls_table_function.named_parameters["filename"] = LogicalType::ANY;
+	h5_ls_table_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
+	h5_ls_table_function.projection_pushdown = true;
+	h5_ls_table_function.get_virtual_columns = H5GetFilenameVirtualColumns;
+	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_ls_table_function)));
 
 	ScalarFunction h5_ls_scalar("h5_ls", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalTypeId::MAP,
 	                            H5LsScalarFunction, H5LsScalarBind);

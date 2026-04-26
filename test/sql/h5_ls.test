@@ -4,6 +4,11 @@
 
 require h5db
 
+statement error
+SELECT COUNT(*) FROM h5_ls(NULL::VARCHAR, '/');
+----
+Parser Error: h5_ls cannot take NULL list as parameter
+
 query II
 SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'dataset')
 FROM h5_ls('test/data/links.h5', '/');
@@ -736,12 +741,22 @@ Binder Error: table "h5_ls" has duplicate column name "path"
 statement error
 SELECT h5_ls('test/data/swmr_enabled.h5', '/', swmr := true);
 ----
-Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters are not supported
+
+statement error
+SELECT h5_ls('test/data/links.h5', '/', filename := true);
+----
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters are not supported
+
+statement error
+SELECT h5_ls('test/data/links.h5', '/', filename := 'source');
+----
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters are not supported
 
 statement error
 SELECT h5_ls('test/data/links.h5', '/', 42);
 ----
-Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters such as swmr := true are not supported
+Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named parameters are not supported
 
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', '/group/data');

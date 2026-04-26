@@ -112,6 +112,7 @@ REWRITE_ARGS=(
   --input-root "$PROJECT_ROOT/test/sql"
   --output-root "$TMP_SQL"
   --base-url "$BASE_URL"
+  --exclude-subdir glob
 )
 if [[ -n "$PREPEND_FILE" ]]; then
   REWRITE_ARGS+=(--prepend-file "$PREPEND_FILE")

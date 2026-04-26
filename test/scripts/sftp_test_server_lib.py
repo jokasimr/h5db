@@ -49,6 +49,8 @@ class SFTPServerConfig:
     username: str = "h5db"
     password: Optional[str] = "h5db"
     allowed_public_key_blobs: set[bytes] = field(default_factory=set)
+    list_folder_omit_permissions: bool = False
+    stat_omit_permissions: bool = False
     read_delay_ms: int = 0
     stat_delay_ms: int = 0
     disconnect_on_stat: bool = False
@@ -233,6 +235,8 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             for name in sorted(os.listdir(local_path)):
                 full_path = os.path.join(local_path, name)
                 attrs = paramiko.SFTPAttributes.from_stat(os.lstat(full_path), filename=name)
+                if self.config.list_folder_omit_permissions:
+                    attrs.st_mode = None
                 entries.append(attrs)
             return entries
         except OSError as ex:
@@ -245,7 +249,10 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             self.transport.close()
             return paramiko.SFTP_FAILURE
         try:
-            return paramiko.SFTPAttributes.from_stat(os.stat(self._resolve(path)))
+            attrs = paramiko.SFTPAttributes.from_stat(os.stat(self._resolve(path)))
+            if self.config.stat_omit_permissions:
+                attrs.st_mode = None
+            return attrs
         except OSError as ex:
             return self._convert_error(ex)
 
@@ -299,7 +306,8 @@ class SFTPTestServer:
             raise ValueError(f"Directory does not exist: {root_dir}")
         self.config.root_dir = root_dir
 
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        family = socket.AF_INET6 if ":" in self.host else socket.AF_INET
+        self.server_sock = socket.socket(family, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind((self.host, self.port))
         self.server_sock.listen(100)

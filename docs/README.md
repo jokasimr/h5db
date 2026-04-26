@@ -2,6 +2,7 @@
 
 User documentation:
 
+- [USAGE_GUIDE.md](USAGE_GUIDE.md): practical introduction to the main workflows
 - [API.md](API.md): function reference, settings, type mapping, and limitations
 - [RSE_USAGE.md](RSE_USAGE.md): detailed guide to run-start encoding support
 
@@ -15,3 +16,4 @@ Internal design notes:
 - [internals/PARTITION_OWNERSHIP_DESIGN.md](internals/PARTITION_OWNERSHIP_DESIGN.md)
 - [internals/REMOTE_METADATA_AND_INTERRUPTS.md](internals/REMOTE_METADATA_AND_INTERRUPTS.md)
 - [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md)
+- [internals/SFTP_SSH_AGENT_AUTH.md](internals/SFTP_SSH_AGENT_AUTH.md)

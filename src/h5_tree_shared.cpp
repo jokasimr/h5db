@@ -77,6 +77,11 @@ static void H5TreeWriteOptionalString(Vector &vector, idx_t row_idx, const std::
 	FlatVector::GetData<string_t>(vector)[row_idx] = StringVector::AddString(vector, *value);
 }
 
+static void H5TreeWriteString(Vector &vector, idx_t row_idx, const std::string &value) {
+	FlatVector::Validity(vector).SetValid(row_idx);
+	FlatVector::GetData<string_t>(vector)[row_idx] = StringVector::AddString(vector, value);
+}
+
 static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5TreeRow &row, idx_t &shape_offset,
                                 uint64_t *shape_data) {
 	auto entries = ListVector::GetData(shape_vector);
@@ -92,6 +97,39 @@ static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5Tre
 	entries[row_idx].length = row.shape.size();
 	for (auto dim : row.shape) {
 		shape_data[shape_offset++] = static_cast<uint64_t>(dim);
+	}
+}
+
+void H5TreeWriteProjectedValue(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
+                               column_t column_id, Vector &vector, idx_t row_idx, idx_t &shape_offset,
+                               uint64_t *shape_data) {
+	switch (column_id) {
+	case 0:
+		H5TreeWriteString(vector, row_idx, row.path);
+		break;
+	case 1:
+		H5TreeWriteOptionalString(vector, row_idx, row.type);
+		break;
+	case 2:
+		H5TreeWriteOptionalString(vector, row_idx, row.dtype);
+		break;
+	case 3:
+		D_ASSERT(shape_data);
+		H5TreeWriteShapeRow(vector, row_idx, row, shape_offset, shape_data);
+		break;
+	default: {
+		if (column_id < 4 || column_id >= 4 + projected_attributes.size()) {
+			throw InternalException("h5_tree projected column id %llu out of range", column_id);
+		}
+		auto attr_idx = column_id - 4;
+		const auto &projected = row.projected_values[attr_idx];
+		if (projected.present) {
+			vector.SetValue(row_idx, projected.value);
+		} else {
+			vector.SetValue(row_idx, projected_attributes[attr_idx].default_value);
+		}
+		break;
+	}
 	}
 }
 
@@ -280,23 +318,6 @@ std::optional<std::string> H5TreeTypeName(H5TreeEntryType type) {
 
 bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type) {
 	return type == H5TreeEntryType::GROUP || type == H5TreeEntryType::DATASET || type == H5TreeEntryType::DATATYPE;
-}
-
-void H5TreeWriteRow(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
-                    DataChunk &chunk, idx_t row_idx, idx_t &shape_offset, uint64_t *shape_data) {
-	FlatVector::GetData<string_t>(chunk.data[0])[row_idx] = StringVector::AddString(chunk.data[0], row.path);
-	H5TreeWriteOptionalString(chunk.data[1], row_idx, row.type);
-	H5TreeWriteOptionalString(chunk.data[2], row_idx, row.dtype);
-	H5TreeWriteShapeRow(chunk.data[3], row_idx, row, shape_offset, shape_data);
-	for (idx_t attr_idx = 0; attr_idx < projected_attributes.size(); attr_idx++) {
-		auto &vector = chunk.data[4 + attr_idx];
-		const auto &projected = row.projected_values[attr_idx];
-		if (projected.present) {
-			vector.SetValue(row_idx, projected.value);
-		} else {
-			vector.SetValue(row_idx, projected_attributes[attr_idx].default_value);
-		}
-	}
 }
 
 H5TreeFileReader::H5TreeFileReader(ClientContext &context_p, const std::string &filename_p, bool swmr,

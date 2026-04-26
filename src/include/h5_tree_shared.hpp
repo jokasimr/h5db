@@ -60,8 +60,9 @@ void H5TreeBindProjectedAttributes(const std::string &function_name, const vecto
                                    vector<H5TreeProjectedAttributeSpec> &projected_attributes);
 std::optional<std::string> H5TreeTypeName(H5TreeEntryType type);
 bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type);
-void H5TreeWriteRow(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
-                    DataChunk &chunk, idx_t row_idx, idx_t &shape_offset, uint64_t *shape_data);
+void H5TreeWriteProjectedValue(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
+                               column_t column_id, Vector &vector, idx_t row_idx, idx_t &shape_offset,
+                               uint64_t *shape_data);
 
 class H5TreeFileReader {
 public:

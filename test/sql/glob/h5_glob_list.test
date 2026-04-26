@@ -1,0 +1,55 @@
+# name: test/sql/glob/h5_glob_list.test
+# description: LIST(VARCHAR) filename argument coverage for h5_tree, h5_ls, and h5_read
+# group: [sql]
+
+require h5db
+
+query I
+SELECT path
+FROM h5_tree([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_*.h5'
+])
+WHERE path LIKE '/marker_%';
+----
+/marker_2
+/marker_1
+/marker_10
+/marker_2
+
+query I
+SELECT path
+FROM h5_ls([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_*.h5'
+], '/')
+WHERE path LIKE '/marker_%';
+----
+/marker_2
+/marker_1
+/marker_10
+/marker_2
+
+query II
+SELECT idx, values
+FROM h5_read(
+    [
+        'test/data/glob_order/order_2.h5',
+        'test/data/glob_order/order_*.h5'
+    ],
+    h5_alias('idx', h5_index()),
+    '/values'
+);
+----
+0	2
+0	1
+0	10
+0	2
+
+statement error
+SELECT COUNT(*) FROM h5_tree([
+    'test/data/glob_order/order_1.h5',
+    'test/data/glob/no_such_*.h5'
+]);
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*

@@ -8,13 +8,62 @@ The table-valued h5db functions accept `swmr := true` for local files. Remote ta
 parameter, but remote paths are opened through the DuckDB-backed remote VFD as immutable snapshots, so
 `H5F_ACC_SWMR_READ` is not used there.
 
-All h5db functions accept local paths or remote URLs as `filename`.
+All h5db functions accept single local paths or remote URLs as `filename`.
 
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
   `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
   when needed.
 - `sftp://` URLs are handled by h5db's built-in SFTP backend.
 - Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
+
+### Filename Patterns and Filename Lists
+
+The table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, and `h5_read(...)`
+accept:
+
+- a single filename or URL (`VARCHAR`)
+- a glob pattern (`VARCHAR`)
+- a list of exact filenames/URLs and/or glob patterns (`VARCHAR[]`)
+
+Globbing is supported for local paths and `sftp://` URLs.
+
+**Glob syntax:**
+- `*`
+- `?`
+- bracket classes such as `[12]` or `[a-z]`
+- one recursive `**` segment per pattern
+
+**Multi-file semantics:**
+- A single glob expands to lexicographically sorted matches.
+- A `VARCHAR[]` input expands entries left-to-right.
+- Duplicate files are preserved and are processed more than once.
+- A pattern that matches no files raises an error.
+- `h5_read(...)` concatenates rows file by file.
+- `h5_index()` is the outermost-dimension row index within each matched file.
+- Table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual
+  `filename` column that can be referenced explicitly.
+- `filename := true` adds `filename` to the visible output schema.
+- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
+  In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
+- All matched files in `h5_read(...)` must have compatible column definitions.
+- `h5_attributes(...)` and scalar `h5_ls(...)` operate on one file at a time and
+  do not accept filename lists or glob patterns.
+
+**Examples:**
+
+```sql
+SELECT * FROM h5_tree('runs/**/*.h5');
+
+SELECT * FROM h5_read(
+    ['runs/run_001.h5', 'runs/run_*.h5'],
+    '/counts'
+);
+
+SELECT * FROM h5_read(
+    'sftp://beamline.example.org/data/run_*.h5',
+    '/entry/data'
+);
+```
 
 ### SFTP Secrets
 
@@ -54,7 +103,7 @@ SELECT * FROM h5_read(
 
 ## Table Functions
 
-### `h5_tree(filename, projected_attributes...)`
+### `h5_tree(filename_or_filenames, projected_attributes...)`
 
 Recursively lists namespace entries in an HDF5 file. The result is path-oriented:
 each absolute namespace path is emitted as its own row, even when multiple paths
@@ -62,12 +111,16 @@ resolve to the same underlying object. Selected HDF5 attributes can be projected
 as additional columns with `h5_attr(...)`.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
   - `h5_attr()`
   - `h5_attr(name)`
   - `h5_attr(name, default_value)`
   - `h5_alias(alias_name, h5_attr(...))`
+- `filename` (BOOLEAN or VARCHAR, named, optional): Add a visible filename column. `true` uses the column name
+  `filename`; a string uses the provided column name instead. Without this option, hidden virtual `filename`
+  remains available by explicit reference.
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
 **Returns:** Table with columns:
@@ -88,6 +141,7 @@ as additional columns with `h5_attr(...)`.
   - `h5_attr(name)` produces column `name` with type `VARIANT`
   - `h5_attr(name, default_value)` produces column `name` with the type of `default_value`
   - `h5_alias(...)` overrides the default output name
+- hidden virtual column `filename` (VARCHAR), available by explicit reference
 
 **Traversal Semantics:**
 - `/` is returned as a `group` row.
@@ -110,6 +164,8 @@ as additional columns with `h5_attr(...)`.
 ```sql
 SELECT * FROM h5_tree('data.h5');
 SELECT * FROM h5_tree('data.h5', swmr := true);
+SELECT * FROM h5_tree('runs/run_*.h5');
+SELECT * FROM h5_tree(['runs/calibration.h5', 'runs/run_*.h5']);
 
 -- Project an attribute as an extra column
 SELECT path, type, NX_class
@@ -117,6 +173,11 @@ FROM h5_tree(
     'data.h5',
     h5_attr('NX_class', NULL::VARCHAR)
 );
+
+-- Distinguish identical paths across multiple files
+SELECT filename, path
+FROM h5_tree('runs/run_*.h5')
+WHERE path = '/entry/data';
 
 -- Project all attributes as one map-valued column
 SELECT path, h5_attr
@@ -135,7 +196,7 @@ FROM h5_tree(
 
 ---
 
-### `h5_ls(filename[, group_path], projected_attributes...)`
+### `h5_ls(filename_or_filenames[, group_path], projected_attributes...)`
 
 Lists the immediate children of a group. This is the shallow counterpart to
 `h5_tree()`. The scalar form is documented below.
@@ -151,16 +212,20 @@ returns the same row shape as `h5_tree()`, but only for the immediate children o
 the requested group.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
   - `h5_attr()`
   - `h5_attr(name)`
   - `h5_attr(name, default_value)`
   - `h5_alias(alias_name, h5_attr(...))`
+- `filename` (BOOLEAN or VARCHAR, named, optional): Add a visible filename column. `true` uses the column name
+  `filename`; a string uses the provided column name instead. Without this option, hidden virtual `filename`
+  remains available by explicit reference.
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
-**Returns:** Table with the same row shape as `h5_tree()`
+**Returns:** Table with the same row shape as `h5_tree()`, plus hidden virtual column `filename` (VARCHAR)
 
 **Semantics:**
 - the path must resolve to a group, otherwise the function errors
@@ -177,6 +242,9 @@ SELECT * FROM h5_ls('data.h5');
 -- List one specific group
 SELECT * FROM h5_ls('data.h5', '/entry/instrument');
 
+-- List the same group across multiple files
+SELECT * FROM h5_ls('runs/run_*.h5', '/entry/instrument');
+
 -- Project attributes on the immediate children
 SELECT path, NX_class
 FROM h5_ls(
@@ -188,19 +256,23 @@ FROM h5_ls(
 
 ---
 
-### `h5_read(filename, dataset_path, ...)`
+### `h5_read(filename_or_filenames, dataset_path, ...)`
 
 Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a local/SFTP glob
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
 - Additional dataset paths can be provided (variadic arguments)
+- `filename` (BOOLEAN or VARCHAR, named, optional): Add a visible filename column. `true` uses the column name
+  `filename`; a string uses the provided column name instead. Without this option, hidden virtual `filename`
+  remains available by explicit reference.
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
-**Returns:** Table with one column per dataset
+**Returns:** Table with one column per dataset, plus hidden virtual column `filename` (VARCHAR)
 
 **Column Naming:** Column names are extracted from the last component of the dataset path (e.g., `/group/data` → column `data`)
 
@@ -209,6 +281,13 @@ Reads data from one or more datasets in an HDF5 file.
 - If all selected datasets are scalar, `h5_read()` returns a single row.
 - If any non-scalar dataset is present, scalar columns are broadcast to the row count of the non-scalar datasets.
 - If multiple non-scalar regular datasets are selected, the output row count is the minimum outer dimension among them.
+
+**Multi-file Semantics:**
+- Rows are concatenated file by file.
+- `h5_index()` is the outermost-dimension row index within each matched file.
+- Duplicate filename matches are preserved.
+- `filename` identifies which file produced each row.
+- All matched files must have compatible column definitions.
 
 **Type Support:**
 - Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64
@@ -225,6 +304,20 @@ SELECT * FROM h5_read('data.h5', '/timestamps', '/temperatures', '/pressures');
 
 -- Read from nested groups
 SELECT * FROM h5_read('data.h5', '/experiment1/group_a/data');
+
+-- Read matching local or SFTP files
+SELECT * FROM h5_read('runs/run_*.h5', '/counts');
+SELECT * FROM h5_read('sftp://beamline.example.org/data/run_*.h5', '/entry/data');
+
+-- Expand a list of exact files and/or patterns in order
+SELECT * FROM h5_read(
+    ['runs/calibration.h5', 'runs/run_*.h5'],
+    '/counts'
+);
+
+-- Materialize filename into SELECT *
+SELECT *
+FROM h5_read('runs/run_*.h5', '/counts', filename := true);
 
 -- Mix regular and run-start encoded columns
 SELECT * FROM h5_read(
@@ -304,7 +397,7 @@ by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 **Semantics:**
 - `group_path` must resolve to a group or the function errors
 - `NULL` `group_path` yields `NULL`
-- named parameters such as `swmr := true` are not supported in the scalar form
+- named parameters such as `swmr := true` or `filename := true` are not supported in the scalar form
 - projected attributes use the same `h5_attr(...)` semantics as table `h5_ls()`
 
 **Examples:**
@@ -371,6 +464,10 @@ Adds a virtual index column for the outermost dimension when used with `h5_read(
 **Returns:** STRUCT tag used by `h5_read()`
 
 **Default column name:** `index`
+
+When `h5_read(...)` reads multiple files, `h5_index()` still means the
+outermost-dimension row index within the current file, so it starts at `0` for
+each matched file.
 
 **Example:**
 ```sql

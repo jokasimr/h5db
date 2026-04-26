@@ -1,10 +1,12 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "h5_raii.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
@@ -30,8 +32,8 @@
 #include <variant>
 #include <optional>
 #include <algorithm>
-#include <condition_variable>
 #include <cmath>
+#include <exception>
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -49,6 +51,9 @@ static T &GetStructChild(unique_ptr<T> &child) {
 }
 
 static constexpr idx_t H5_READ_LOGICAL_PARTITION_MULTIPLIER = 10;
+static constexpr idx_t H5_READ_LOGICAL_PARTITION_SIZE =
+    H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
+static constexpr idx_t H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
 
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
 	return FormatRemoteFileError(prefix, filename);
@@ -74,7 +79,8 @@ static string ValidateHDF5StringValue(string value, H5T_cset_t cset, const strin
 // Type-safe index wrappers for projection pushdown
 // =============================================================================
 // These prevent mixing global schema indices and local scan indices.
-// GlobalColumnIdx indexes bind_data.columns; LocalColumnIdx indexes dense scan arrays.
+// GlobalColumnIdx indexes the shared output schema (and therefore each file-local
+// bind view's columns vector); LocalColumnIdx indexes dense scan arrays.
 
 struct LocalColumnIdx {
 	idx_t index; // Index into column_states [0, 1, 2, ...]
@@ -86,7 +92,7 @@ struct LocalColumnIdx {
 };
 
 struct GlobalColumnIdx {
-	idx_t index; // Index into bind_data.columns
+	idx_t index; // Index into the shared output schema / file-local bind view columns
 	explicit GlobalColumnIdx(idx_t i) : index(i) {
 	}
 	operator idx_t() const {
@@ -101,8 +107,8 @@ struct RegularColumnSpec {
 	std::string path;
 	std::string column_name;
 	LogicalType column_type;
-	H5TypeHandle h5_type_id; // RAII wrapper - automatically closes on destruction
 	bool is_string;
+	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
 	int ndims;
 	std::vector<hsize_t> dims;
 	size_t element_size;     // Bytes per row (1D: size of element, ND: product of inner dims)
@@ -114,8 +120,8 @@ struct ScalarColumnSpec {
 	std::string path;
 	std::string column_name;
 	LogicalType column_type;
-	H5TypeHandle h5_type_id; // RAII wrapper - automatically closes on destruction
 	bool is_string;
+	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
 };
 
 // Run-Start Encoded column specification
@@ -124,8 +130,7 @@ struct RSEColumnSpec {
 	std::string values_path;
 	std::string column_name;
 	LogicalType column_type;
-	H5TypeHandle run_starts_h5_type; // HDF5 type for run_starts (determined in Bind)
-	H5TypeHandle values_h5_type;     // HDF5 type for values (determined in Bind)
+	std::optional<H5TypeHandle> values_string_h5_type; // Present only for string values datasets
 };
 
 // Virtual index column specification
@@ -205,40 +210,61 @@ struct RowRange {
 
 // Filter claimed during pushdown complex filter callback
 struct ClaimedFilter {
-	idx_t column_index;        // Which column (index into bind_data.columns)
+	idx_t column_index;        // Which column (index into the shared output schema)
 	ExpressionType comparison; // Comparison type (>, <, =, >=, <=)
 	Value constant;            // The constant value to compare against
 	LogicalType comparison_type;
 };
 
-// Data for h5_read table function
-struct H5ReadBindData : public TableFunctionData {
+// Single-file bind data for the inner h5_read implementation.
+struct H5ReadSingleFileBindData {
 	std::string filename;
-	vector<ColumnSpec> columns;            // Unified column specifications
-	hsize_t num_rows;                      // Row count from regular datasets
-	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
+	vector<ColumnSpec> columns; // Unified column specifications
+	hsize_t num_rows;           // Row count from regular datasets
 	bool swmr = false;
 };
 
-struct H5ReadGlobalState : public GlobalTableFunctionState {
+struct H5ReadSingleFileBindView {
+	const string &filename;
+	const vector<ColumnSpec> &columns;
+	hsize_t num_rows;
+	const vector<ClaimedFilter> &claimed_filters;
+	bool swmr = false;
+};
+
+// Data for h5_read table function.
+struct H5ReadBindData : public TableFunctionData {
+	vector<H5ReadSingleFileBindData> file_bind_data;
+	hsize_t total_num_rows = 0;            // Total row count across all matched files
+	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
+	std::optional<idx_t> visible_filename_idx;
+	bool had_glob = false;
+
+	bool SupportStatementCache() const override {
+		return !had_glob;
+	}
+};
+
+// File-local runtime state for the existing single-file h5_read scan path.
+// This no longer participates directly in DuckDB's table-function API.
+struct H5ReadGlobalState {
 	H5FileHandle file;                 // RAII wrapper for file handle
 	vector<ColumnState> column_states; // DENSE array: indexed by LOCAL position [0, 1, 2, ...]
 
 	// Projection pushdown support
-	vector<column_t> columns_to_scan;            // Global column indices (into bind_data.columns)
+	vector<column_t> columns_to_scan;            // Global column indices into the shared output schema
+	vector<idx_t> output_column_positions;       // Output chunk positions for scanned columns
 	unordered_map<idx_t, idx_t> global_to_local; // Maps global column idx -> local column_states idx
 	vector<LocalColumnIdx> cache_refresh_order;  // Refreshable regular columns in file-friendly order
 
 	// Position tracking
 	// position is the next globally unclaimed logical partition start.
-	std::atomic<idx_t> position;
-	std::atomic<idx_t> position_done; // All rows in [0, position_done) have been returned or filtered out
+	std::atomic<idx_t> position {0};
+	std::atomic<idx_t> position_done {0}; // All rows in [0, position_done) have been returned or filtered out
 
 	// Row range filtering (for predicate pushdown on RSE or index columns)
 	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
 	idx_t scan_batch_size = STANDARD_VECTOR_SIZE;
-	idx_t logical_partition_size = H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
-	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
 
 	// Mutex for thread-safe range selection (enables parallel scanning)
 	std::mutex range_selection_mutex;
@@ -255,20 +281,35 @@ struct H5ReadGlobalState : public GlobalTableFunctionState {
 	std::mutex fetch_mutex;
 	std::condition_variable fetch_cv;
 
-	H5ReadGlobalState() : position(0), position_done(0) {
-	}
-
-	// Override MaxThreads to enable parallel scanning
-	idx_t MaxThreads() const override {
-		return max_threads;
-	}
-
 	// No destructor needed - RAII wrappers handle all cleanup automatically
 };
 
-struct H5ReadLocalState : public LocalTableFunctionState {
+struct H5ReadLocalState {
 	idx_t position = 0;
 	idx_t position_end = 0;
+};
+
+struct H5ReadMultiFileGlobalState : public GlobalTableFunctionState {
+	vector<column_t> data_column_ids;
+	vector<idx_t> data_output_column_positions;
+	vector<idx_t> filename_output_positions;
+	unique_ptr<H5ReadGlobalState> active_global_state;
+	idx_t active_file_idx = 0;
+	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
+	vector<idx_t> partition_bases;
+	idx_t active_participants = 0;
+	std::exception_ptr pending_exception;
+	std::mutex transition_lock;
+	std::condition_variable transition_cv;
+
+	idx_t MaxThreads() const override {
+		return max_threads;
+	}
+};
+
+struct H5ReadMultiFileLocalState : public LocalTableFunctionState {
+	unique_ptr<H5ReadLocalState> active_local_state;
+	idx_t partition_base = 0;
 };
 
 // =============================================================================
@@ -297,6 +338,16 @@ static GlobalColumnIdx GetGlobalIdx(const H5ReadGlobalState &gstate, LocalColumn
 // Get number of columns being scanned (size of dense arrays)
 static idx_t GetNumScannedColumns(const H5ReadGlobalState &gstate) {
 	return gstate.columns_to_scan.size();
+}
+
+static bool H5ReadIsFilenameColumn(const H5ReadBindData &bind_data, column_t column_id) {
+	return column_id == MultiFileReader::COLUMN_IDENTIFIER_FILENAME ||
+	       (bind_data.visible_filename_idx.has_value() && column_id == *bind_data.visible_filename_idx);
+}
+
+static bool H5ReadIsDataColumn(const H5ReadBindData &bind_data, column_t column_id) {
+	D_ASSERT(!bind_data.file_bind_data.empty());
+	return column_id < bind_data.file_bind_data[0].columns.size();
 }
 
 struct CacheRefreshOrderEntry {
@@ -342,6 +393,47 @@ static string GetColumnName(const string &dataset_path) {
 	}
 
 	return col_name;
+}
+
+static bool H5ReadOutputHasColumnName(const vector<string> &names, const string &column_name) {
+	return std::any_of(names.begin(), names.end(),
+	                   [&](const string &name) { return StringUtil::CIEquals(name, column_name); });
+}
+
+static void BuildH5ReadProjectionLayout(const H5ReadBindData &bind_data, const vector<column_t> &column_ids,
+                                        vector<column_t> &data_column_ids, vector<idx_t> &data_output_positions,
+                                        vector<idx_t> &filename_output_positions) {
+	data_column_ids.clear();
+	data_output_positions.clear();
+	filename_output_positions.clear();
+
+	D_ASSERT(!bind_data.file_bind_data.empty());
+	const auto canonical_column_count = bind_data.file_bind_data[0].columns.size();
+	if (column_ids.empty()) {
+		data_column_ids.reserve(canonical_column_count);
+		data_output_positions.reserve(canonical_column_count);
+		for (idx_t i = 0; i < canonical_column_count; i++) {
+			data_column_ids.push_back(i);
+			data_output_positions.push_back(i);
+		}
+		if (bind_data.visible_filename_idx.has_value()) {
+			filename_output_positions.push_back(*bind_data.visible_filename_idx);
+		}
+		return;
+	}
+
+	data_column_ids.reserve(column_ids.size());
+	data_output_positions.reserve(column_ids.size());
+	filename_output_positions.reserve(column_ids.size());
+	for (idx_t output_idx = 0; output_idx < column_ids.size(); output_idx++) {
+		auto column_id = column_ids[output_idx];
+		if (H5ReadIsDataColumn(bind_data, column_id)) {
+			data_column_ids.push_back(column_id);
+			data_output_positions.push_back(output_idx);
+		} else if (H5ReadIsFilenameColumn(bind_data, column_id)) {
+			filename_output_positions.push_back(output_idx);
+		}
+	}
 }
 
 // Helper function to build nested array types for multi-dimensional datasets
@@ -752,11 +844,6 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 
 static vector<idx_t> LoadRunStarts(const string &filename, const RSEColumnSpec &spec, hid_t starts_ds, size_t num_runs,
                                    hsize_t num_rows) {
-	H5T_class_t starts_class = H5Tget_class(spec.run_starts_h5_type);
-	if (starts_class != H5T_INTEGER) {
-		throw IOException("RSE run_starts must be integer type");
-	}
-
 	vector<idx_t> run_starts(num_runs);
 	H5ErrorSuppressor suppress;
 	herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, run_starts.data());
@@ -783,10 +870,11 @@ static RSEColumnState::RSEValueStorage LoadRSEValues(const string &filename, con
 		using T = typename decltype(type_tag)::type;
 
 		if constexpr (std::is_same_v<T, string>) {
+			D_ASSERT(spec.values_string_h5_type.has_value());
 			std::vector<string> string_values;
 			string_values.reserve(num_values);
-			ReadHDF5Strings(values_ds, spec.values_h5_type, H5S_ALL, H5S_ALL, num_values, filename, spec.values_path,
-			                [&](idx_t i, const std::string &str) { string_values.push_back(str); });
+			ReadHDF5Strings(values_ds, *spec.values_string_h5_type, H5S_ALL, H5S_ALL, num_values, filename,
+			                spec.values_path, [&](idx_t i, const std::string &str) { string_values.push_back(str); });
 			return string_values;
 		} else {
 			std::vector<T> typed_values(num_values);
@@ -845,21 +933,26 @@ static Value UnwrapAliasSpec(const Value &input, std::optional<std::string> &ali
 // h5_read - Read datasets from HDF5 files
 //===--------------------------------------------------------------------===//
 
-// Bind function - opens datasets and determines schema
-static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
-	ThrowIfInterrupted(context);
-	auto result = make_uniq<H5ReadBindData>();
-
-	// Get parameters - first is filename, rest are dataset paths, h5_rse(), h5_index(), or h5_alias()
-	if (input.inputs.size() < 2) {
-		throw IOException(
-		    "h5_read requires at least 2 arguments: filename and dataset path(s), h5_rse(), h5_index(), or h5_alias()");
+static void PopulateH5ReadOutputSchema(const vector<ColumnSpec> &columns, vector<LogicalType> &return_types,
+                                       vector<string> &names) {
+	names.clear();
+	return_types.clear();
+	for (const auto &col : columns) {
+		std::visit(
+		    [&](auto &&spec) {
+			    names.push_back(spec.column_name);
+			    return_types.push_back(spec.column_type);
+		    },
+		    col);
 	}
+}
 
-	result->filename = GetRequiredStringArgument(input.inputs[0], "h5_read", "filename");
-	result->swmr = ResolveSwmrOption(context, input.named_parameters);
-	size_t num_columns = input.inputs.size() - 1;
+static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, const string &filename, bool swmr,
+                                                     const vector<Value> &inputs) {
+	H5ReadSingleFileBindData result;
+	result.filename = filename;
+	result.swmr = swmr;
+	size_t num_columns = inputs.size() - 1;
 
 	// Lock for all HDF5 operations (not thread-safe)
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
@@ -868,11 +961,11 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	H5FileHandle file;
 	{
 		H5ErrorSuppressor suppress;
-		file = H5FileHandle(&context, result->filename.c_str(), H5F_ACC_RDONLY, result->swmr);
+		file = H5FileHandle(&context, result.filename.c_str(), H5F_ACC_RDONLY, result.swmr);
 	}
 
 	if (!file.is_valid()) {
-		throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", result->filename));
+		throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", result.filename));
 	}
 
 	// Track minimum rows across all non-scalar regular columns
@@ -883,7 +976,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 	// Process each column (regular dataset, RSE, or index)
 	for (size_t i = 0; i < num_columns; i++) {
-		const auto &input_val = input.inputs[i + 1];
+		const auto &input_val = inputs[i + 1];
 		std::optional<std::string> alias_name;
 		Value column_val = UnwrapAliasSpec(input_val, alias_name);
 
@@ -900,7 +993,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 				index_spec.column_name = alias_name ? *alias_name : "index";
 				index_spec.column_type = LogicalType::BIGINT;
 
-				result->columns.push_back(std::move(index_spec));
+				result.columns.push_back(std::move(index_spec));
 				continue;
 			}
 
@@ -924,16 +1017,20 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			has_rse_columns = true;
 
 			// Open run_starts dataset and get type
-			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, result->filename, run_starts);
-			rse_spec.run_starts_h5_type = std::move(starts_type);
+			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, result.filename, run_starts);
+			if (H5Tget_class(starts_type) != H5T_INTEGER) {
+				throw IOException("RSE run_starts must be integer type");
+			}
 
 			// Open values dataset and get type
-			auto [values_ds, values_type] = OpenDatasetAndGetType(file, result->filename, values);
+			auto [values_ds, values_type] = OpenDatasetAndGetType(file, result.filename, values);
 			// Determine DuckDB column type from values (before move)
 			rse_spec.column_type = H5TypeToDuckDBType(values_type);
-			rse_spec.values_h5_type = std::move(values_type);
+			if (H5Tget_class(values_type) == H5T_STRING) {
+				rse_spec.values_string_h5_type = std::move(values_type);
+			}
 
-			result->columns.push_back(std::move(rse_spec));
+			result.columns.push_back(std::move(rse_spec));
 
 		} else {
 			// Regular column (may be scalar)
@@ -947,7 +1044,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			num_regular_columns++;
 
 			// Open dataset and get type
-			auto [dataset, type] = OpenDatasetAndGetType(file, result->filename, ds_info.path);
+			auto [dataset, type] = OpenDatasetAndGetType(file, result.filename, ds_info.path);
 
 			// Check if it's a string type
 			ds_info.is_string = (H5Tget_class(type) == H5T_STRING);
@@ -955,14 +1052,12 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 			// Get dataspace to determine dimensions - RAII handles cleanup
 			H5DataspaceHandle space(dataset);
 			if (!space.is_valid()) {
-				throw IOException(
-				    AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result->filename));
+				throw IOException(AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result.filename));
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
-				throw IOException(
-				    AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result->filename));
+				throw IOException(AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result.filename));
 			}
 			if (ds_info.is_string && ds_info.ndims > 1) {
 				throw IOException("String datasets with more than 1 dimension are not supported");
@@ -977,9 +1072,11 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 				LogicalType base_type = H5TypeToDuckDBType(type);
 				scalar_info.column_type = base_type;
-				scalar_info.h5_type_id = std::move(type);
+				if (scalar_info.is_string) {
+					scalar_info.string_h5_type = std::move(type);
+				}
 
-				result->columns.push_back(std::move(scalar_info));
+				result.columns.push_back(std::move(scalar_info));
 				continue;
 			}
 
@@ -1003,13 +1100,15 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 				ds_info.elements_per_row *= ds_info.dims[j];
 			}
 
-			// Transfer ownership to ds_info (must be after using type)
-			ds_info.h5_type_id = std::move(type);
+			if (ds_info.is_string) {
+				// Preserve file-local string metadata for runtime string decoding.
+				ds_info.string_h5_type = std::move(type);
+			}
 
 			// Build array type for multi-dimensional datasets
 			ds_info.column_type = BuildArrayType(base_type, ds_info.dims, ds_info.ndims);
 
-			result->columns.push_back(std::move(ds_info));
+			result.columns.push_back(std::move(ds_info));
 		}
 	}
 
@@ -1026,23 +1125,98 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 
 	// Set the row count from non-scalar regular columns
 	if (non_scalar_regular_columns > 0) {
-		result->num_rows = min_rows;
+		result.num_rows = min_rows;
 	} else {
 		// Only scalar datasets - return a single row
-		result->num_rows = 1;
+		result.num_rows = 1;
 	}
 
-	// Build output schema by iterating through columns in order
-	for (const auto &col : result->columns) {
+	return result;
+}
+
+static bool H5ReadSchemasMatch(const H5ReadSingleFileBindData &expected, const H5ReadSingleFileBindData &actual) {
+	if (expected.columns.size() != actual.columns.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < expected.columns.size(); i++) {
+		if (expected.columns[i].index() != actual.columns[i].index()) {
+			return false;
+		}
+		// Multi-file h5_read requires every matched file to expose the same output
+		// contract: the same column variant, output name, and DuckDB type at each
+		// position. File-local runtime details are intentionally excluded here
+		// because they are reopened and rebuilt per file during scan initialization.
+		bool matches = false;
 		std::visit(
-		    [&](auto &&spec) {
-			    names.push_back(spec.column_name);
-			    return_types.push_back(spec.column_type);
+		    [&](auto &&expected_spec, auto &&actual_spec) {
+			    using ExpectedT = std::decay_t<decltype(expected_spec)>;
+			    using ActualT = std::decay_t<decltype(actual_spec)>;
+			    if constexpr (std::is_same_v<ExpectedT, ActualT>) {
+				    matches = expected_spec.column_name == actual_spec.column_name &&
+				              expected_spec.column_type == actual_spec.column_type;
+			    }
 		    },
-		    col);
+		    expected.columns[i], actual.columns[i]);
+		if (!matches) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static const vector<ColumnSpec> &GetCanonicalColumns(const H5ReadBindData &bind_data) {
+	D_ASSERT(!bind_data.file_bind_data.empty());
+	return bind_data.file_bind_data[0].columns;
+}
+
+static H5ReadSingleFileBindView GetSingleFileBindView(const H5ReadBindData &bind_data, idx_t file_idx) {
+	D_ASSERT(file_idx < bind_data.file_bind_data.size());
+	auto &file_bind_data = bind_data.file_bind_data[file_idx];
+	return {file_bind_data.filename, file_bind_data.columns, file_bind_data.num_rows, bind_data.claimed_filters,
+	        file_bind_data.swmr};
+}
+
+// Bind function - expands glob patterns, validates schema, and records per-file row counts.
+static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	ThrowIfInterrupted(context);
+	auto swmr = ResolveSwmrOption(context, input.named_parameters);
+	auto filename_option = ResolveFilenameColumnOption(input.named_parameters);
+	auto expanded = H5ExpandFilePatterns(context, input.inputs[0], "h5_read");
+	D_ASSERT(!expanded.filenames.empty());
+
+	auto first_file_bind = BindSingleH5ReadFile(context, expanded.filenames[0], swmr, input.inputs);
+	PopulateH5ReadOutputSchema(first_file_bind.columns, return_types, names);
+	if (filename_option.include) {
+		if (H5ReadOutputHasColumnName(names, filename_option.column_name)) {
+			throw BinderException("Option filename adds column \"%s\", but that column name is already present in "
+			                      "h5_read output",
+			                      filename_option.column_name);
+		}
+		names.push_back(filename_option.column_name);
+		return_types.push_back(LogicalType::VARCHAR);
 	}
 
-	return std::move(result);
+	auto result = make_uniq<H5ReadBindData>();
+	if (filename_option.include) {
+		result->visible_filename_idx = names.size() - 1;
+	}
+	result->had_glob = expanded.had_glob;
+	result->file_bind_data.reserve(expanded.filenames.size());
+	result->total_num_rows = first_file_bind.num_rows;
+	result->file_bind_data.push_back(std::move(first_file_bind));
+
+	for (idx_t file_idx = 1; file_idx < expanded.filenames.size(); file_idx++) {
+		auto file_bind = BindSingleH5ReadFile(context, expanded.filenames[file_idx], swmr, input.inputs);
+		if (!H5ReadSchemasMatch(result->file_bind_data[0], file_bind)) {
+			throw BinderException("h5_read matched file '%s' with an incompatible schema",
+			                      expanded.filenames[file_idx]);
+		}
+		result->total_num_rows += file_bind.num_rows;
+		result->file_bind_data.push_back(std::move(file_bind));
+	}
+
+	return result;
 }
 
 // Helper: Intersect two sorted lists of row ranges
@@ -1071,7 +1245,8 @@ static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vect
 }
 
 static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx, const vector<ClaimedFilter> &col_filters,
-                                             const H5ReadBindData &bind_data, const H5ReadGlobalState &gstate) {
+                                             const H5ReadSingleFileBindView &bind_data,
+                                             const H5ReadGlobalState &gstate) {
 	if (std::holds_alternative<RSEColumnSpec>(bind_data.columns[global_idx])) {
 		LocalColumnIdx local_idx = GlobalToLocal(gstate, global_idx);
 		auto &rse_spec = std::get<RSEColumnSpec>(bind_data.columns[global_idx]);
@@ -1084,23 +1259,17 @@ static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx, const v
 	return {};
 }
 
-// Init function - open file and dataset for reading
-static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
+// Initialize the inner single-file scan state for one file.
+static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &context,
+                                                           const H5ReadSingleFileBindView &bind_data,
+                                                           const vector<column_t> &data_column_ids,
+                                                           const vector<idx_t> &data_output_positions) {
 	ThrowIfInterrupted(context);
-	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
 	auto result = make_uniq<H5ReadGlobalState>();
 	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
-	static constexpr idx_t WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
 
-	// Store which columns to scan (projection pushdown)
-	if (input.column_ids.empty()) {
-		// No projection pushdown - read all columns
-		for (idx_t i = 0; i < bind_data.columns.size(); i++) {
-			result->columns_to_scan.push_back(i);
-		}
-	} else {
-		result->columns_to_scan = input.column_ids;
-	}
+	result->columns_to_scan = data_column_ids;
+	result->output_column_positions = data_output_positions;
 
 	// Build global-to-local index mapping for projection pushdown
 	// This allows O(1) lookup: global_column_idx -> local_column_states_idx
@@ -1207,9 +1376,10 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 
 				    ScalarColumnState scalar_state;
 				    if (spec.is_string) {
+					    D_ASSERT(spec.string_h5_type.has_value());
 					    std::string value;
-					    ReadHDF5Strings(dataset, spec.h5_type_id, H5S_ALL, H5S_ALL, 1, bind_data.filename, spec.path,
-					                    [&](idx_t, const std::string &str) { value = str; });
+					    ReadHDF5Strings(dataset, *spec.string_h5_type, H5S_ALL, H5S_ALL, 1, bind_data.filename,
+					                    spec.path, [&](idx_t, const std::string &str) { value = str; });
 					    scalar_state.value = value;
 				    } else {
 					    auto base_type = GetBaseType(spec.column_type);
@@ -1324,10 +1494,6 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 		result->scan_batch_size = MinValue<idx_t>(target_rows, STANDARD_VECTOR_SIZE);
 	}
 
-	if (projected_numeric_row_bytes >= WIDE_ROW_FEW_ROWS_THRESHOLD && bind_data.num_rows < STANDARD_VECTOR_SIZE) {
-		result->max_threads = 1;
-	}
-
 	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
 	// Group claimed filters by column
 	unordered_map<idx_t, vector<ClaimedFilter>> filters_by_column;
@@ -1357,12 +1523,19 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	result->position = 0;
 	result->position_done = AdjustPositionDoneForRanges(result->valid_row_ranges, 0);
 
-	return std::move(result);
+	return result;
 }
 
-static unique_ptr<LocalTableFunctionState> H5ReadInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
-                                                           GlobalTableFunctionState *global_state) {
-	return make_uniq<H5ReadLocalState>();
+static idx_t ComputeProjectedNumericRowBytes(const H5ReadBindData &bind_data, const vector<column_t> &data_column_ids) {
+	const auto &columns = GetCanonicalColumns(bind_data);
+	idx_t projected_numeric_row_bytes = 0;
+	for (auto column_id : data_column_ids) {
+		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]); regular_spec &&
+		    !regular_spec->is_string) {
+			projected_numeric_row_bytes += NumericCast<idx_t>(regular_spec->element_size);
+		}
+	}
+	return projected_numeric_row_bytes;
 }
 
 // Helper: Flip comparison for when constant is on left side (e.g., 10 < col becomes col > 10)
@@ -1546,12 +1719,12 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                         vector<unique_ptr<Expression>> &filters) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
+	const auto &columns = GetCanonicalColumns(bind_data);
 
 	// Build set of pushdown-eligible column indices (RSE or index)
 	unordered_set<idx_t> pushdown_column_indices;
-	for (idx_t i = 0; i < bind_data.columns.size(); i++) {
-		if (std::holds_alternative<RSEColumnSpec>(bind_data.columns[i]) ||
-		    std::holds_alternative<IndexColumnSpec>(bind_data.columns[i])) {
+	for (idx_t i = 0; i < columns.size(); i++) {
+		if (std::holds_alternative<RSEColumnSpec>(columns[i]) || std::holds_alternative<IndexColumnSpec>(columns[i])) {
 			pushdown_column_indices.insert(i);
 		}
 	}
@@ -1561,12 +1734,16 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 	unordered_map<idx_t, idx_t> get_to_bind_map; // get column idx -> bind_data column idx
 	const auto &column_ids = get.GetColumnIds();
 	if (column_ids.empty()) {
-		for (idx_t i = 0; i < bind_data.columns.size(); i++) {
+		for (idx_t i = 0; i < columns.size(); i++) {
 			get_to_bind_map[i] = i;
 		}
 	} else {
 		for (idx_t i = 0; i < column_ids.size(); i++) {
-			get_to_bind_map[i] = column_ids[i].GetPrimaryIndex();
+			auto column_id = column_ids[i].GetPrimaryIndex();
+			if (!H5ReadIsDataColumn(bind_data, column_id)) {
+				continue;
+			}
+			get_to_bind_map[i] = column_id;
 		}
 	}
 
@@ -1575,7 +1752,7 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 	// Claim filters for I/O optimization (but keep them in filter list for post-scan)
 	// DuckDB will apply all filters after scan to ensure correctness (defensive approach)
 	for (const auto &expr : filters) {
-		TryClaimPushdownFilter(expr, table_index, get_to_bind_map, pushdown_column_indices, bind_data.columns,
+		TryClaimPushdownFilter(expr, table_index, get_to_bind_map, pushdown_column_indices, columns,
 		                       bind_data.claimed_filters);
 	}
 }
@@ -1619,8 +1796,8 @@ static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
 	return ChunkCache::MAX_CHUNKS;
 }
 
-static idx_t GetLogicalPartitionStart(idx_t position, idx_t logical_partition_size) {
-	return (position / logical_partition_size) * logical_partition_size;
+static idx_t GetLogicalPartitionStart(idx_t position) {
+	return (position / H5_READ_LOGICAL_PARTITION_SIZE) * H5_READ_LOGICAL_PARTITION_SIZE;
 }
 
 static bool ClaimNextPartition(H5ReadGlobalState &gstate, H5ReadLocalState &lstate) {
@@ -1631,10 +1808,13 @@ static bool ClaimNextPartition(H5ReadGlobalState &gstate, H5ReadLocalState &lsta
 		return false;
 	}
 
-	auto partition_start = GetLogicalPartitionStart(next_range.position, gstate.logical_partition_size);
+	// gstate.position advances in logical partition units. lstate.position starts
+	// at the first valid row inside the claimed partition, while lstate.position_end
+	// remains the exclusive logical partition boundary.
+	auto partition_start = GetLogicalPartitionStart(next_range.position);
 	D_ASSERT(partition_start >= position);
 	lstate.position = next_range.position;
-	lstate.position_end = partition_start + gstate.logical_partition_size;
+	lstate.position_end = partition_start + H5_READ_LOGICAL_PARTITION_SIZE;
 	gstate.position.store(lstate.position_end);
 	return true;
 }
@@ -1815,7 +1995,9 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 	for (idx_t i = 0; i < chunk_count; i++) {
 		auto &chunk = cache.chunks[i];
 		if (chunk.end_row.load(std::memory_order_acquire) <= position_done_value) {
-			// Chunk is finished
+			// This chunk's previous window is fully behind position_done, so every row
+			// in that window has already been returned or skipped and the chunk can be
+			// reused for the next unread range.
 			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
 			if (next_range.has_data) {
 				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
@@ -1848,9 +2030,12 @@ static void WaitForFetchComplete(H5ReadGlobalState &gstate) {
 #endif
 }
 
-static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bind_data) {
+static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadSingleFileBindView &bind_data) {
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
+		// Exactly one thread refreshes chunk caches at a time. Other threads return
+		// immediately here and only block later if the chunks covering their read
+		// range are still not available.
 		try {
 			for (auto local_idx : gstate.cache_refresh_order) {
 				GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
@@ -1874,8 +2059,8 @@ static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadBindData &bin
 
 // Helper function to scan a regular dataset column
 static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &spec, RegularColumnState &state,
-                              Vector &result_vector, idx_t position, idx_t to_read, const H5ReadBindData &bind_data,
-                              H5ReadGlobalState &gstate) {
+                              Vector &result_vector, idx_t position, idx_t to_read,
+                              const H5ReadSingleFileBindView &bind_data, H5ReadGlobalState &gstate) {
 	ThrowIfInterrupted(context);
 	// Check if using cache
 	if (state.chunk_cache) {
@@ -1946,9 +2131,10 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 
 	// Read data based on type
 	if (spec.is_string) {
+		D_ASSERT(spec.string_h5_type.has_value());
 		// Handle string data using helper
-		ReadHDF5Strings(dataset_id, spec.h5_type_id, mem_space, file_space, to_read, bind_data.filename, spec.path,
-		                [&](idx_t i, const std::string &str) {
+		ReadHDF5Strings(dataset_id, *spec.string_h5_type, mem_space, file_space, to_read, bind_data.filename,
+		                spec.path, [&](idx_t i, const std::string &str) {
 			                FlatVector::GetData<string_t>(result_vector)[i] =
 			                    StringVector::AddString(result_vector, str);
 		                });
@@ -1999,11 +2185,9 @@ static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnSta
 	    state.value);
 }
 
-static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+static void H5ReadSingleFileScan(ClientContext &context, const H5ReadSingleFileBindView &bind_data,
+                                 H5ReadGlobalState &gstate, H5ReadLocalState &lstate, DataChunk &output) {
 	ThrowIfInterrupted(context);
-	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
-	auto &gstate = data.global_state->Cast<H5ReadGlobalState>();
-	auto &lstate = data.local_state->Cast<H5ReadLocalState>();
 
 	// Step 2: Determine next data range to read
 	auto range_selection = GetNextDataRange(gstate, lstate, bind_data.num_rows);
@@ -2021,7 +2205,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 		LocalColumnIdx local_idx(i);
 		GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
 
-		auto &result_vector = output.data[i];                 // Sequential output
+		auto &result_vector = output.data[gstate.output_column_positions[i]];
 		const auto &col_spec = bind_data.columns[global_idx]; // Global schema
 		auto &col_state = gstate.column_states[local_idx];    // Local (dense) state
 
@@ -2085,6 +2269,162 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 		} else {
 			// This scan completed out of order - store for later merging
 			gstate.completed_ranges[position] = scan_end;
+		}
+	}
+}
+
+static void PublishPendingH5ReadException(H5ReadMultiFileGlobalState &gstate, std::exception_ptr exception) {
+	if (!gstate.pending_exception) {
+		gstate.pending_exception = exception;
+	}
+	gstate.transition_cv.notify_all();
+}
+
+static void InitializeActiveH5ReadFile(ClientContext &context, const H5ReadBindData &bind_data,
+                                       H5ReadMultiFileGlobalState &gstate, idx_t file_idx) {
+	gstate.active_global_state = InitSingleH5ReadState(context, GetSingleFileBindView(bind_data, file_idx),
+	                                                   gstate.data_column_ids, gstate.data_output_column_positions);
+	gstate.active_file_idx = file_idx;
+}
+
+static void AttachLocalStateToActiveFile(const H5ReadMultiFileGlobalState &gstate, H5ReadMultiFileLocalState &lstate) {
+	lstate.active_local_state = make_uniq<H5ReadLocalState>();
+	lstate.partition_base = gstate.partition_bases[gstate.active_file_idx];
+}
+
+// Init function - initialize the first file in the multi-file scan wrapper.
+static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, TableFunctionInitInput &input) {
+	ThrowIfInterrupted(context);
+	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
+	auto result = make_uniq<H5ReadMultiFileGlobalState>();
+	BuildH5ReadProjectionLayout(bind_data, input.column_ids, result->data_column_ids,
+	                            result->data_output_column_positions, result->filename_output_positions);
+	auto projected_numeric_row_bytes = ComputeProjectedNumericRowBytes(bind_data, result->data_column_ids);
+	if (projected_numeric_row_bytes > 0) {
+		idx_t max_num_rows = 0;
+		for (const auto &file_bind_data : bind_data.file_bind_data) {
+			max_num_rows = MaxValue<idx_t>(max_num_rows, file_bind_data.num_rows);
+		}
+		if (projected_numeric_row_bytes >= H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD &&
+		    max_num_rows < STANDARD_VECTOR_SIZE) {
+			result->max_threads = 1;
+		}
+	}
+	D_ASSERT(!bind_data.file_bind_data.empty());
+	InitializeActiveH5ReadFile(context, bind_data, *result, 0);
+	result->partition_bases.resize(bind_data.file_bind_data.size());
+	idx_t next_partition_base = 0;
+	for (idx_t file_idx = 0; file_idx < bind_data.file_bind_data.size(); file_idx++) {
+		result->partition_bases[file_idx] = next_partition_base;
+		auto file_rows = bind_data.file_bind_data[file_idx].num_rows;
+		auto partition_count =
+		    MaxValue<idx_t>(1, (file_rows + H5_READ_LOGICAL_PARTITION_SIZE - 1) / H5_READ_LOGICAL_PARTITION_SIZE);
+		next_partition_base += partition_count;
+	}
+	return result;
+}
+
+static unique_ptr<LocalTableFunctionState> H5ReadInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                                           GlobalTableFunctionState *global_state) {
+	return make_uniq<H5ReadMultiFileLocalState>();
+}
+
+static void H5ReadPopulateFilenameColumns(const H5ReadBindData &bind_data, idx_t file_idx,
+                                          const H5ReadMultiFileGlobalState &gstate, DataChunk &output) {
+	if (output.size() == 0) {
+		return;
+	}
+	if (gstate.filename_output_positions.empty()) {
+		return;
+	}
+	auto &filename = bind_data.file_bind_data[file_idx].filename;
+	for (auto output_idx : gstate.filename_output_positions) {
+		auto &vector = output.data[output_idx];
+		vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::GetData<string_t>(vector)[0] = StringVector::AddString(vector, filename);
+	}
+}
+
+static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	ThrowIfInterrupted(context);
+	auto &bind_data = data.bind_data->Cast<H5ReadBindData>();
+	auto &gstate = data.global_state->Cast<H5ReadMultiFileGlobalState>();
+	auto &lstate = data.local_state->Cast<H5ReadMultiFileLocalState>();
+
+	// A local scan state stays attached to the current active file across repeated
+	// scan calls. When that local state reaches EOF for the active file, it detaches.
+	// The last detaching participant initializes the next file (or marks global EOF)
+	// and wakes the waiting threads.
+	while (true) {
+		idx_t file_idx;
+		H5ReadGlobalState *active_gstate;
+		{
+			std::unique_lock<std::mutex> lock(gstate.transition_lock);
+			if (gstate.pending_exception) {
+				std::rethrow_exception(gstate.pending_exception);
+			}
+			if (gstate.active_file_idx >= bind_data.file_bind_data.size()) {
+				output.SetCardinality(0);
+				return;
+			}
+			if (!lstate.active_local_state) {
+				AttachLocalStateToActiveFile(gstate, lstate);
+				gstate.active_participants++;
+			}
+			file_idx = gstate.active_file_idx;
+			active_gstate = gstate.active_global_state.get();
+		}
+
+		std::exception_ptr scan_error;
+		try {
+			H5ReadSingleFileScan(context, GetSingleFileBindView(bind_data, file_idx), *active_gstate,
+			                     *lstate.active_local_state, output);
+		} catch (...) {
+			scan_error = std::current_exception();
+		}
+
+		std::unique_lock<std::mutex> lock(gstate.transition_lock);
+
+		if (scan_error) {
+			PublishPendingH5ReadException(gstate, scan_error);
+		}
+		if (gstate.pending_exception) {
+			std::rethrow_exception(gstate.pending_exception);
+		}
+
+		if (output.size() > 0) {
+			H5ReadPopulateFilenameColumns(bind_data, file_idx, gstate, output);
+			return;
+		}
+
+		D_ASSERT(lstate.active_local_state);
+		D_ASSERT(gstate.active_participants > 0);
+		lstate.active_local_state.reset();
+		gstate.active_participants--;
+
+		if (gstate.active_participants == 0) {
+			auto next_file_idx = file_idx + 1;
+			gstate.active_global_state.reset();
+			if (next_file_idx >= bind_data.file_bind_data.size()) {
+				gstate.active_file_idx = next_file_idx;
+				gstate.transition_cv.notify_all();
+				output.SetCardinality(0);
+				return;
+			}
+
+			try {
+				InitializeActiveH5ReadFile(context, bind_data, gstate, next_file_idx);
+				gstate.transition_cv.notify_all();
+			} catch (...) {
+				PublishPendingH5ReadException(gstate, std::current_exception());
+				std::rethrow_exception(gstate.pending_exception);
+			}
+			continue;
+		}
+
+		gstate.transition_cv.wait(lock, [&] { return gstate.active_file_idx != file_idx || gstate.pending_exception; });
+		if (gstate.pending_exception) {
+			std::rethrow_exception(gstate.pending_exception);
 		}
 	}
 }
@@ -2207,46 +2547,62 @@ void RegisterH5IndexFunction(ExtensionLoader &loader) {
 // Cardinality function - informs DuckDB's optimizer of exact row count
 static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
-	return make_uniq<NodeStatistics>(bind_data.num_rows);
+	return make_uniq<NodeStatistics>(bind_data.total_num_rows);
+}
+
+static OperatorPartitionData GetSingleFilePartitionData(const H5ReadLocalState &lstate) {
+	D_ASSERT(lstate.position_end >= H5_READ_LOGICAL_PARTITION_SIZE);
+	D_ASSERT(lstate.position_end % H5_READ_LOGICAL_PARTITION_SIZE == 0);
+	return OperatorPartitionData(lstate.position_end / H5_READ_LOGICAL_PARTITION_SIZE - 1);
 }
 
 static OperatorPartitionData H5ReadGetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input) {
 	if (input.partition_info.RequiresPartitionColumns()) {
 		throw InternalException("h5_read::GetPartitionData: partition columns not supported");
 	}
-	auto &gstate = input.global_state->Cast<H5ReadGlobalState>();
-	auto &lstate = input.local_state->Cast<H5ReadLocalState>();
-	D_ASSERT(gstate.logical_partition_size > 0);
-	D_ASSERT(lstate.position_end >= gstate.logical_partition_size);
-	D_ASSERT(lstate.position_end % gstate.logical_partition_size == 0);
-	return OperatorPartitionData(lstate.position_end / gstate.logical_partition_size - 1);
+	auto &lstate = input.local_state->Cast<H5ReadMultiFileLocalState>();
+	if (!lstate.active_local_state) {
+		return OperatorPartitionData(0);
+	}
+	auto inner_partition = GetSingleFilePartitionData(*lstate.active_local_state);
+	return OperatorPartitionData(lstate.partition_base + inner_partition.batch_index);
+}
+
+static virtual_column_map_t H5GetFilenameVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
+	virtual_column_map_t result;
+	if (bind_data_p && bind_data_p->Cast<H5ReadBindData>().visible_filename_idx.has_value()) {
+		return result;
+	}
+	result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
+	return result;
 }
 
 void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// First argument is filename (VARCHAR), then 1+ dataset paths (VARCHAR or STRUCT for RSE)
-	TableFunction h5_read("h5_read", {LogicalType::VARCHAR, LogicalType::ANY}, H5ReadScan, H5ReadBind, H5ReadInit);
-	h5_read.name = "h5_read";
+	TableFunction h5_read_function("h5_read", {LogicalType::VARCHAR, LogicalType::ANY}, H5ReadScan, H5ReadBind,
+	                               H5ReadInit);
 	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse())
-	h5_read.varargs = LogicalType::ANY;
-	h5_read.named_parameters["swmr"] = LogicalType::BOOLEAN;
+	h5_read_function.varargs = LogicalType::ANY;
+	h5_read_function.named_parameters["filename"] = LogicalType::ANY;
+	h5_read_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
 
 	// Predicate pushdown (RSE only): claim filters in bind, build row ranges in init,
 	// and scan only matching ranges while keeping DuckDB's post-scan verification.
 
 	// Enable projection pushdown - only read columns that are actually needed
-	h5_read.projection_pushdown = true;
+	h5_read_function.projection_pushdown = true;
 
 	// Enable predicate pushdown for RSE columns
 	// We claim RSE filters for I/O optimization but keep them for post-scan verification
 	// DuckDB applies all filters post-scan (defensive, ensures correctness)
-	h5_read.pushdown_complex_filter = H5ReadPushdownComplexFilter;
+	h5_read_function.pushdown_complex_filter = H5ReadPushdownComplexFilter;
 
 	// Set cardinality function for query optimizer
-	h5_read.cardinality = H5ReadCardinality;
-	h5_read.init_local = H5ReadInitLocal;
-	h5_read.get_partition_data = H5ReadGetPartitionData;
-
-	loader.RegisterFunction(h5_read);
+	h5_read_function.cardinality = H5ReadCardinality;
+	h5_read_function.init_local = H5ReadInitLocal;
+	h5_read_function.get_partition_data = H5ReadGetPartitionData;
+	h5_read_function.get_virtual_columns = H5GetFilenameVirtualColumns;
+	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_read_function)));
 }
 
 } // namespace duckdb

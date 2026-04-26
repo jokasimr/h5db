@@ -200,6 +200,10 @@ echo ""
 echo -e "${GREEN}[30/28] Generating large_rse_edge_cases.h5 (266 MB)${NC}"
 (cd "$LARGE_DATA_DIR" && "$PYTHON_BIN" "$PROJECT_ROOT/test/data/large/create_large_rse_edge_cases.py")
 
+echo ""
+echo -e "${GREEN}[31/28] Generating glob fixtures (small + linked large files)${NC}"
+(cd test/data && "$PYTHON_BIN" create_glob_test.py)
+
 # ====================================================================
 # Summary
 # ====================================================================
@@ -239,6 +243,10 @@ echo "    - h5_tree_traversal_hint_bug.h5 (h5_tree prefix-root regression fixtur
 echo "    - links_external_target.h5 (external-link target)"
 echo "    - swmr_enabled.h5         (SWMR flag enabled)"
 echo "    - swmr_disabled.h5        (SWMR flag disabled)"
+echo "    - glob/*.h5              (multi-file glob coverage)"
+echo "    - glob_symlink/*         (symlink glob coverage)"
+echo "    - glob_order/*.h5        (matched-file ordering coverage)"
+echo "    - glob_large/*.h5        (multi-file large glob coverage)"
 echo "    - large_rse_test.h5       (RSE multithreading regression)"
 echo ""
 echo "  Large tests (test/data/large/):"

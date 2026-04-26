@@ -1,0 +1,92 @@
+# name: test/sql/glob/h5_glob_large.test
+# description: large multi-file globbing coverage for h5_read
+# group: [large]
+
+require h5db
+
+statement ok
+SET threads=4;
+
+query III
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE idx = 0),
+    MAX(idx)
+FROM h5_read(
+    'test/data/glob_large/large_same_*.h5',
+    h5_alias('idx', h5_index()),
+    '/detector_1/event_id'
+);
+----
+4000000	2	1999999
+
+query II
+SELECT
+    COUNT(*),
+    SUM(event_id)
+FROM h5_read('test/data/glob_large/large_same_*.h5', '/detector_1/event_id');
+----
+4000000	3999998000000
+
+query I
+SELECT values
+FROM h5_read('test/data/glob_large/large_order_*.h5', '/values')
+WHERE values IN (100000, 200000, 1000000);
+----
+100000
+1000000
+200000
+
+query II
+WITH globbed AS (
+    SELECT idx, values
+    FROM h5_read(
+        'test/data/glob_large/large_order_*.h5',
+        h5_alias('idx', h5_index()),
+        '/values'
+    )
+    WHERE values % 25000 = 0
+),
+regular AS (
+    SELECT idx, values
+    FROM h5_read(
+        'test/data/glob_large/large_order_1.h5',
+        h5_alias('idx', h5_index()),
+        '/values'
+    )
+    WHERE values % 25000 = 0
+    UNION ALL
+    SELECT idx, values
+    FROM h5_read(
+        'test/data/glob_large/large_order_2.h5',
+        h5_alias('idx', h5_index()),
+        '/values'
+    )
+    WHERE values % 25000 = 0
+    UNION ALL
+    SELECT idx, values
+    FROM h5_read(
+        'test/data/glob_large/large_order_10.h5',
+        h5_alias('idx', h5_index()),
+        '/values'
+    )
+    WHERE values % 25000 = 0
+),
+diff AS (
+    SELECT * FROM (
+        SELECT * FROM globbed
+        EXCEPT ALL
+        SELECT * FROM regular
+    ) lhs
+    UNION ALL
+    SELECT * FROM (
+        SELECT * FROM regular
+        EXCEPT ALL
+        SELECT * FROM globbed
+    ) rhs
+)
+SELECT
+    (SELECT COUNT(*) FROM diff),
+    (SELECT COUNT(*) FROM globbed);
+----
+0	6

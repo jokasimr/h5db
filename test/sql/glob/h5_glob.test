@@ -1,0 +1,170 @@
+# name: test/sql/glob/h5_glob.test
+# description: globbing coverage for h5_tree, h5_ls, and h5_read
+# group: [sql]
+
+require h5db
+
+query II
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE path = '/group/child')
+FROM h5_tree('test/data/glob/**/glob_same_*.h5');
+----
+18	3
+
+query II
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'dataset')
+FROM h5_ls('test/data/glob/glob_same_*.h5', '/');
+----
+8	6
+
+query III
+SELECT idx, values, scale
+FROM h5_read(
+    'test/data/glob/glob_same_*.h5',
+    h5_alias('idx', h5_index()),
+    '/values',
+    '/scale'
+)
+ORDER BY values;
+----
+0	1	100
+1	2	100
+2	3	100
+0	4	200
+1	5	200
+
+query III
+SELECT
+    COUNT(*),
+    SUM(values),
+    SUM(scale)
+FROM h5_read(
+    'test/data/glob/**/glob_same_*.h5',
+    '/values',
+    '/scale'
+);
+----
+6	21	1000
+
+query II
+SELECT
+    COUNT(*),
+    COUNT(DISTINCT event_time_zero)
+FROM h5_read(
+    'test/data/glob/rse_same_*.h5',
+    '/detector_1/event_id',
+    h5_rse('/detector_1/event_index', '/detector_1/event_time_zero')
+);
+----
+2000	10
+
+query II
+SELECT names, tag
+FROM h5_read('test/data/glob/glob_strings_*.h5', '/names', '/tag')
+ORDER BY tag;
+----
+alpha	ascii
+åä	utf8
+
+query II
+SELECT
+    COUNT(*),
+    SUM(values)
+FROM h5_read('test/data/glob/glob_same_[12].h5', '/values');
+----
+5	15
+
+query IIII
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob/glob_same_?.h5')),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob/glob_same_?.h5', '/')),
+    (SELECT COUNT(*) FROM h5_read('test/data/glob/glob_same_?.h5', '/values')),
+    (SELECT SUM(values) FROM h5_read('test/data/glob/glob_same_?.h5', '/values'));
+----
+12	8	5	15
+
+query I
+SELECT path
+FROM h5_tree('test/data/glob_order/order_*.h5')
+WHERE path LIKE '/marker_%';
+----
+/marker_1
+/marker_10
+/marker_2
+
+query I
+SELECT path
+FROM h5_ls('test/data/glob_order/order_*.h5', '/')
+WHERE path LIKE '/marker_%';
+----
+/marker_1
+/marker_10
+/marker_2
+
+query I
+SELECT values
+FROM h5_read('test/data/glob_order/order_*.h5', '/values');
+----
+1
+10
+2
+
+query I
+SELECT path
+FROM h5_tree('test/data/glob_order/**/order_*.h5')
+WHERE path LIKE '/marker_%';
+----
+/marker_0
+/marker_1
+/marker_10
+/marker_2
+/marker_99
+
+query I
+SELECT path
+FROM h5_ls('test/data/glob_order/**/order_*.h5', '/')
+WHERE path LIKE '/marker_%';
+----
+/marker_0
+/marker_1
+/marker_10
+/marker_2
+/marker_99
+
+query I
+SELECT values
+FROM h5_read('test/data/glob_order/**/order_*.h5', '/values');
+----
+0
+1
+10
+2
+99
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/glob/no_such_*.h5');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_ls('test/data/glob/no_such_*.h5', '/');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/glob/no_such_*.h5', '/values');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/**/**/*.h5');
+----
+IO Error: Cannot use multiple '**' in one path
+
+statement error
+SELECT * FROM h5_read('test/data/glob/glob_[sm][ai]*.h5', '/values');
+----
+<REGEX>:.*h5_read matched file '.*' with an incompatible schema.*

@@ -1,0 +1,117 @@
+# name: test/sql/glob/h5_glob_symlink.test
+# description: symlink glob semantics for h5_tree, h5_ls, and h5_read
+# group: [sql]
+
+require h5db
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/nested.h5')),
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/**/nested.h5'));
+----
+12	6
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/*/nested.h5', '/')),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/**/nested.h5', '/'));
+----
+8	4
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/*/nested.h5', '/values')),
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/**/nested.h5', '/values'));
+----
+6	3
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/*.h5', '/values')),
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/**/*.h5', '/values'));
+----
+5	8
+
+query II
+SELECT idx, values
+FROM h5_read(
+    'test/data/glob_symlink/**/*.h5',
+    h5_alias('idx', h5_index()),
+    '/values'
+);
+----
+0	1
+1	2
+2	3
+0	1
+1	2
+2	3
+0	4
+1	5
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*.h5')),
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/**/*.h5'));
+----
+12	18
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/*.h5', '/')),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/**/*.h5', '/'));
+----
+8	12
+
+query III
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/link_file.h5')),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/link_file.h5', '/')),
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/link_file.h5', '/values'));
+----
+6	4	3
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/broken*.h5');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob_symlink/broken\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/broken*.h5', '/');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob_symlink/broken\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/broken*.h5', '/values');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob_symlink/broken\*\.h5".*
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+
+statement error
+SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/**/');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*
+
+statement error
+SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/*/', '/');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+
+statement error
+SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/**/', '/');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/*/', '/values');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/link_dir/.*
+
+statement error
+SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/**/', '/values');
+----
+<REGEX>:.*Failed to open HDF5 file: .*glob_symlink/.*

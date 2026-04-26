@@ -17,6 +17,8 @@
 #endif
 
 #include "h5_remote_backend.hpp"
+#include "h5_functions.hpp"
+#include "h5_internal.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
@@ -25,6 +27,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -222,7 +225,7 @@ static std::string KnownHostCheckToString(int check) {
 	}
 }
 
-static std::string JoinPathSegments(const Path &path) {
+static std::string GetSftpRemotePath(const Path &path) {
 	std::string result = path.GetAnchor();
 	for (idx_t i = 0; i < path.GetPathSegments().size(); i++) {
 		if (i > 0 || result.empty() || result.back() != path.GetSeparator()) {
@@ -232,6 +235,10 @@ static std::string JoinPathSegments(const Path &path) {
 	}
 	if (result.empty()) {
 		return "/";
+	}
+	auto trailing_separator = path.GetTrailingSeparator();
+	if (!trailing_separator.empty() && result.back() != path.GetSeparator()) {
+		result += trailing_separator;
 	}
 	return result;
 }
@@ -263,7 +270,7 @@ static H5SftpUrl ParseSftpUrl(const std::string &url) {
 	H5SftpUrl result;
 	result.original_url = url;
 	result.authority = parsed.GetAuthority();
-	result.remote_path = JoinPathSegments(parsed);
+	result.remote_path = GetSftpRemotePath(parsed);
 
 	auto authority = parsed.GetAuthority();
 	auto at_pos = authority.rfind('@');
@@ -1002,6 +1009,326 @@ static shared_ptr<H5SftpConnection> GetOrCreateCachedSftpConnection(ClientContex
 	return cache_state->GetOrCreate(context, config);
 }
 
+static bool IsCrawlPattern(const std::string &pattern) {
+	return pattern == "**";
+}
+
+static bool HasMultipleCrawlPatterns(const vector<string> &path_segments) {
+	idx_t crawl_count = 0;
+	for (const auto &segment : path_segments) {
+		if (IsCrawlPattern(segment)) {
+			crawl_count++;
+		}
+	}
+	return crawl_count > 1;
+}
+
+static std::string JoinSftpPath(const std::string &parent, const std::string &name) {
+	if (parent == "/") {
+		return "/" + name;
+	}
+	return parent + "/" + name;
+}
+
+struct H5SftpRemotePattern {
+	vector<string> components;
+	bool has_glob = false;
+};
+
+static H5SftpRemotePattern ParseSftpRemotePattern(const std::string &remote_path) {
+	auto parsed_path = Path::FromString(remote_path);
+	H5SftpRemotePattern result;
+	result.components.reserve(parsed_path.GetPathSegments().size() + (parsed_path.HasTrailingSeparator() ? 1 : 0));
+	for (const auto &segment : parsed_path.GetPathSegments()) {
+		result.has_glob = result.has_glob || FileSystem::HasGlob(segment);
+		result.components.push_back(segment);
+	}
+	if (parsed_path.HasTrailingSeparator()) {
+		result.components.emplace_back();
+	}
+	return result;
+}
+
+struct H5SftpListEntry {
+	std::string name;
+	bool is_directory = false;
+	bool is_symbolic_link = false;
+};
+
+enum class H5SftpPathKind : uint8_t { UNKNOWN, OTHER, DIRECTORY, SYMBOLIC_LINK };
+
+class H5SftpGlobExpander {
+public:
+	H5SftpGlobExpander(shared_ptr<H5SftpConnection> connection_p, std::string authority_p,
+	                   H5SftpRemotePattern pattern_p)
+	    : connection(std::move(connection_p)), authority(std::move(authority_p)),
+	      remote_components(std::move(pattern_p.components)) {
+		if (HasMultipleCrawlPatterns(remote_components)) {
+			throw IOException("Cannot use multiple '**' in one path");
+		}
+	}
+
+	vector<std::string> Expand() {
+		vector<std::string> matched_paths;
+		ExpandFrom("/", 0, matched_paths);
+
+		vector<std::string> result;
+		result.reserve(matched_paths.size());
+		for (auto &matched_path : matched_paths) {
+			result.push_back("sftp://" + authority + matched_path);
+		}
+		std::sort(result.begin(), result.end());
+		return result;
+	}
+
+private:
+	static H5SftpPathKind PathKindFromAttrs(const LIBSSH2_SFTP_ATTRIBUTES &attrs) {
+		if (!(attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS)) {
+			return H5SftpPathKind::UNKNOWN;
+		}
+		if (LIBSSH2_SFTP_S_ISLNK(attrs.permissions)) {
+			return H5SftpPathKind::SYMBOLIC_LINK;
+		}
+		if (LIBSSH2_SFTP_S_ISDIR(attrs.permissions)) {
+			return H5SftpPathKind::DIRECTORY;
+		}
+		return H5SftpPathKind::OTHER;
+	}
+
+	H5SftpPathKind TryGetPathKind(const std::string &path, int stat_type) const {
+		LIBSSH2_SFTP_ATTRIBUTES attrs {};
+		if (!TryStatPath(path, stat_type, attrs)) {
+			return H5SftpPathKind::UNKNOWN;
+		}
+		return PathKindFromAttrs(attrs);
+	}
+
+	LIBSSH2_SFTP_HANDLE *OpenDirectoryHandle(const std::string &path, bool allow_probe_failure = false) const {
+		connection->ThrowIfDead();
+		while (true) {
+			auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
+			if (dir_handle) {
+				return dir_handle;
+			}
+			if (libssh2_session_last_errno(connection->GetSession()) == LIBSSH2_ERROR_EAGAIN) {
+				connection->WaitForSessionIO();
+				continue;
+			}
+			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
+			if (allow_probe_failure &&
+			    (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH ||
+			     sftp_error == LIBSSH2_FX_FAILURE)) {
+				// Servers commonly report "not a directory" from OPENDIR as a generic
+				// failure. This probe only runs after STAT confirmed that the path exists
+				// but omitted type bits, so treat generic open failure as "not a
+				// traversable directory" rather than as a hard error.
+				return nullptr;
+			}
+			throw IOException("Failed to open SFTP directory '%s': %s", path, connection->LastSessionError());
+		}
+	}
+
+	bool CanOpenDirectory(const std::string &path) const {
+		auto *dir_handle = OpenDirectoryHandle(path, true);
+		if (!dir_handle) {
+			return false;
+		}
+		CloseDirectoryHandle(dir_handle);
+		return true;
+	}
+
+	bool TryStatPath(const std::string &path, int stat_type, LIBSSH2_SFTP_ATTRIBUTES &attrs) const {
+		connection->ThrowIfDead();
+		while (true) {
+			auto rc = libssh2_sftp_stat_ex(connection->GetSftpSession(), path.c_str(),
+			                               UnsafeNumericCast<unsigned int>(path.size()), stat_type, &attrs);
+			if (rc == 0) {
+				return true;
+			}
+			if (rc == LIBSSH2_ERROR_EAGAIN) {
+				connection->WaitForSessionIO();
+				continue;
+			}
+			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
+			if (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH) {
+				return false;
+			}
+			throw IOException("Failed to stat SFTP path '%s': %s", path, connection->LastSessionError());
+		}
+	}
+
+	H5SftpPathKind TryGetResolvedPathKind(const std::string &path) const {
+		LIBSSH2_SFTP_ATTRIBUTES attrs {};
+		if (!TryStatPath(path, LIBSSH2_SFTP_STAT, attrs)) {
+			return H5SftpPathKind::UNKNOWN;
+		}
+		auto path_kind = PathKindFromAttrs(attrs);
+		if (path_kind != H5SftpPathKind::UNKNOWN) {
+			return path_kind;
+		}
+		return CanOpenDirectory(path) ? H5SftpPathKind::DIRECTORY : H5SftpPathKind::OTHER;
+	}
+
+	std::optional<H5SftpListEntry> ClassifyListedPath(const std::string &directory_path, std::string name,
+	                                                  const LIBSSH2_SFTP_ATTRIBUTES &attrs) const {
+		auto entry_path = JoinSftpPath(directory_path, name);
+		auto raw_kind = PathKindFromAttrs(attrs);
+
+		// Some servers omit permission bits from READDIR entries. Fall back to LSTAT to
+		// identify the entry itself, then STAT if needed to determine whether a symlink
+		// resolves to a directory. This matches DuckDB's local globbing behavior:
+		// ordinary glob components can match/traverse symlinks, but recursive '**'
+		// expansion still skips symlink entries explicitly.
+		if (raw_kind == H5SftpPathKind::UNKNOWN) {
+			raw_kind = TryGetPathKind(entry_path, LIBSSH2_SFTP_LSTAT);
+		}
+		if (raw_kind == H5SftpPathKind::UNKNOWN) {
+			return std::nullopt;
+		}
+
+		H5SftpListEntry entry;
+		entry.name = std::move(name);
+		entry.is_directory = raw_kind == H5SftpPathKind::DIRECTORY;
+		entry.is_symbolic_link = raw_kind == H5SftpPathKind::SYMBOLIC_LINK;
+		if (!entry.is_symbolic_link) {
+			return entry;
+		}
+		auto resolved_kind = TryGetResolvedPathKind(entry_path);
+		if (resolved_kind == H5SftpPathKind::UNKNOWN) {
+			return std::nullopt;
+		}
+		entry.is_directory = resolved_kind == H5SftpPathKind::DIRECTORY;
+		return entry;
+	}
+
+	void CloseDirectoryHandle(LIBSSH2_SFTP_HANDLE *dir_handle) const {
+		if (!dir_handle) {
+			return;
+		}
+		while (true) {
+			auto rc = libssh2_sftp_closedir(dir_handle);
+			if (rc == 0) {
+				return;
+			}
+			if (rc != LIBSSH2_ERROR_EAGAIN) {
+				connection->MarkDead();
+				return;
+			}
+			connection->WaitForSessionIO();
+		}
+	}
+
+	vector<H5SftpListEntry> ListDirectory(const std::string &path) const {
+		LIBSSH2_SFTP_HANDLE *dir_handle = OpenDirectoryHandle(path);
+
+		vector<H5SftpListEntry> result;
+		std::array<char, 4096> name_buffer {};
+		try {
+			while (true) {
+				LIBSSH2_SFTP_ATTRIBUTES attrs {};
+				auto rc =
+				    libssh2_sftp_readdir(dir_handle, name_buffer.data(), name_buffer.size(), &attrs);
+				if (rc == LIBSSH2_ERROR_EAGAIN) {
+					connection->WaitForSessionIO();
+					continue;
+				}
+				if (rc < 0) {
+					throw IOException("Failed to list SFTP directory '%s': %s", path, connection->LastSessionError());
+				}
+				if (rc == 0) {
+					break;
+				}
+
+				std::string name(name_buffer.data(), UnsafeNumericCast<size_t>(rc));
+				if (name == "." || name == "..") {
+					continue;
+				}
+
+				auto entry = ClassifyListedPath(path, std::move(name), attrs);
+				if (!entry) {
+					continue;
+				}
+				result.push_back(std::move(*entry));
+			}
+		} catch (...) {
+			CloseDirectoryHandle(dir_handle);
+			throw;
+		}
+		CloseDirectoryHandle(dir_handle);
+		return result;
+	}
+
+	void ExpandFrom(const std::string &current_path, idx_t split_index, vector<std::string> &result) const {
+		if (split_index >= remote_components.size()) {
+			return;
+		}
+
+		const auto &component = remote_components[split_index];
+		bool is_last_component = split_index + 1 == remote_components.size();
+
+		if (!FileSystem::HasGlob(component)) {
+			auto next_path = JoinSftpPath(current_path, component);
+			auto path_kind = TryGetResolvedPathKind(next_path);
+			if (path_kind == H5SftpPathKind::UNKNOWN) {
+				return;
+			}
+			if (is_last_component) {
+				result.push_back(std::move(next_path));
+			} else if (path_kind == H5SftpPathKind::DIRECTORY) {
+				ExpandFrom(next_path, split_index + 1, result);
+			}
+			return;
+		}
+
+		if (IsCrawlPattern(component)) {
+			if (is_last_component) {
+				CrawlFiles(current_path, result);
+				return;
+			}
+			ExpandFrom(current_path, split_index + 1, result);
+			for (const auto &entry : ListDirectory(current_path)) {
+				if (!entry.is_directory || entry.is_symbolic_link) {
+					continue;
+				}
+				ExpandFrom(JoinSftpPath(current_path, entry.name), split_index, result);
+			}
+			return;
+		}
+
+		for (const auto &entry : ListDirectory(current_path)) {
+			if (!Glob(entry.name.c_str(), entry.name.size(), component.c_str(), component.size())) {
+				continue;
+			}
+			auto next_path = JoinSftpPath(current_path, entry.name);
+			if (is_last_component) {
+				if (!entry.is_directory) {
+					result.push_back(std::move(next_path));
+				}
+			} else if (entry.is_directory) {
+				ExpandFrom(next_path, split_index + 1, result);
+			}
+		}
+	}
+
+	void CrawlFiles(const std::string &directory_path, vector<std::string> &result) const {
+		for (const auto &entry : ListDirectory(directory_path)) {
+			if (entry.is_symbolic_link) {
+				continue;
+			}
+			auto entry_path = JoinSftpPath(directory_path, entry.name);
+			if (entry.is_directory) {
+				CrawlFiles(entry_path, result);
+			} else {
+				result.push_back(std::move(entry_path));
+			}
+		}
+	}
+
+	shared_ptr<H5SftpConnection> connection;
+	const std::string authority;
+	const vector<string> remote_components;
+};
+
 class H5SftpFileEngine {
 public:
 	explicit H5SftpFileEngine(shared_ptr<H5SftpConnection> connection_p, const H5SftpConfig &config_p)
@@ -1520,6 +1847,26 @@ unique_ptr<H5RemoteBackend> OpenH5RemoteBackend(ClientContext &context, const st
 	default:
 		throw InternalException("Unknown remote backend type");
 	}
+}
+
+H5ExpandedFileList ExpandH5SftpFilePattern(ClientContext &context, const std::string &path_pattern) {
+	H5ExpandedFileList result;
+	auto url = ParseSftpUrl(path_pattern);
+	auto pattern = ParseSftpRemotePattern(url.remote_path);
+	if (!pattern.has_glob) {
+		result.filenames.push_back(path_pattern);
+		return result;
+	}
+
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	auto config = ResolveSftpConfig(context, url);
+	auto connection = GetOrCreateCachedSftpConnection(context, config);
+	result.filenames = H5SftpGlobExpander(std::move(connection), url.authority, std::move(pattern)).Expand();
+	if (result.filenames.empty()) {
+		throw IOException("No files found that match the pattern \"%s\"", path_pattern);
+	}
+	result.had_glob = true;
+	return result;
 }
 
 } // namespace duckdb
