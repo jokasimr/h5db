@@ -45,9 +45,34 @@ struct H5LsScanLayout {
 	std::optional<idx_t> shape_output_idx;
 };
 
+class H5LsFileScanner {
+public:
+	H5LsFileScanner(ClientContext &context, const string &filename, const string &group_path_p, bool swmr,
+	                const vector<H5TreeProjectedAttributeSpec> &projected_attributes)
+	    : group_path(group_path_p), reader(context, filename, swmr, projected_attributes) {
+		H5TreeValidateListGroup(reader, group_path);
+	}
+
+	bool ReadRows(ClientContext &context, std::vector<H5TreeNamedRow> &rows) {
+		ThrowIfInterrupted(context);
+		if (exhausted) {
+			rows.clear();
+			return true;
+		}
+		exhausted = H5TreeListEntriesBatch(reader, group_path, next_idx, STANDARD_VECTOR_SIZE, rows);
+		return exhausted;
+	}
+
+private:
+	std::string group_path;
+	H5TreeFileReader reader;
+	hsize_t next_idx = 0;
+	bool exhausted = false;
+};
+
 struct H5LsGlobalState : public GlobalTableFunctionState {
-	std::vector<H5TreeNamedRow> rows;
-	idx_t offset = 0;
+	unique_ptr<H5LsFileScanner> scanner;
+	std::vector<H5TreeNamedRow> batch_rows;
 	idx_t file_idx = 0;
 	H5LsScanLayout output_layout;
 
@@ -241,15 +266,13 @@ static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBi
 	return std::move(result);
 }
 
-static void H5LsLoadFileRows(ClientContext &context, const H5LsBindData &bind_data, idx_t file_idx,
-                             H5LsGlobalState &state) {
+static void H5LsOpenFileScanner(ClientContext &context, const H5LsBindData &bind_data, idx_t file_idx,
+                                H5LsGlobalState &state) {
 	ThrowIfInterrupted(context);
 	D_ASSERT(file_idx < bind_data.filenames.size());
 	state.file_idx = file_idx;
-	state.rows.clear();
-	state.offset = 0;
-	H5TreeFileReader reader(context, bind_data.filenames[file_idx], bind_data.swmr, bind_data.projected_attributes);
-	H5TreeListImmediateEntries(reader, bind_data.group_path, state.rows);
+	state.scanner = make_uniq<H5LsFileScanner>(context, bind_data.filenames[file_idx], bind_data.group_path,
+	                                           bind_data.swmr, bind_data.projected_attributes);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5LsInit(ClientContext &context, TableFunctionInitInput &input) {
@@ -258,7 +281,7 @@ static unique_ptr<GlobalTableFunctionState> H5LsInit(ClientContext &context, Tab
 	auto result = make_uniq<H5LsGlobalState>();
 	result->output_layout = H5LsBuildOutputLayout(bind_data, input.column_ids);
 	D_ASSERT(!bind_data.filenames.empty());
-	H5LsLoadFileRows(context, bind_data, 0, *result);
+	H5LsOpenFileScanner(context, bind_data, 0, *result);
 	return std::move(result);
 }
 
@@ -266,16 +289,23 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	ThrowIfInterrupted(context);
 	auto &bind_data = input.bind_data->Cast<H5LsBindData>();
 	auto &gstate = input.global_state->Cast<H5LsGlobalState>();
-	while (gstate.offset >= gstate.rows.size()) {
+	auto &rows = gstate.batch_rows;
+	while (true) {
+		D_ASSERT(gstate.scanner);
+		auto exhausted = gstate.scanner->ReadRows(context, rows);
+		if (!rows.empty()) {
+			break;
+		}
+		D_ASSERT(exhausted);
 		auto next_file_idx = gstate.file_idx + 1;
 		if (next_file_idx >= bind_data.filenames.size()) {
 			output.SetCardinality(0);
 			return;
 		}
-		H5LsLoadFileRows(context, bind_data, next_file_idx, gstate);
+		H5LsOpenFileScanner(context, bind_data, next_file_idx, gstate);
 	}
 
-	auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.offset);
+	auto count = rows.size();
 	output.SetCardinality(count);
 
 	idx_t total_shape_elems = 0;
@@ -284,8 +314,8 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	auto shape_output_idx = gstate.output_layout.shape_output_idx;
 	if (shape_output_idx.has_value()) {
 		for (idx_t i = 0; i < count; i++) {
-			if (gstate.rows[gstate.offset + i].row.has_shape) {
-				total_shape_elems += gstate.rows[gstate.offset + i].row.shape.size();
+			if (rows[i].row.has_shape) {
+				total_shape_elems += rows[i].row.shape.size();
 			}
 		}
 		auto &shape_vector = output.data[*shape_output_idx];
@@ -296,9 +326,8 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		for (const auto &output_column : gstate.output_layout.projected_columns) {
-			H5TreeWriteProjectedValue(gstate.rows[gstate.offset + row_idx].row, bind_data.projected_attributes,
-			                          output_column.column_id, output.data[output_column.output_idx], row_idx,
-			                          shape_offset, shape_data);
+			H5TreeWriteProjectedValue(rows[row_idx].row, bind_data.projected_attributes, output_column.column_id,
+			                          output.data[output_column.output_idx], row_idx, shape_offset, shape_data);
 		}
 	}
 	if (shape_output_idx.has_value()) {
@@ -306,7 +335,6 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	}
 	H5LsPopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs,
 	                            output);
-	gstate.offset += count;
 }
 
 static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, ScalarFunction &bound_function,
@@ -380,12 +408,25 @@ static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 	UnifiedVectorFormat path_data;
 	path_vec.ToUnifiedFormat(args.size(), path_data);
 	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &validity = FlatVector::Validity(result);
+	bool has_non_null_path = false;
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto path_idx = path_data.sel->get_index(i);
+		if (path_data.validity.RowIsValid(path_idx)) {
+			has_non_null_path = true;
+			break;
+		}
+		validity.SetInvalid(i);
+	}
+	if (!has_non_null_path) {
+		return;
+	}
+
 	vector<string> names;
 	vector<LogicalType> return_types;
 	H5LsGetReturnSchema(bind_data.projected_attributes, names, return_types);
 	H5TreeFileReader reader(state.GetContext(), bind_data.filename, bind_data.swmr, bind_data.projected_attributes);
-	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto path_idx = path_data.sel->get_index(i);
 		if (!path_data.validity.RowIsValid(path_idx)) {
@@ -405,6 +446,8 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	h5_ls_table_function.varargs = LogicalType::ANY;
 	h5_ls_table_function.named_parameters["filename"] = LogicalType::ANY;
 	h5_ls_table_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
+	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
+	// h5_ls still intentionally collects full child metadata for each emitted row.
 	h5_ls_table_function.projection_pushdown = true;
 	h5_ls_table_function.get_virtual_columns = H5GetFilenameVirtualColumns;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_ls_table_function)));

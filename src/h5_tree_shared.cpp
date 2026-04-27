@@ -456,6 +456,7 @@ struct H5TreeListIterData {
 	H5TreeFileReader *reader;
 	std::string group_path;
 	std::vector<H5TreeNamedRow> *rows;
+	idx_t max_rows = 0;
 	bool error = false;
 	std::string error_message;
 };
@@ -467,11 +468,8 @@ static std::string H5TreeJoinChildPath(const std::string &group_path, const char
 	return group_path + "/" + name;
 }
 
-void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &group_path,
-                                std::vector<H5TreeNamedRow> &rows) {
-	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
-	H5ErrorSuppressor suppress;
-
+static void H5TreeValidateListGroupInternal(H5TreeFileReader &reader, const std::string &group_path,
+                                            hsize_t *link_count) {
 	H5ObjectHandle group(reader.GetFileHandle(), group_path.c_str());
 	if (!group.is_valid()) {
 		throw IOException(AppendRemoteError("Failed to open object: " + group_path, reader.GetFilename()));
@@ -485,46 +483,80 @@ void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &gro
 		throw IOException(AppendRemoteError("Object is not a group: " + group_path, reader.GetFilename()));
 	}
 	H5G_info_t group_meta;
-	if (H5Gget_info(group, &group_meta) >= 0) {
-		rows.reserve(rows.size() + group_meta.nlinks);
+	if (link_count && H5Gget_info(group, &group_meta) >= 0) {
+		*link_count = group_meta.nlinks;
 	}
+}
 
+void H5TreeValidateListGroup(H5TreeFileReader &reader, const std::string &group_path) {
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	H5ErrorSuppressor suppress;
+	H5TreeValidateListGroupInternal(reader, group_path, nullptr);
+}
+
+static herr_t H5TreeListCallback(hid_t parent_loc, const char *name, const H5L_info2_t *info, void *op_data) {
+	auto &data = *reinterpret_cast<H5TreeListIterData *>(op_data);
+	try {
+		auto path = H5TreeJoinChildPath(data.group_path, name);
+		auto resolved = data.reader->ResolveEntry(path, *info, parent_loc, name);
+		H5TreeNamedRow named_row;
+		named_row.name = name;
+		named_row.row.path = path;
+		named_row.row.type = H5TreeTypeName(resolved.type_kind);
+		named_row.row.projected_values.resize(data.reader->GetProjectedAttributes().size());
+		if (resolved.identity) {
+			data.reader->PopulateRowMetadataAndAttributes(named_row.row, resolved.type_kind, *resolved.identity, path,
+			                                              parent_loc, name);
+		}
+		data.rows->push_back(std::move(named_row));
+		return data.max_rows > 0 && data.rows->size() >= data.max_rows ? 1 : 0;
+	} catch (const std::exception &ex) {
+		data.error = true;
+		data.error_message = H5NormalizeExceptionMessage(ex.what());
+		return -1;
+	}
+}
+
+static bool H5TreeListEntriesInternal(H5TreeFileReader &reader, const std::string &group_path, hsize_t &idx,
+                                      idx_t max_rows, std::vector<H5TreeNamedRow> &rows) {
 	H5TreeListIterData iter_data;
 	iter_data.reader = &reader;
 	iter_data.group_path = group_path;
 	iter_data.rows = &rows;
-
-	hsize_t idx = 0;
-	auto callback = [](hid_t parent_loc, const char *name, const H5L_info2_t *info, void *op_data) -> herr_t {
-		auto &data = *reinterpret_cast<H5TreeListIterData *>(op_data);
-		try {
-			auto path = H5TreeJoinChildPath(data.group_path, name);
-			auto resolved = data.reader->ResolveEntry(path, *info, parent_loc, name);
-			H5TreeNamedRow named_row;
-			named_row.name = name;
-			named_row.row.path = path;
-			named_row.row.type = H5TreeTypeName(resolved.type_kind);
-			named_row.row.projected_values.resize(data.reader->GetProjectedAttributes().size());
-			if (resolved.identity) {
-				data.reader->PopulateRowMetadataAndAttributes(named_row.row, resolved.type_kind, *resolved.identity,
-				                                              path, parent_loc, name);
-			}
-			data.rows->push_back(std::move(named_row));
-			return 0;
-		} catch (const std::exception &ex) {
-			data.error = true;
-			data.error_message = H5NormalizeExceptionMessage(ex.what());
-			return -1;
-		}
-	};
+	iter_data.max_rows = max_rows;
 	auto status = H5Literate_by_name2(reader.GetFileHandle(), group_path.c_str(), H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-	                                  callback, &iter_data, H5P_DEFAULT);
+	                                  H5TreeListCallback, &iter_data, H5P_DEFAULT);
 	if (status < 0) {
 		if (iter_data.error) {
 			throw IOException(AppendRemoteError(iter_data.error_message, reader.GetFilename()));
 		}
 		throw IOException(AppendRemoteError("Failed to list group entries: " + group_path, reader.GetFilename()));
 	}
+	return status == 0;
+}
+
+void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &group_path,
+                                std::vector<H5TreeNamedRow> &rows) {
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	H5ErrorSuppressor suppress;
+
+	hsize_t link_count = 0;
+	H5TreeValidateListGroupInternal(reader, group_path, &link_count);
+	rows.reserve(rows.size() + link_count);
+
+	hsize_t idx = 0;
+	H5TreeListEntriesInternal(reader, group_path, idx, 0, rows);
+}
+
+bool H5TreeListEntriesBatch(H5TreeFileReader &reader, const std::string &group_path, hsize_t &idx, idx_t max_rows,
+                            std::vector<H5TreeNamedRow> &rows) {
+	D_ASSERT(max_rows > 0);
+	rows.clear();
+	rows.reserve(max_rows);
+
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	H5ErrorSuppressor suppress;
+	return H5TreeListEntriesInternal(reader, group_path, idx, max_rows, rows);
 }
 
 } // namespace duckdb

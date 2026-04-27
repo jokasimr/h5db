@@ -675,6 +675,15 @@ FROM h5_ls('test/data/attrs_edge_cases.h5', '/empty_group');
 0
 
 query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/attrs_edge_cases.h5',
+    'test/data/attrs_edge_cases.h5'
+], '/empty_group');
+----
+0
+
+query I
 SELECT cardinality(h5_ls('test/data/attrs_edge_cases.h5', '/empty_group'));
 ----
 0
@@ -698,6 +707,21 @@ statement error
 SELECT h5_ls('test/data/links.h5', '/does_not_exist');
 ----
 IO Error: Failed to open object: /does_not_exist
+
+query II
+SELECT
+    CASE WHEN h5_ls('nonexistent.h5', NULL::VARCHAR) IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN h5_ls_swmr('nonexistent.h5', NULL::VARCHAR) IS NULL THEN 1 ELSE 0 END;
+----
+1	1
+
+query IT
+SELECT range, h5_ls('test/data/links.h5', CASE WHEN range = 0 THEN NULL::VARCHAR ELSE '/' END) IS NULL
+FROM range(2)
+ORDER BY range;
+----
+0	true
+1	false
 
 statement error
 SELECT * FROM h5_ls(

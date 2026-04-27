@@ -8,13 +8,14 @@ require h5db
 # h5_tree on many_groups.h5 (100k groups + 100k datasets)
 # =============================================================================
 
-query II
+query III
 SELECT
     COUNT(*),
+    COUNT(DISTINCT path),
     COUNT(*) FILTER (WHERE type = 'group')
 FROM h5_ls('test/data/many_groups.h5');
 ----
-100000	100000
+100000	100000	100000
 
 query I
 SELECT cardinality(h5_ls('test/data/many_groups.h5', '/'));
@@ -41,6 +42,18 @@ FROM h5_tree('test/data/many_groups.h5');
 33334	33333	33333	100001
 
 # Early-stop scans must not affect later scans on the same file.
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_ls('test/data/many_groups.h5') LIMIT 1);
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_ls('test/data/many_groups.h5');
+----
+100000
+
 query I
 SELECT COUNT(*)
 FROM (SELECT path FROM h5_tree('test/data/many_groups.h5') LIMIT 1);

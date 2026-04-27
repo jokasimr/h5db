@@ -625,6 +625,8 @@ void RegisterH5TreeFunction(ExtensionLoader &loader) {
 	h5_tree_function.varargs = LogicalType::ANY;
 	h5_tree_function.named_parameters["filename"] = LogicalType::ANY;
 	h5_tree_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
+	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
+	// h5_tree still intentionally collects full object metadata for each emitted row.
 	h5_tree_function.projection_pushdown = true;
 	h5_tree_function.get_virtual_columns = H5GetFilenameVirtualColumns;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_tree_function)));

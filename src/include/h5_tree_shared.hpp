@@ -110,5 +110,8 @@ private:
 
 void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &group_path,
                                 std::vector<H5TreeNamedRow> &rows);
+void H5TreeValidateListGroup(H5TreeFileReader &reader, const std::string &group_path);
+bool H5TreeListEntriesBatch(H5TreeFileReader &reader, const std::string &group_path, hsize_t &idx, idx_t max_rows,
+                            std::vector<H5TreeNamedRow> &rows);
 
 } // namespace duckdb
