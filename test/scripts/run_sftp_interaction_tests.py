@@ -905,6 +905,38 @@ class SFTPInteractionTests(unittest.TestCase):
         _, repeated_read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(repeated_read_calls, baseline_read_calls)
 
+    def test_missing_mtime_metadata_query_uses_external_cache(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        self.password_server.config.stat_omit_mtime = True
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                PRAGMA enable_external_file_cache=true;
+                SET validate_external_file_cache='VALIDATE_REMOTE';
+                CREATE OR REPLACE TEMPORARY SECRET metadata_cache_missing_mtime (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_tree('{url}');
+                SELECT COALESCE(SUM(nr_bytes), 0)
+                FROM duckdb_external_file_cache()
+                WHERE path = '{url}';
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            numeric_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()]
+            self.assertEqual(len(numeric_lines), 2, msg=result.output)
+            self.assertEqual(numeric_lines[0], "10", msg=result.output)
+            self.assertGreater(int(numeric_lines[1]), 0, msg=result.output)
+        finally:
+            self.password_server.config.stat_omit_mtime = False
+
     def test_no_validation_warm_cache_avoids_second_sftp_connection(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
         sql = textwrap.dedent(

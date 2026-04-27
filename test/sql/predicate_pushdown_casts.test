@@ -4,6 +4,157 @@
 
 require h5db
 
+# RSE pushdown must not treat a failed ordinary CAST as filter-false. The run
+# has to be scanned so DuckDB's remaining filter can raise the conversion error.
+statement error
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/run_encoded.h5',
+    '/experiment3/time',
+    h5_rse('/experiment3/level_run_starts', '/experiment3/level_values')
+)
+WHERE CAST(level_values AS INTEGER) > 0;
+----
+<REGEX>:.*Could not convert string 'low' to INT32.*level_values.*
+
+# A definitely-false RSE predicate may still prune the scan. UNKNOWN from the
+# cast predicate must not block other filters from proving the range empty.
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/run_encoded.h5',
+    '/experiment3/time',
+    h5_rse('/experiment3/level_run_starts', '/experiment3/level_values')
+)
+WHERE level_values = 'missing'
+  AND CAST(level_values AS INTEGER) > 0;
+----
+0
+
+# h5_index() range pushdown requires monotone casts. VARCHAR casts are
+# lexicographic, so they must be left to the normal post-scan filter.
+query III
+SELECT COUNT(*), MIN(idx), MAX(idx)
+FROM h5_read(
+    'test/data/pushdown_test.h5',
+    h5_alias('idx', h5_index()),
+    '/regular'
+)
+WHERE CAST(idx AS VARCHAR) > '2';
+----
+887	3	999
+
+# Numeric casts are allowed for index pushdown when the file-local index domain
+# fits the target type.
+query II
+SELECT COUNT(*), SUM(index)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS DOUBLE) BETWEEN 2.5 AND 6.5;
+----
+4	18
+
+query II
+SELECT COUNT(*), SUM(index)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS UTINYINT) BETWEEN 2 AND 4;
+----
+3	9
+
+# These predicates compare a narrowed index cast to constants that are outside
+# the narrowed type's domain. DuckDB currently widens the comparison expression,
+# but the scanner must still not admit an index pushdown that evaluates such
+# constants in the narrowed type and fails internally.
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS UTINYINT) < 300;
+----
+10
+
+query II
+SELECT COUNT(*), SUM(index)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS UTINYINT) BETWEEN 0 AND 300;
+----
+10	45
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS DECIMAL(1,0)) < 99;
+----
+10
+
+query II
+SELECT COUNT(*), SUM(index)
+FROM h5_read(
+    'test/data/simple.h5',
+    h5_index(),
+    '/integers'
+)
+WHERE CAST(index AS DECIMAL(1,0)) BETWEEN 0 AND 99;
+----
+10	45
+
+# If a narrowing index cast does not fit the whole file-local domain, h5_read
+# must not claim it. DuckDB's remaining filter should raise the normal cast
+# error when the overflowing row is reached.
+statement error
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/pushdown_test.h5',
+    h5_alias('idx', h5_index()),
+    '/regular'
+)
+WHERE CAST(idx AS UTINYINT) > 1;
+----
+<REGEX>:.*value 256.*out of range.*UINT8.*idx.*
+
+query III
+SELECT COUNT(*), MIN(idx), MAX(idx)
+FROM h5_read(
+    'test/data/pushdown_test.h5',
+    h5_alias('idx', h5_index()),
+    '/regular'
+)
+WHERE idx < 10
+  AND CAST(idx AS UTINYINT) > 1;
+----
+8	2	9
+
+# Nested casts are not claimed. The range evaluator applies a single comparison
+# type, so accepting lossy cast chains would prune rows using the wrong value.
+query III
+SELECT COUNT(*), MIN(regular), MAX(regular)
+FROM h5_read(
+    'test/data/pushdown_test.h5',
+    '/regular',
+    h5_rse('/float_rse_starts', '/float_rse_values')
+)
+WHERE CAST(CAST(float_rse_values AS INTEGER) AS DOUBLE) = 4.0;
+----
+400	400	799
+
 # =============================================================================
 # uint64 RSE column with foldable integer expressions on the RHS
 # =============================================================================

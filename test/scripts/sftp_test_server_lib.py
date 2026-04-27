@@ -51,6 +51,7 @@ class SFTPServerConfig:
     allowed_public_key_blobs: set[bytes] = field(default_factory=set)
     list_folder_omit_permissions: bool = False
     stat_omit_permissions: bool = False
+    stat_omit_mtime: bool = False
     read_delay_ms: int = 0
     stat_delay_ms: int = 0
     disconnect_on_stat: bool = False
@@ -182,7 +183,11 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
             self.transport.close()
             return paramiko.SFTP_FAILURE
         try:
-            return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+            attrs = paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+            if self.config.stat_omit_mtime:
+                attrs.st_atime = None
+                attrs.st_mtime = None
+            return attrs
         except OSError as ex:
             return paramiko.SFTPServer.convert_errno(ex.errno)
 
@@ -257,6 +262,9 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             attrs = paramiko.SFTPAttributes.from_stat(os.stat(self._resolve(path)))
             if self.config.stat_omit_permissions:
                 attrs.st_mode = None
+            if self.config.stat_omit_mtime:
+                attrs.st_atime = None
+                attrs.st_mtime = None
             return attrs
         except OSError as ex:
             return self._convert_error(ex)

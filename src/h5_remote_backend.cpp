@@ -1758,9 +1758,11 @@ private:
 			throw IOException("SFTP file '%s' did not report a file size", remote_path);
 		}
 		file_size = UnsafeNumericCast<idx_t>(attrs.filesize);
+		// Some SFTP servers may omit modification times. Treat that as epoch
+		// for now, matching DuckDB's timestamp-based cache validator contract.
 		last_modified = (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME)
 		                    ? Timestamp::FromEpochSeconds(UnsafeNumericCast<int64_t>(attrs.mtime))
-		                    : timestamp_t();
+		                    : timestamp_t(0);
 	}
 
 	SftpReadHandle &SelectReadHandle(idx_t offset) {

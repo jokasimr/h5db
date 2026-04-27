@@ -46,6 +46,33 @@ FROM (
 ----
 VARCHAR
 
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var');
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var', filename=true);
+----
+1
+
+query I
+SELECT CASE WHEN EXISTS (
+    SELECT *
+    FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/fixed_invalid_no_nul')
+) THEN 1 ELSE 0 END;
+----
+1
+
+statement error
+SELECT COUNT(*)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var')
+WHERE invalid_utf8_var IS NULL;
+----
+<REGEX>:.*(Invalid unicode.*\/invalid_utf8_var|\/invalid_utf8_var.*Invalid unicode).*
+
 statement error
 SELECT nullpad_fixed_invalid_after_nul
 FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullpad_fixed_invalid_after_nul');

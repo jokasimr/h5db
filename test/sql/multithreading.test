@@ -11,6 +11,21 @@
 
 require h5db
 
+statement ok
+PRAGMA threads=4;
+
+# Regression test: downstream errors after h5_read has produced a chunk must not
+# leave other parallel scan threads waiting for the same file to finish.
+statement error
+SELECT CAST(level_values AS INTEGER)
+FROM h5_read(
+    'test/data/run_encoded.h5',
+    '/experiment3/time',
+    h5_rse('/experiment3/level_run_starts', '/experiment3/level_values')
+);
+----
+<REGEX>:.*Could not convert string 'low' to INT32.*level_values.*
+
 # =============================================================================
 # Test 1: UNION ALL with 2 Detectors (Basic Parallel Read)
 # Tests basic parallel reading of regular columns from similar datasets

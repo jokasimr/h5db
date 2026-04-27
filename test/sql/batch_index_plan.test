@@ -31,3 +31,13 @@ EXPLAIN COPY (
 ) TO 'tmp_h5_batch_index.csv';
 ----
 physical_plan	<REGEX>:.*BATCH_COPY_TO_FILE.*H5_READ.*
+
+statement ok
+CREATE TEMP TABLE tmp_h5_glob AS
+SELECT values
+FROM h5_read('test/data/glob_order/order_*.h5', '/values');
+
+query II
+SELECT COUNT(*), SUM(values) FROM tmp_h5_glob;
+----
+3	13

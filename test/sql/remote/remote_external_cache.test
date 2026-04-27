@@ -19,9 +19,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 query I
 SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET';
@@ -37,9 +42,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 query II
 SELECT
@@ -58,17 +68,27 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 query I
 SELECT COUNT(*) > 0
@@ -87,17 +107,27 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT COUNT(*) FROM (SELECT * FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small') LIMIT 10);
+SELECT SUM(array_2d_chunked_small[1])
+FROM (
+  SELECT array_2d_chunked_small
+  FROM h5_read('test/data/nd_cache_test.h5', '/array_2d_chunked_small')
+  LIMIT 10
+);
 ----
-10
+45
 
 query II
 SELECT
