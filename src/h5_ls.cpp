@@ -1,6 +1,7 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "h5_tree_shared.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -17,7 +18,6 @@
 #endif
 #include <algorithm>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace duckdb {
@@ -171,7 +171,7 @@ static void H5LsGetReturnSchema(const vector<H5TreeProjectedAttributeSpec> &proj
 }
 
 static void H5LsValidateUniqueFieldNames(const vector<string> &names) {
-	std::unordered_set<string> seen;
+	case_insensitive_set_t seen;
 	seen.reserve(names.size());
 	for (const auto &name : names) {
 		if (!seen.insert(name).second) {

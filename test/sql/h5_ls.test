@@ -778,12 +778,12 @@ SELECT
 1	1
 
 query TT
-WITH files(filename) AS (
-    VALUES ('nonexistent.h5'), ('test/data/links.h5')
+WITH files(ord, filename) AS (
+    VALUES (0, 'nonexistent.h5'), (1, 'test/data/links.h5')
 )
 SELECT filename, h5_ls(filename, NULL::VARCHAR) IS NULL
 FROM files
-ORDER BY filename;
+ORDER BY ord;
 ----
 nonexistent.h5	true
 test/data/links.h5	true
@@ -857,10 +857,29 @@ statement error
 SELECT h5_ls(
     'test/data/with_attrs.h5',
     '/',
+    h5_alias('DUP', h5_attr('group_int_attr', NULL::BIGINT)),
+    h5_alias('dup', h5_attr('group_string_attr', NULL::VARCHAR))
+);
+----
+Binder Error: table "h5_ls" has duplicate column name "dup"
+
+statement error
+SELECT h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
     h5_alias('path', h5_attr('group_int_attr', NULL::BIGINT))
 );
 ----
 Binder Error: table "h5_ls" has duplicate column name "path"
+
+statement error
+SELECT h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('PATH', h5_attr('group_int_attr', NULL::BIGINT))
+);
+----
+Binder Error: table "h5_ls" has duplicate column name "PATH"
 
 statement error
 SELECT h5_ls('test/data/swmr_enabled.h5', '/', swmr := true);

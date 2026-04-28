@@ -41,6 +41,15 @@ FROM h5_read(
 0	1
 
 query III
+SELECT COUNT(*), SUM(a), SUM(b)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_2.h5',
+    'test/data/glob/attr_schema_1.h5'
+], '/target');
+----
+2	2	4
+
+query IIII
 SELECT
     (SELECT COUNT(*) FROM h5_tree([
         'test/data/glob_order/order_1.h5',
@@ -53,9 +62,13 @@ SELECT
     (SELECT COUNT(*) FROM h5_read([
         'test/data/glob_order/order_1.h5',
         'test/data/glob_order/order_1.h5'
-    ], '/values'));
+    ], '/values')),
+    (SELECT COUNT(*) FROM h5_attributes([
+        'test/data/glob/attr_schema_1.h5',
+        'test/data/glob/attr_schema_1.h5'
+    ], '/target'));
 ----
-2	2	2
+2	2	2	2
 
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR[]);
@@ -76,9 +89,19 @@ SELECT COUNT(*) FROM h5_tree([]::VARCHAR[]);
 IO Error: h5_tree needs at least one file to read
 
 statement error
+SELECT COUNT(*) FROM h5_attributes([]::VARCHAR[], '/target');
+----
+IO Error: h5_attributes needs at least one file to read
+
+statement error
 SELECT COUNT(*) FROM h5_read([1]::INTEGER[], '/values');
 ----
 <REGEX>:.*No function matches the given name and argument types 'h5_read\(INTEGER\[\], VARCHAR\)'.*
+
+statement error
+SELECT COUNT(*) FROM h5_attributes([1]::INTEGER[], '/target');
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_attributes\(INTEGER\[\], VARCHAR\)'.*
 
 statement error
 SELECT COUNT(*) FROM h5_read([
@@ -87,3 +110,11 @@ SELECT COUNT(*) FROM h5_read([
 ], '/values');
 ----
 Parser Error: h5_read reader cannot take NULL input as parameter
+
+statement error
+SELECT COUNT(*) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    NULL
+], '/target');
+----
+Parser Error: h5_attributes reader cannot take NULL input as parameter

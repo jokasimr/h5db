@@ -547,6 +547,7 @@ h5db/
 │
 ├── docs/                    # Documentation
 │   ├── README.md            # Documentation index
+│   ├── USER_GUIDE.md        # Practical user guide
 │   ├── API.md               # Public API reference
 │   ├── RSE_USAGE.md         # RSE user guide
 │   ├── developer/           # Contributor docs

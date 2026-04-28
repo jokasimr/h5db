@@ -72,6 +72,14 @@ def write_order_file(path: Path, value: int, marker_name: str) -> None:
         h5.create_dataset(marker_name, data=np.array([value], dtype=np.int32))
 
 
+def write_attribute_schema_file(path: Path, *, second_name: str = "b", second_value=np.int64(2)) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        dataset = h5.create_dataset("target", data=np.array([1], dtype=np.int32))
+        dataset.attrs["a"] = np.int32(1)
+        dataset.attrs[second_name] = second_value
+
+
 def write_large_order_file(path: Path, base_value: int, num_rows: int = 50_000) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
@@ -109,7 +117,10 @@ def write_many_small_fixtures(directory: Path, num_files: int = 1000, rows_per_f
         values = np.arange(start, start + rows_per_file, dtype=np.int32)
         part_path = directory / f"part_{file_idx + 1:04d}.h5"
         with h5py.File(part_path, "w") as h5:
-            h5.create_dataset("values", data=values)
+            dataset = h5.create_dataset("values", data=values)
+            dataset.attrs["file_index"] = np.int32(file_idx + 1)
+            dataset.attrs["first_value"] = np.int32(start)
+            dataset.attrs["rows_per_file"] = np.int32(rows_per_file)
         combined_values[start : start + rows_per_file] = values
 
     with h5py.File(directory / "combined.h5", "w") as h5:
@@ -233,6 +244,10 @@ def main() -> None:
     write_order_file(GLOB_HIDDEN_DIR / ".hidden_parent" / "visible_child" / "in_hidden_parent.h5", 40, "marker_40")
     write_order_file(GLOB_LITERAL_META_DIR / "literal[1].h5", 1, "marker_1")
     write_order_file(GLOB_LITERAL_META_DIR / "dir[1]" / "nested.h5", 2, "marker_2")
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_1.h5")
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_2.h5")
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_name_mismatch.h5", second_name="c")
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_type_mismatch.h5", second_value=np.float64(2.5))
 
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_1.h5")
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_2.h5")

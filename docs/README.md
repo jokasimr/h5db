@@ -2,7 +2,7 @@
 
 User documentation:
 
-- [USAGE_GUIDE.md](USAGE_GUIDE.md): practical introduction to the main workflows
+- [USER_GUIDE.md](USER_GUIDE.md): practical introduction to the main workflows
 - [API.md](API.md): function reference, settings, type mapping, and limitations
 - [RSE_USAGE.md](RSE_USAGE.md): detailed guide to run-start encoding support
 

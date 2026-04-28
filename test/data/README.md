@@ -64,7 +64,7 @@ To ensure test data exists (generate only if missing):
 | File | Generator | Size | Purpose |
 |------|-----------|------|---------|
 | `large_simple.h5` | `large/create_large_simple.py` | 1.3 GB | 10M row version of simple.h5 |
-| `large_multithreading.h5` | `large/create_large_multithreading.py` | 153 MB | 2M rows × 10 detectors with RSE |
+| `large_multithreading.h5` | `large/create_large_multithreading.py` | 153 MB | 2M rows x 10 detectors with RSE |
 | `large_pushdown_test.h5` | `large/create_large_pushdown.py` | 115 MB | 10M row version of pushdown_test.h5 |
 | `large_rse_edge_cases.h5` | `large/create_large_rse_edge_cases.py` | 266 MB | 10M row version of rse_edge_cases.h5 |
 

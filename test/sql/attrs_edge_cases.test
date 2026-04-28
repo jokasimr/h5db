@@ -45,6 +45,11 @@ SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_attr
 IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
 
 statement error
+SELECT COUNT(*) FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_attr_dataset');
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+
+statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_fixed_attr_dataset');
 ----
 IO Error: Invalid unicode (byte sequence mismatch) detected in value construction

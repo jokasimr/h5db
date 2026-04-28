@@ -1,0 +1,125 @@
+# name: test/sql/glob/h5_attributes_glob.test
+# description: h5_attributes glob, list, filename column, and schema matching coverage
+# group: [glob]
+
+require h5db
+
+query III
+SELECT COUNT(*), SUM(a), SUM(b)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_2.h5'
+], '/target');
+----
+2	2	4
+
+query II
+SELECT COUNT(*), SUM(int32_attr)
+FROM h5_attributes('test/data/glob/glob_with_attrs_*.h5', '/dataset_with_attrs');
+----
+2	246912
+
+query IIII
+SELECT COUNT(*), COUNT(DISTINCT filename), SUM(file_index), SUM(rows_per_file)
+FROM h5_attributes('test/data/glob_many_small/part_*.h5', '/values');
+----
+1000	1000	500500	3000
+
+query TII
+SELECT replace(filename, '\', '/') AS filename, a, b
+FROM h5_attributes([
+    'test/data/glob/attr_schema_2.h5',
+    'test/data/glob/attr_schema_[12].h5'
+], '/target');
+----
+test/data/glob/attr_schema_2.h5	1	2
+test/data/glob/attr_schema_1.h5	1	2
+test/data/glob/attr_schema_2.h5	1	2
+
+query II
+SELECT replace(filename, '\', '/') AS filename, int32_attr
+FROM h5_attributes('test/data/glob/glob_with_attrs_*.h5', '/dataset_with_attrs')
+ORDER BY filename;
+----
+test/data/glob/glob_with_attrs_1.h5	123456
+test/data/glob/glob_with_attrs_2.h5	123456
+
+query TII
+SELECT replace(filename, '\', '/') AS filename, a, b
+FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=true);
+----
+test/data/glob/attr_schema_1.h5	1	2
+
+query II
+SELECT replace(source, '\', '/') AS source, int32_attr
+FROM h5_attributes(
+    'test/data/glob/glob_with_attrs_1.h5',
+    '/dataset_with_attrs',
+    filename='source'
+);
+----
+test/data/glob/glob_with_attrs_1.h5	123456
+
+statement error
+SELECT filename
+FROM h5_attributes(
+    'test/data/glob/glob_with_attrs_1.h5',
+    '/dataset_with_attrs',
+    filename='source'
+);
+----
+<REGEX>:.*filename.*not found.*
+
+query I
+SELECT replace(filename, '\', '/') AS filename
+FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=false);
+----
+test/data/glob/attr_schema_1.h5
+
+statement error
+FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=NULL);
+----
+Invalid Input Error: Cannot use NULL as argument for "filename"
+
+statement error
+SELECT COUNT(*)
+FROM h5_attributes('test/data/glob/no_such_*.h5', '/target');
+----
+<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
+
+statement error
+FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs', filename='string_attr');
+----
+Binder Error: Option filename adds column "string_attr", but that column name is already present in h5_attributes output
+
+statement error
+FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs', filename='StRiNg_AtTr');
+----
+Binder Error: Option filename adds column "StRiNg_AtTr", but that column name is already present in h5_attributes output
+
+statement error
+SELECT COUNT(*)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_type_mismatch.h5'
+], '/target');
+----
+Binder Error: h5_attributes matched file 'test/data/glob/attr_schema_type_mismatch.h5' with an incompatible attribute schema
+
+statement error
+SELECT COUNT(*)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_name_mismatch.h5'
+], '/target');
+----
+Binder Error: h5_attributes matched file 'test/data/glob/attr_schema_name_mismatch.h5' with an incompatible attribute schema
+
+statement error
+SELECT COUNT(*)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/glob_same_1.h5'
+], '/target');
+----
+IO Error: Failed to open object: /target

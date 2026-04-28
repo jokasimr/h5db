@@ -1,6 +1,6 @@
 # H5DB API Reference
 
-This document describes all functions provided by the h5db extension.
+This document describes the public SQL functions provided by the h5db extension.
 
 ## Remote Access
 
@@ -17,7 +17,7 @@ All file-opening h5db functions accept local paths or remote URLs as `filename`.
 
 ### Filename Patterns and Filename Lists
 
-The table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, and `h5_read(...)`
+The table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)`
 accept:
 
 - a single filename or URL (`VARCHAR`)
@@ -39,15 +39,17 @@ remote schemes when the underlying DuckDB filesystem supports globbing.
 - Duplicate files are preserved and are processed more than once.
 - A pattern that matches no files raises an error.
 - `h5_read(...)` concatenates rows file by file.
+- `h5_attributes(...)` emits one row per matched file.
 - `h5_index()` is the outermost-dimension row index within each matched file.
-- Table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual
-  `filename` column that can be referenced explicitly.
+- Table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden
+  virtual `filename` column that can be referenced explicitly.
 - `filename := true` adds `filename` to the visible output schema.
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
   In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
 - All matched files in `h5_read(...)` must have compatible column definitions.
-- `h5_attributes(...)` accepts one filename/URL. Scalar `h5_ls(...)`
-  accepts one filename/URL expression per row. Neither expands filename lists or glob patterns.
+- All matched files in `h5_attributes(...)` must expose the same attributes in the same order with the same names and
+  types.
+- Scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand filename lists or glob patterns.
 - For local paths and DuckDB-backed remote schemes, glob expansion uses
   DuckDB's filesystem stack. For `sftp://` URLs, glob expansion is handled by
   h5db's SFTP backend.
@@ -69,6 +71,9 @@ SELECT * FROM h5_read(
     'sftp://beamline.example.org/data/run_*.h5',
     '/entry/data'
 );
+
+SELECT filename, units
+FROM h5_attributes('runs/run_*.h5', '/entry/data');
 ```
 
 ### SFTP Secrets
@@ -167,8 +172,8 @@ as additional columns with `h5_attr(...)`.
 **Projected Attributes:**
 - Projected attributes are declared with `h5_attr(...)` and may be renamed with `h5_alias(...)`.
 - Only resolved local rows read attribute values. Unresolved and external rows use projected defaults.
-- Projected output names must be unique; duplicate projected names or collisions with `path`, `type`, `dtype`, or
-  `shape` fail at bind time.
+- Projected output names must be unique under DuckDB's case-insensitive identifier matching; duplicate projected names
+  or collisions with `path`, `type`, `dtype`, or `shape` fail at bind time.
 - See `h5_attr(...)` below for bind-time rules, default handling, string behavior, and supported attribute forms.
 
 **Example:**
@@ -244,6 +249,8 @@ the requested group.
 - external groups can be listed if the external target resolves successfully
 - row typing, `dtype`, and `shape` are the same as `h5_tree()`
 - projected attributes use the same `h5_attr(...)` semantics
+- projected output names must be unique under DuckDB's case-insensitive identifier matching and must not collide with
+  `path`, `type`, `dtype`, or `shape`
 
 **Examples:**
 ```sql
@@ -285,7 +292,9 @@ Reads data from one or more datasets in an HDF5 file.
 
 **Returns:** Table with one column per dataset, plus hidden virtual column `filename` (VARCHAR)
 
-**Column Naming:** Column names are extracted from the last component of the dataset path (e.g., `/group/data` → column `data`)
+**Column Naming:** Column names are extracted from the last component of the dataset path, for example `/group/data`
+becomes `data`. Output names must be unique under DuckDB's case-insensitive identifier matching. Use `h5_alias(...)`
+when two dataset paths or generated columns would otherwise collide.
 
 **Scalar Datasets:**
 - Scalar (rank-0) datasets are returned as constant columns.
@@ -349,20 +358,27 @@ SELECT * FROM h5_read('data.h5', '/measurements', swmr := true);
 
 ---
 
-### `h5_attributes(filename, object_path)`
+### `h5_attributes(filename_or_filenames, object_path)`
 
 Reads attributes from an object or the file root.
 
 **Parameters:**
-- `filename` (VARCHAR): Local path or remote URL to the HDF5 file. See [Remote Access](#remote-access).
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
 - `object_path` (VARCHAR): Path to the target object, or `/` for root
+- `filename` (BOOLEAN or VARCHAR, named, optional): Add a visible filename column. `true` uses the column name
+  `filename`; a string uses the provided column name instead. Without this option, hidden virtual `filename`
+  remains available by explicit reference.
 - `swmr` (BOOLEAN, named, optional): Open in SWMR read mode (default: `false`)
 
-**Returns:** Single-row table where each column represents one attribute
+**Returns:** One row per matched file where each non-virtual column represents one attribute
 - Column names are the attribute names
 - Column types match the attribute types (numeric, string, or arrays)
 - If the target object has no attributes, the function raises `IO Error: Object has no attributes: ...`
 - Invalid UTF-8 string attribute values raise an error in `h5_attributes()`
+- Multiple matched files must have the same attribute names, types, and order.
+- Attribute output names must be unique under DuckDB's case-insensitive identifier matching.
+- Hidden virtual column `filename` (VARCHAR), available by explicit reference.
 
 **Type Support:**
 - Numeric scalars and string scalars
@@ -375,6 +391,10 @@ Reads attributes from an object or the file root.
 -- Read attributes from a dataset
 SELECT * FROM h5_attributes('data.h5', '/measurements');
 
+-- Read the same object's attributes across many files
+SELECT filename, units
+FROM h5_attributes('runs/run_*.h5', '/measurements');
+
 -- Read specific attributes
 SELECT units, description FROM h5_attributes('data.h5', '/temperature');
 
@@ -386,6 +406,10 @@ SELECT * FROM h5_attributes('data.h5', '/');
 
 -- Enable SWMR read mode
 SELECT * FROM h5_attributes('data.h5', '/measurements', swmr := true);
+
+-- Materialize filename into SELECT *
+SELECT *
+FROM h5_attributes('runs/run_*.h5', '/measurements', filename := true);
 ```
 
 ---
@@ -412,6 +436,8 @@ by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 - `NULL` `group_path` yields `NULL`
 - named parameters such as `swmr := true` or `filename := true` are not supported in the scalar form
 - projected attributes use the same `h5_attr(...)` semantics as table `h5_ls()`
+- projected output names must be unique under DuckDB's case-insensitive identifier matching and must not collide with
+  `path`, `type`, `dtype`, or `shape`
 
 **Examples:**
 ```sql
@@ -579,6 +605,8 @@ definition when used with `h5_tree()` or `h5_ls()`.
 
 **Returns:** STRUCT wrapper used by `h5_read()`, `h5_tree()`, and `h5_ls()`
 
+The alias name participates in the same case-insensitive duplicate-name checks as normal output column names.
+
 **Example:**
 ```sql
 SELECT * FROM h5_read(
@@ -632,7 +660,7 @@ SET h5db_batch_size = '4MB';
 
 ## Type Mapping
 
-### HDF5 → DuckDB Type Conversion
+### HDF5 to DuckDB Type Conversion
 
 | HDF5 Type | Size | DuckDB Type |
 |-----------|------|-------------|

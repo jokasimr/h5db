@@ -1,7 +1,7 @@
 # h5db User Guide
 
 This guide is a practical introduction to using `h5db`. It focuses on the part
-of the extension that most users are most likely to need:
+of the extension that most users need first:
 
 - inspect a file
 - find the paths you care about
@@ -11,7 +11,6 @@ of the extension that most users are most likely to need:
 
 It is intentionally not a full API reference. For complete details, see
 [API.md](API.md).
-
 
 ## Minimal Cheat Sheet
 
@@ -55,7 +54,7 @@ The four functions most users should learn first are:
 - `h5_tree(...)`: recursively inspect the file structure
 - `h5_ls(...)`: list one level of a group
 - `h5_read(...)`: read datasets as table columns
-- `h5_attributes(...)`: read attributes from one object
+- `h5_attributes(...)`: read all attributes from the same object path in one or more files
 
 If you understand those four, you can already do most day-to-day work with
 `h5db`.
@@ -95,17 +94,19 @@ FROM h5_tree('data.h5')
 ORDER BY path;
 ```
 
-Here the duckdb `.maxrows N` command might be useful to see the entire output. 
+Here the DuckDB `.maxrows N` command can be useful when you want to see the entire output.
 
 You can apply regular SQL filters to limit the number of rows displayed:
 
-For example 
+For example:
+
 ```sql
 FROM h5_tree('data.h5')
-WHERE path like '/entry/instrument/detector/%'
+WHERE path LIKE '/entry/instrument/detector/%'
 ORDER BY path;
 ```
-will only display entries that start by `/entry/instrument/detector/`.
+
+This only displays entries below `/entry/instrument/detector/`.
 
 What to look for:
 
@@ -125,6 +126,14 @@ FROM h5_ls('data.h5', '/entry/instrument');
 
 Use `h5_ls(...)` when you already know roughly where to look and want a more
 focused view.
+
+There is also a scalar form for queries that need one value per input row:
+
+```sql
+SELECT h5_ls('data.h5', '/entry/instrument');
+```
+
+The scalar form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
 
 ## Step 2: Read Datasets as Columns
 
@@ -148,7 +157,7 @@ FROM h5_read(
 );
 ```
 
-Think of this as “read these datasets and align them by row”.
+Think of this as "read these datasets and align them by row".
 
 This works best when the datasets share the same outer dimension.
 
@@ -174,8 +183,8 @@ within the current file's dataset, so it starts at `0` for each file.
 
 ### Read multiple files
 
-The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` can read more
-than one file at a time.
+The table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and
+`h5_attributes(...)` can read more than one file at a time.
 
 You can use glob patterns with local paths and `sftp://` URLs, and with
 DuckDB-backed remote schemes when the underlying DuckDB filesystem supports
@@ -195,20 +204,27 @@ FROM h5_read(
     ['runs/calibration.h5', 'runs/run_*.h5'],
     '/counts'
 );
+
+SELECT filename, units
+FROM h5_attributes('runs/run_*.h5', '/entry/data');
 ```
 
 Useful mental models:
 
 - `h5_read(...)` concatenates rows file by file
+- `h5_attributes(...)` returns one row per matched file
 - `h5_index()` is per file, not across the combined multi-file result
 - list entries are expanded left-to-right
 - duplicate files are preserved
-- table `h5_tree(...)`, table `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual `filename` column
+- table `h5_tree(...)`, table `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden virtual
+  `filename` column
 - `filename := true` adds `filename` to the visible output schema
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
   and replaces the hidden `filename` binding with that visible name
 - a pattern that matches no files raises an error
 - `h5_read(...)` requires compatible column definitions across all matched files
+- `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
+- scalar `h5_ls(...)` accepts one filename expression per row and does not expand filename lists or glob patterns
 - for local paths and DuckDB-backed remote schemes, glob expansion uses
   DuckDB's filesystem stack
 - for `sftp://` URLs, glob expansion is handled by h5db's SFTP backend
@@ -225,11 +241,15 @@ FROM h5_tree('runs/**/*.h5')
 WHERE path = '/entry/data';
 
 FROM h5_read('runs/run_*.h5', '/counts', filename := true);
+
+FROM h5_attributes('runs/run_*.h5', '/entry/data', filename := true);
 ```
 
 ### Rename output columns
 
-HDF5 datasets with the same name will produce columns having the same name. That is not allowed by duckdb. To avoid duplicate names, rename (one of) the columns using `h5_alias`:
+HDF5 datasets with the same final path component produce the same DuckDB column name. DuckDB compares output column
+names case-insensitively, so names such as `temperature` and `Temperature` also collide. Use `h5_alias(...)` to give
+one or both columns explicit names:
 
 ```sql
 FROM h5_read(
@@ -256,7 +276,9 @@ FROM h5_attributes('data.h5', '/measurements');
 ```
 This returns one row where each attribute becomes its own column.
 
-Use this when you are inspecting one specific object and want full detail.
+Use this when you are inspecting one specific object path and want full detail.
+With multiple files, the object must expose the same attribute names, types, and
+order in every file.
 
 ### Read root attributes
 
@@ -323,7 +345,7 @@ FROM h5_tree(
 ORDER BY path;
 ```
 
-### 3. Read one object’s attributes in detail
+### 3. Read one object's attributes in detail
 
 ```sql
 FROM h5_attributes('data.h5', '/entry/data');
@@ -395,7 +417,7 @@ See [API.md](API.md) for the full SFTP secret specification.
 
 ### 1. Paths matter
 
-`h5db` works with HDF5 paths, so getting comfortable with the file’s namespace is
+`h5db` works with HDF5 paths, so getting comfortable with the file's namespace is
 the main skill.
 
 If a query is not doing what you expect, check the exact paths again with

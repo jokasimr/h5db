@@ -611,6 +611,8 @@ private:
 			libssh2_session_set_blocking(session, 1);
 		}
 		if (abortive) {
+			// Query interruption uses abortive cleanup: close the transport first so
+			// libssh2 teardown cannot wait for a graceful server response.
 			socket_fd.reset();
 		}
 		if (sftp_session) {

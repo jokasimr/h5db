@@ -21,8 +21,8 @@ actually good, without depending on `sshfs` or inheriting avoidable complexity.
 
 Relevant files:
 
-- [src/h5_sftp_secrets.cpp](/home/johannes/personal/h5db/src/h5_sftp_secrets.cpp)
-- [src/h5_remote_backend.cpp](/home/johannes/personal/h5db/src/h5_remote_backend.cpp)
+- [src/h5_sftp_secrets.cpp](../../src/h5_sftp_secrets.cpp)
+- [src/h5_remote_backend.cpp](../../src/h5_remote_backend.cpp)
 
 Current `h5db` SFTP auth modes:
 

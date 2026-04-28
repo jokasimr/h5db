@@ -12,8 +12,8 @@ stack or SFTP.
 - Scalar datasets are treated as constant columns.
 - Supports projection pushdown in `h5_read(...)`.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
-- Table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` accept single files, glob patterns, or
-  `VARCHAR[]` filename inputs.
+- Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
+  patterns, or `VARCHAR[]` filename inputs.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
@@ -30,10 +30,11 @@ stack or SFTP.
 - `h5_ls(filename_or_filenames[, group_path], projected_attributes...)`
   Lists only the immediate children of a group. The table form returns the same row shape as `h5_tree`; the scalar
   form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
-- `h5_attributes(filename, object_path)`
-  Reads attributes from an object or the file root as a single wide row.
+- `h5_attributes(filename_or_filenames, object_path)`
+  Reads attributes from an object or the file root. Multi-file reads return one wide row per file and require the same
+  attribute names, types, and order in every matched file.
 
-For a practical guide to the main workflows, see [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md).
+For a practical guide to the main workflows, see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 For the full API, see [docs/API.md](docs/API.md).
 
 ## Quick Start
@@ -124,7 +125,7 @@ FROM h5_tree(
 
 All file-opening h5db functions accept local paths or remote URLs as `filename`.
 
-The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` also accept:
+The table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` also accept:
 
 - a glob pattern
 - a `VARCHAR[]` of exact filenames/URLs and/or glob patterns
@@ -135,14 +136,18 @@ Multi-file semantics:
 - list entries are expanded left-to-right
 - duplicate files are preserved and are processed more than once
 - `h5_read(...)` concatenates rows file by file
+- `h5_attributes(...)` returns one row per matched file
 - `h5_index()` is the outermost-dimension row index within each matched file, so it starts at `0` for each file
-- table `h5_tree(...)`, table `h5_ls(...)`, and `h5_read(...)` expose a hidden virtual `filename` column; refer to
-  it explicitly when you need file provenance
+- table `h5_tree(...)`, table `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden virtual
+  `filename` column; refer to it explicitly when you need file provenance
 - `filename := true` adds `filename` to the visible output schema, so it appears in `FROM ...` / `SELECT *`
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
   and replaces the hidden `filename` binding with that visible name
 - `h5_read(...)` requires compatible column definitions across all matched files
-- `h5_attributes(...)` accepts one filename/URL; scalar `h5_ls(...)` accepts one filename/URL expression per row
+- `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
+- scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand lists or glob patterns
+- output column names are checked using DuckDB's case-insensitive identifier matching; use `h5_alias(...)` when two
+  datasets or projected attributes would otherwise produce the same name
 
 For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's
 filesystem stack. For `sftp://` URLs, glob expansion is handled by h5db's SFTP
@@ -305,7 +310,7 @@ For targeted test runs, test-data generation, and debugging workflows, see [docs
 ## Documentation
 
 - [docs/README.md](docs/README.md): documentation index
-- [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md): practical usage guide for the main workflows
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md): practical usage guide for the main workflows
 - [docs/API.md](docs/API.md): function reference, settings, type mapping, and limitations
 - [docs/RSE_USAGE.md](docs/RSE_USAGE.md): detailed guide to run-start encoding support
 - [docs/developer/DEVELOPER.md](docs/developer/DEVELOPER.md): building, testing, debugging, and project layout

@@ -17,8 +17,8 @@ This note captures two related conclusions from investigating slow remote HDF5 q
 
 The conclusions here are grounded in:
 
-- `h5_tree` implementation in [src/h5_tree.cpp](/home/johannes/personal/h5db/src/h5_tree.cpp)
-- current remote VFD implementation in [src/h5_remote_vfd.cpp](/home/johannes/personal/h5db/src/h5_remote_vfd.cpp)
+- `h5_tree` implementation in [src/h5_tree.cpp](../../src/h5_tree.cpp)
+- current remote VFD implementation in [src/h5_remote_vfd.cpp](../../src/h5_remote_vfd.cpp)
 - DuckDB `httpfs` source in the public `duckdb-httpfs` repository
 - direct HTTP tracing against a public S3-backed HDF5 object
 
@@ -181,13 +181,13 @@ DuckDB interrupt handling is cooperative:
 - the executor notices it at normal execution boundaries
 
 Relevant code:
-- [duckdb/src/main/client_context.cpp](/home/johannes/personal/h5db/duckdb/src/main/client_context.cpp)
-- [duckdb/src/parallel/pipeline_executor.cpp](/home/johannes/personal/h5db/duckdb/src/parallel/pipeline_executor.cpp)
+- [duckdb/src/main/client_context.cpp](../../duckdb/src/main/client_context.cpp)
+- [duckdb/src/parallel/pipeline_executor.cpp](../../duckdb/src/parallel/pipeline_executor.cpp)
 
 The remote `h5db` path then blocks inside synchronous HDF5 calls:
 
-- file open in [src/include/h5_raii.hpp](/home/johannes/personal/h5db/src/include/h5_raii.hpp)
-- dataset reads in [src/h5_read.cpp](/home/johannes/personal/h5db/src/h5_read.cpp)
+- file open in [src/include/h5_raii.hpp](../../src/include/h5_raii.hpp)
+- dataset reads in [src/h5_read.cpp](../../src/h5_read.cpp)
 
 For remote files those HDF5 calls enter the VFD, then `httpfs`, which currently uses synchronous `curl_easy_perform()` without a cancellation callback.
 

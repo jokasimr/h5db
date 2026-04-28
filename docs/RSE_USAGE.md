@@ -8,7 +8,7 @@ Run-start encoding (RSE), also known as run-length encoding (RLE), is a compress
 - `run_starts`: `[0, 3, 7]` (3 values - where runs begin)
 - `values`: `[100, 200, 300]` (3 values - what the values are)
 
-This achieves a **3.3× compression ratio** in this simple example. Real-world datasets often achieve 100×-1000× compression.
+This achieves a **3.3x compression ratio** in this simple example. Real-world datasets often achieve 100x-1000x compression.
 
 ## When to Use RSE
 
@@ -25,7 +25,7 @@ RSE is ideal for:
 The `h5_rse()` scalar function creates a specification for a run-start encoded column:
 
 ```sql
-h5_rse(run_starts_path, values_path) → STRUCT
+h5_rse(run_starts_path, values_path) -> STRUCT
 ```
 
 **Parameters**:
@@ -55,7 +55,8 @@ SELECT * FROM h5_read(
 
 ```sql
 -- Load the extension
-LOAD 'h5db.duckdb_extension';
+INSTALL h5db FROM community;
+LOAD h5db;
 
 -- Read a dataset with one regular and one RSE column
 SELECT * FROM h5_read(
@@ -143,7 +144,7 @@ WHERE status_vals = 'active';
 
 ### Example 5: High Compression Scenario
 
-Real-world example with 1000 rows compressed from 4 runs (250× compression):
+Real-world example with 1000 rows compressed from 4 runs (250x compression):
 
 ```sql
 -- Compute statistics per status
@@ -219,9 +220,9 @@ Given:
 - Total rows = 10
 
 Expansion:
-- Run 0: rows 0-2 (indices 0, 1, 2) → value 100
-- Run 1: rows 3-6 (indices 3, 4, 5, 6) → value 200
-- Run 2: rows 7-9 (indices 7, 8, 9) → value 300
+- Run 0: rows 0-2 (indices 0, 1, 2) -> value 100
+- Run 1: rows 3-6 (indices 3, 4, 5, 6) -> value 200
+- Run 2: rows 7-9 (indices 7, 8, 9) -> value 300
 
 ## Supported Data Types
 
@@ -250,9 +251,9 @@ RSE data is **expanded in memory** during the initialization phase:
 ### Compression Ratios
 
 Typical compression ratios by use case:
-- **State variables**: 100×-1000× (e.g., 10 states over 100,000 rows)
-- **Quality flags**: 50×-500× (e.g., occasional flag changes)
-- **Operational modes**: 10×-100× (e.g., switching between 3-5 modes)
+- **State variables**: 100x-1000x (e.g., 10 states over 100,000 rows)
+- **Quality flags**: 50x-500x (e.g., occasional flag changes)
+- **Operational modes**: 10x-100x (e.g., switching between 3-5 modes)
 
 ### Query Performance
 
@@ -265,16 +266,17 @@ Typical compression ratios by use case:
 
 For remote files handled through DuckDB-backed schemes (HTTP/S, S3, R2, GCS, HF, etc.) or `sftp://`:
 - Only need to read small run_starts and values datasets
-- Significant bandwidth savings (100×-1000× less data transferred)
+- Significant bandwidth savings (100x-1000x less data transferred)
 
 ## Validation and Error Handling
 
 ### Automatic Validation
 
 h5db automatically validates:
-1. ✅ `run_starts` is strictly increasing
-2. ✅ `run_starts.size() == values.size()`
-3. ✅ At least one regular column exists
+
+1. `run_starts` is strictly increasing
+2. `run_starts.size() == values.size()`
+3. At least one regular column exists
 
 ### Error Messages
 
@@ -299,12 +301,13 @@ IO Error: RSE run_starts and values must have same size. Got 3 and 4
 ## Best Practices
 
 ### 1. Choose RSE Wisely
-✅ **Good candidates**:
+
+**Good candidates**:
 - Variables that change infrequently
 - Categorical data with long runs
 - Step functions
 
-❌ **Poor candidates**:
+**Poor candidates**:
 - Rapidly changing values
 - Unique values at every row
 - Continuous measurements
@@ -375,7 +378,7 @@ assert all(run_starts[i] < run_starts[i+1] for i in range(len(run_starts)-1))
 
 ### vs. Full Expansion in HDF5
 **RSE Pros**:
-- Much smaller file size (100×-1000× smaller)
+- Much smaller file size (100x-1000x smaller)
 - Faster file I/O
 - Better for remote files
 
@@ -412,12 +415,12 @@ Potential future improvements:
 
 See `test/data/run_encoded.h5` for complete working examples:
 - Basic int32 expansion
-- High compression ratio (1000 rows → 4 runs)
+- High compression ratio (1000 rows -> 4 runs)
 - String value support
 - Edge cases
 
 ## See Also
 
-- [README.md](README.md) - Main h5db documentation
+- [../README.md](../README.md) - Main h5db documentation
 - [API.md](API.md) - Complete API reference
 - [developer/DEVELOPER.md](developer/DEVELOPER.md) - Developer guide

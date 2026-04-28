@@ -65,11 +65,11 @@ In the current code:
 
 Relevant code:
 
-- [src/h5_read.cpp](/home/johannes/personal/h5db/src/h5_read.cpp)
-- [duckdb/src/parallel/pipeline_executor.cpp](/home/johannes/personal/h5db/duckdb/src/parallel/pipeline_executor.cpp)
-- [duckdb/src/execution/operator/persistent/physical_batch_insert.cpp](/home/johannes/personal/h5db/duckdb/src/execution/operator/persistent/physical_batch_insert.cpp)
-- [duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp](/home/johannes/personal/h5db/duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp)
-- [duckdb/src/execution/operator/helper/physical_buffered_batch_collector.cpp](/home/johannes/personal/h5db/duckdb/src/execution/operator/helper/physical_buffered_batch_collector.cpp)
+- [src/h5_read.cpp](../../src/h5_read.cpp)
+- [duckdb/src/parallel/pipeline_executor.cpp](../../duckdb/src/parallel/pipeline_executor.cpp)
+- [duckdb/src/execution/operator/persistent/physical_batch_insert.cpp](../../duckdb/src/execution/operator/persistent/physical_batch_insert.cpp)
+- [duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp](../../duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp)
+- [duckdb/src/execution/operator/helper/physical_buffered_batch_collector.cpp](../../duckdb/src/execution/operator/helper/physical_buffered_batch_collector.cpp)
 
 This implementation is semantically correct because:
 
@@ -354,8 +354,8 @@ These are acceptable if the state remains minimal and the measured sink win is r
 
 Use the existing harness:
 
-- [benchmark/get_partition_data/bench_get_partition_data.py](/home/johannes/personal/h5db/benchmark/get_partition_data/bench_get_partition_data.py)
-- [benchmark/get_partition_data/README.md](/home/johannes/personal/h5db/benchmark/get_partition_data/README.md)
+- [benchmark/get_partition_data/bench_get_partition_data.py](../../benchmark/get_partition_data/bench_get_partition_data.py)
+- [benchmark/get_partition_data/README.md](../../benchmark/get_partition_data/README.md)
 
 ### Required measurements
 
