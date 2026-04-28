@@ -16,6 +16,7 @@
 #include "duckdb/common/types/vector.hpp"
 #endif
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -82,25 +83,20 @@ struct H5LsGlobalState : public GlobalTableFunctionState {
 };
 
 struct H5LsScalarBindData : public FunctionData {
-	std::string filename;
 	vector<H5TreeProjectedAttributeSpec> projected_attributes;
 	bool swmr = false;
-	LogicalType return_type;
 
-	H5LsScalarBindData(std::string filename_p, vector<H5TreeProjectedAttributeSpec> projected_attributes_p, bool swmr_p,
-	                   LogicalType return_type_p)
-	    : filename(std::move(filename_p)), projected_attributes(std::move(projected_attributes_p)), swmr(swmr_p),
-	      return_type(std::move(return_type_p)) {
+	H5LsScalarBindData(vector<H5TreeProjectedAttributeSpec> projected_attributes_p, bool swmr_p)
+	    : projected_attributes(std::move(projected_attributes_p)), swmr(swmr_p) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<H5LsScalarBindData>(filename, projected_attributes, swmr, return_type);
+		return make_uniq<H5LsScalarBindData>(projected_attributes, swmr);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<H5LsScalarBindData>();
-		if (filename != other.filename || swmr != other.swmr || return_type != other.return_type ||
-		    projected_attributes.size() != other.projected_attributes.size()) {
+		if (swmr != other.swmr || projected_attributes.size() != other.projected_attributes.size()) {
 			return false;
 		}
 		for (idx_t i = 0; i < projected_attributes.size(); i++) {
@@ -343,9 +339,6 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	if (arguments.size() < 2) {
 		throw InvalidInputException("%s requires at least 2 arguments: filename and group path", function_name);
 	}
-	if (!arguments[0]->IsFoldable()) {
-		throw InvalidInputException("scalar %s filename must be a constant expression", function_name);
-	}
 	for (idx_t i = 2; i < arguments.size(); i++) {
 		if (!arguments[i]->IsFoldable()) {
 			throw InvalidInputException("scalar %s projected attribute arguments must be constant expressions",
@@ -353,15 +346,12 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 		}
 	}
 
-	vector<Value> values;
-	values.reserve(arguments.size());
-	values.push_back(ExpressionExecutor::EvaluateScalar(context, *arguments[0]));
-	values.push_back(Value(LogicalType::VARCHAR));
+	vector<Value> projected_attribute_values;
+	projected_attribute_values.reserve(arguments.size() - 2);
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		values.push_back(ExpressionExecutor::EvaluateScalar(context, *arguments[i]));
+		projected_attribute_values.push_back(ExpressionExecutor::EvaluateScalar(context, *arguments[i]));
 	}
 
-	auto filename = GetRequiredStringArgument(values[0], function_name, "filename");
 	auto swmr = force_swmr ? true : ResolveSwmrOption(context, named_parameter_map_t {});
 
 	vector<H5TreeProjectedAttributeSpec> projected_attributes;
@@ -369,15 +359,16 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	vector<LogicalType> return_types;
 	H5LsGetReturnSchema(projected_attributes, names, return_types);
 	if (!force_swmr) {
-		for (idx_t i = 2; i < values.size(); i++) {
-			if (!H5TreeIsProjectedAttributeArgument(values[i])) {
+		for (auto &value : projected_attribute_values) {
+			if (!H5TreeIsProjectedAttributeArgument(value)) {
 				throw InvalidInputException("scalar h5_ls extra arguments must be h5_attr(), h5_attr(name), "
 				                            "h5_attr(name, default_value) or h5_alias(alias, h5_attr(...)); named "
 				                            "parameters are not supported");
 			}
 		}
 	}
-	H5TreeBindProjectedAttributes(function_name, values, 2, names, return_types, projected_attributes);
+	H5TreeBindProjectedAttributes(function_name, projected_attribute_values, 0, names, return_types,
+	                              projected_attributes);
 	H5LsValidateUniqueFieldNames(names);
 
 	child_list_t<LogicalType> struct_fields;
@@ -387,8 +378,7 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	auto return_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::STRUCT(std::move(struct_fields)));
 
 	bound_function.return_type = return_type;
-	return make_uniq<H5LsScalarBindData>(std::move(filename), std::move(projected_attributes), swmr,
-	                                     std::move(return_type));
+	return make_uniq<H5LsScalarBindData>(std::move(projected_attributes), swmr);
 }
 
 static unique_ptr<FunctionData> H5LsScalarBind(ClientContext &context, ScalarFunction &bound_function,
@@ -401,43 +391,126 @@ static unique_ptr<FunctionData> H5LsSwmrScalarBind(ClientContext &context, Scala
 	return H5LsScalarBindInternal(context, bound_function, arguments, "h5_ls_swmr", true);
 }
 
+static void H5LsScalarWriteRow(H5TreeFileReader &reader, const string_t &path_value, Vector &result, idx_t row_idx,
+                               const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
+                               const vector<string> &names, const vector<LogicalType> &return_types) {
+	auto group_path = H5TreeNormalizeObjectPath(path_value.GetString());
+	std::vector<H5TreeNamedRow> rows;
+	H5TreeListImmediateEntries(reader, group_path, rows);
+	result.SetValue(row_idx, H5LsBuildMapValue(rows, projected_attributes, names, return_types));
+}
+
+struct H5LsScalarFileRows {
+	string filename;
+	vector<idx_t> row_idxs;
+};
+
+static void H5LsScalarWriteFileRows(ClientContext &context, const H5LsScalarFileRows &file_rows,
+                                    const UnifiedVectorFormat &path_data, const string_t *path_ptr, Vector &result,
+                                    const H5LsScalarBindData &bind_data, const vector<string> &names,
+                                    const vector<LogicalType> &return_types) {
+	if (file_rows.row_idxs.empty()) {
+		return;
+	}
+	ThrowIfInterrupted(context);
+	H5TreeFileReader reader(context, file_rows.filename, bind_data.swmr, bind_data.projected_attributes);
+	for (auto row_idx : file_rows.row_idxs) {
+		auto path_idx = path_data.sel->get_index(row_idx);
+		H5LsScalarWriteRow(reader, path_ptr[path_idx], result, row_idx, bind_data.projected_attributes, names,
+		                   return_types);
+	}
+}
+
 static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = func_expr.bind_info->Cast<H5LsScalarBindData>();
-	auto &path_vec = args.data[1];
-	UnifiedVectorFormat path_data;
-	path_vec.ToUnifiedFormat(args.size(), path_data);
-	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
-	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
-	bool has_non_null_path = false;
-	for (idx_t i = 0; i < args.size(); i++) {
-		auto path_idx = path_data.sel->get_index(i);
-		if (path_data.validity.RowIsValid(path_idx)) {
-			has_non_null_path = true;
-			break;
-		}
-		validity.SetInvalid(i);
-	}
-	if (!has_non_null_path) {
+	if (args.size() == 0) {
+		result.SetVectorType(VectorType::FLAT_VECTOR);
 		return;
 	}
+
+	auto &filename_vec = args.data[0];
+	auto &path_vec = args.data[1];
+	UnifiedVectorFormat filename_data;
+	UnifiedVectorFormat path_data;
+	filename_vec.ToUnifiedFormat(args.size(), filename_data);
+	path_vec.ToUnifiedFormat(args.size(), path_data);
+	auto filename_ptr = UnifiedVectorFormat::GetData<string_t>(filename_data);
+	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
 
 	vector<string> names;
 	vector<LogicalType> return_types;
 	H5LsGetReturnSchema(bind_data.projected_attributes, names, return_types);
-	H5TreeFileReader reader(state.GetContext(), bind_data.filename, bind_data.swmr, bind_data.projected_attributes);
+	auto &context = state.GetContext();
+	auto constant_filename = filename_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	auto constant_path = path_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+
+	if (constant_filename && constant_path) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		auto filename_idx = filename_data.sel->get_index(0);
+		auto path_idx = path_data.sel->get_index(0);
+		if (!filename_data.validity.RowIsValid(filename_idx) || !path_data.validity.RowIsValid(path_idx)) {
+			ConstantVector::SetNull(result, true);
+			return;
+		}
+		auto filename = filename_ptr[filename_idx].GetString();
+		H5TreeFileReader reader(context, filename, bind_data.swmr, bind_data.projected_attributes);
+		H5LsScalarWriteRow(reader, path_ptr[path_idx], result, 0, bind_data.projected_attributes, names, return_types);
+		return;
+	}
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &validity = FlatVector::Validity(result);
+
+	if (constant_filename) {
+		auto filename_idx = filename_data.sel->get_index(0);
+		if (!filename_data.validity.RowIsValid(filename_idx)) {
+			for (idx_t i = 0; i < args.size(); i++) {
+				validity.SetInvalid(i);
+			}
+			return;
+		}
+
+		H5LsScalarFileRows file_rows;
+		file_rows.filename = filename_ptr[filename_idx].GetString();
+		file_rows.row_idxs.reserve(args.size());
+		for (idx_t i = 0; i < args.size(); i++) {
+			auto path_idx = path_data.sel->get_index(i);
+			if (!path_data.validity.RowIsValid(path_idx)) {
+				validity.SetInvalid(i);
+				continue;
+			}
+			validity.SetValid(i);
+			file_rows.row_idxs.push_back(i);
+		}
+
+		H5LsScalarWriteFileRows(context, file_rows, path_data, path_ptr, result, bind_data, names, return_types);
+		return;
+	}
+
+	std::unordered_map<string, idx_t> file_group_lookup;
+	vector<H5LsScalarFileRows> file_groups;
+	file_group_lookup.reserve(args.size());
+	file_groups.reserve(args.size());
 	for (idx_t i = 0; i < args.size(); i++) {
+		auto filename_idx = filename_data.sel->get_index(i);
 		auto path_idx = path_data.sel->get_index(i);
-		if (!path_data.validity.RowIsValid(path_idx)) {
+		if (!filename_data.validity.RowIsValid(filename_idx) || !path_data.validity.RowIsValid(path_idx)) {
 			validity.SetInvalid(i);
 			continue;
 		}
 		validity.SetValid(i);
-		auto group_path = H5TreeNormalizeObjectPath(path_ptr[path_idx].GetString());
-		std::vector<H5TreeNamedRow> rows;
-		H5TreeListImmediateEntries(reader, group_path, rows);
-		result.SetValue(i, H5LsBuildMapValue(rows, bind_data.projected_attributes, names, return_types));
+		auto filename = filename_ptr[filename_idx].GetString();
+		auto inserted = file_group_lookup.emplace(filename, file_groups.size());
+		if (inserted.second) {
+			file_groups.emplace_back();
+			file_groups.back().filename = std::move(filename);
+		}
+		file_groups[inserted.first->second].row_idxs.push_back(i);
+	}
+
+	for (const auto &file_group : file_groups) {
+		H5LsScalarWriteFileRows(context, file_group, path_data, path_ptr, result, bind_data, names, return_types);
 	}
 }
 

@@ -688,6 +688,61 @@ SELECT cardinality(h5_ls('test/data/attrs_edge_cases.h5', '/empty_group'));
 ----
 0
 
+query TI
+WITH files(filename) AS (
+    VALUES ('test/data/links.h5'), ('test/data/attrs_edge_cases.h5')
+)
+SELECT filename, cardinality(h5_ls(filename, '/'))
+FROM files
+ORDER BY filename;
+----
+test/data/attrs_edge_cases.h5	15
+test/data/links.h5	10
+
+query TTI
+WITH inputs(filename, path) AS (
+    VALUES
+        ('test/data/links.h5', '/group'),
+        ('test/data/attrs_edge_cases.h5', '/empty_group'),
+        ('test/data/links.h5', '/')
+)
+SELECT filename, path, cardinality(h5_ls(filename, path))
+FROM inputs
+ORDER BY filename, path;
+----
+test/data/attrs_edge_cases.h5	/empty_group	0
+test/data/links.h5	/	10
+test/data/links.h5	/group	1
+
+query TI
+WITH inputs(filename, child_name) AS (
+    VALUES
+        ('test/data/links.h5', 'named_int32'),
+        ('test/data/with_attrs.h5', 'group_with_attrs')
+)
+SELECT
+    filename,
+    struct_extract(
+        map_extract_value(h5_ls(filename, '/', h5_attr('group_int_attr', NULL::BIGINT)), child_name),
+        'group_int_attr'
+    )
+FROM inputs
+ORDER BY filename;
+----
+test/data/links.h5	NULL
+test/data/with_attrs.h5	999
+
+query TI
+WITH files(filename) AS (
+    VALUES ('test/data/swmr_enabled.h5'), ('test/data/swmr_disabled.h5')
+)
+SELECT filename, cardinality(h5_ls_swmr(filename, '/'))
+FROM files
+ORDER BY filename;
+----
+test/data/swmr_disabled.h5	1
+test/data/swmr_enabled.h5	1
+
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', '/does_not_exist');
 ----
@@ -715,6 +770,24 @@ SELECT
 ----
 1	1
 
+query II
+SELECT
+    CASE WHEN h5_ls(NULL::VARCHAR, '/') IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN h5_ls_swmr(NULL::VARCHAR, '/') IS NULL THEN 1 ELSE 0 END;
+----
+1	1
+
+query TT
+WITH files(filename) AS (
+    VALUES ('nonexistent.h5'), ('test/data/links.h5')
+)
+SELECT filename, h5_ls(filename, NULL::VARCHAR) IS NULL
+FROM files
+ORDER BY filename;
+----
+nonexistent.h5	true
+test/data/links.h5	true
+
 query IT
 SELECT range, h5_ls('test/data/links.h5', CASE WHEN range = 0 THEN NULL::VARCHAR ELSE '/' END) IS NULL
 FROM range(2)
@@ -722,6 +795,33 @@ ORDER BY range;
 ----
 0	true
 1	false
+
+query IT
+SELECT range, h5_ls(CASE WHEN range = 0 THEN NULL::VARCHAR ELSE 'test/data/links.h5' END, '/') IS NULL
+FROM range(2)
+ORDER BY range;
+----
+0	true
+1	false
+
+query IT
+SELECT
+    range,
+    h5_ls(
+        CASE WHEN range = 0 THEN 'nonexistent.h5' ELSE 'test/data/links.h5' END,
+        CASE WHEN range = 0 THEN NULL::VARCHAR ELSE '/' END
+    ) IS NULL
+FROM range(2)
+ORDER BY range;
+----
+0	true
+1	false
+
+statement error
+SELECT h5_ls(CASE WHEN range = 0 THEN 'nonexistent.h5' ELSE 'test/data/links.h5' END, '/')
+FROM range(2);
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
 
 statement error
 SELECT * FROM h5_ls(

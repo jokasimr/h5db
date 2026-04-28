@@ -7,7 +7,7 @@ This document describes all functions provided by the h5db extension.
 The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
 parameter, but remote paths are opened as immutable snapshots, so `H5F_ACC_SWMR_READ` is not used there.
 
-All h5db functions accept single local paths or remote URLs as `filename`.
+All file-opening h5db functions accept local paths or remote URLs as `filename`.
 
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
   `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
@@ -46,8 +46,8 @@ remote schemes when the underlying DuckDB filesystem supports globbing.
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
   In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
 - All matched files in `h5_read(...)` must have compatible column definitions.
-- `h5_attributes(...)` and scalar `h5_ls(...)` operate on one file at a time and
-  do not accept filename lists or glob patterns.
+- `h5_attributes(...)` accepts one filename/URL. Scalar `h5_ls(...)`
+  accepts one filename/URL expression per row. Neither expands filename lists or glob patterns.
 - For local paths and DuckDB-backed remote schemes, glob expansion uses
   DuckDB's filesystem stack. For `sftp://` URLs, glob expansion is handled by
   h5db's SFTP backend.
@@ -398,7 +398,7 @@ Returns the immediate children of a group as a `MAP(VARCHAR, STRUCT(...))` keyed
 by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 
 **Parameters:**
-- `filename` (VARCHAR): File path or remote URL. Must be a constant expression. See [Remote Access](#remote-access).
+- `filename` (VARCHAR): File path or remote URL. May vary per row. See [Remote Access](#remote-access).
 - `group_path` (VARCHAR): Group path to list. May vary per row.
 - `projected_attributes` (variadic, optional): Zero or more `h5_attr(...)` or
   `h5_alias(..., h5_attr(...))` expressions. These must be constant expressions.
@@ -407,6 +407,8 @@ by child name. This is the scalar counterpart to the table-valued `h5_ls()`.
 
 **Semantics:**
 - `group_path` must resolve to a group or the function errors
+- `filename` is used as a path or URL per input row; lists and glob patterns are not expanded
+- `NULL` `filename` yields `NULL`
 - `NULL` `group_path` yields `NULL`
 - named parameters such as `swmr := true` or `filename := true` are not supported in the scalar form
 - projected attributes use the same `h5_attr(...)` semantics as table `h5_ls()`
@@ -420,6 +422,12 @@ WITH groups(path) AS (
 )
 SELECT path, cardinality(h5_ls('data.h5', path))
 FROM groups;
+
+WITH files(filename) AS (
+    VALUES ('run_1.h5'), ('run_2.h5')
+)
+SELECT filename, cardinality(h5_ls(filename, '/entry/instrument'))
+FROM files;
 ```
 
 ### `h5_ls_swmr(filename, group_path[, projected_attributes...])`
@@ -509,7 +517,7 @@ Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 - `h5_alias(...)` overrides the default output name
 - `name` must resolve to a non-`NULL` `VARCHAR` value at bind time
 - constant expressions such as `lower('STRING_ATTR')` are allowed
-- row-dependent expressions are rejected by DuckDB as unsupported lateral parameters for `h5_tree()` and `h5_ls()`
+- row-dependent projected-attribute definitions are not allowed
 - if `default_value` is provided, it must be a bind-time constant expression with a concrete type
 - typed `NULL` defaults such as `NULL::VARCHAR` are allowed
 - untyped `NULL` defaults are rejected

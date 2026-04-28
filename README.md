@@ -122,7 +122,7 @@ FROM h5_tree(
 
 ## Remote Access
 
-All h5db functions accept single local paths or remote URLs as `filename`.
+All file-opening h5db functions accept local paths or remote URLs as `filename`.
 
 The table-valued `h5_tree(...)`, `h5_ls(...)`, and `h5_read(...)` also accept:
 
@@ -142,7 +142,7 @@ Multi-file semantics:
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
   and replaces the hidden `filename` binding with that visible name
 - `h5_read(...)` requires compatible column definitions across all matched files
-- `h5_attributes(...)` and the scalar `h5_ls(...)` still operate on one file at a time
+- `h5_attributes(...)` accepts one filename/URL; scalar `h5_ls(...)` accepts one filename/URL expression per row
 
 For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's
 filesystem stack. For `sftp://` URLs, glob expansion is handled by h5db's SFTP
