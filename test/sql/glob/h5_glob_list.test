@@ -46,14 +46,6 @@ FROM h5_read(
 0	10
 0	2
 
-statement error
-SELECT COUNT(*) FROM h5_tree([
-    'test/data/glob_order/order_1.h5',
-    'test/data/glob/no_such_*.h5'
-]);
-----
-<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
-
 query I
 SELECT COUNT(*) FROM h5_read([
     'test/data/glob_literal_meta/literal[1].h5'

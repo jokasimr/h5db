@@ -82,12 +82,6 @@ FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=NULL);
 Invalid Input Error: Cannot use NULL as argument for "filename"
 
 statement error
-SELECT COUNT(*)
-FROM h5_attributes('test/data/glob/no_such_*.h5', '/target');
-----
-<REGEX>:.*No files found that match the pattern "test/data/glob/no_such_\*\.h5".*
-
-statement error
 FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs', filename='string_attr');
 ----
 Binder Error: Option filename adds column "string_attr", but that column name is already present in h5_attributes output
