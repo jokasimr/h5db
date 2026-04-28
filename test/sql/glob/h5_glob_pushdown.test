@@ -124,3 +124,41 @@ WHERE contains(
 );
 ----
 1
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_glob_pushdown_profile.json';
+
+# Three files match this recursive glob, but status_code = 9 only matches the
+# nested file. The profile assertion below verifies H5_READ emitted only the
+# two matching rows, so the other matched files produced empty pushed-down
+# ranges rather than full scans followed by a DuckDB filter.
+query IITI
+SELECT
+    COUNT(*),
+    COUNT(DISTINCT replace(filename, '\', '/')),
+    MIN(replace(filename, '\', '/')),
+    MAX(status_code)
+FROM h5_read(
+    'test/data/glob/equiv/**/*.h5',
+    h5_alias('value', '/values'),
+    h5_alias('status_code', h5_rse('/status_run_starts', '/status_values'))
+)
+WHERE status_code = 9;
+----
+2	1	test/data/glob/equiv/nested/equiv_3.h5	9
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT COUNT(*)
+FROM read_text('h5db_glob_pushdown_profile.json')
+WHERE contains(
+    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
+    '"operator_cardinality": 2'
+);
+----
+1
