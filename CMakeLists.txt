@@ -51,6 +51,12 @@ if(WIN32)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32)
 endif()
 
+add_executable(h5fopen_symlink_smoke test/cpp/h5fopen_symlink_smoke.cpp)
+if(HDF5_FOUND)
+    target_include_directories(h5fopen_symlink_smoke PRIVATE ${HDF5_INCLUDE_DIRS})
+    target_link_libraries(h5fopen_symlink_smoke PRIVATE ${HDF5_C_LIBRARIES})
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
