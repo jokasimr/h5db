@@ -1,0 +1,32 @@
+# name: test/sql/glob/h5_glob_symlink_windows.test
+# description: Windows-safe symlink glob semantics for h5_tree, h5_ls, and h5_read
+# group: [glob]
+
+require h5db
+
+require windows
+
+# HDF5 1.14.6 on Windows fails H5Fopen when the final path component is a
+# file symlink, so these checks only cover symlink directories in intermediate
+# path components.
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/nested.h5')),
+    (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/**/nested.h5'));
+----
+12	6
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/*/nested.h5', '/')),
+    (SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/**/nested.h5', '/'));
+----
+8	4
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/*/nested.h5', '/values')),
+    (SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/**/nested.h5', '/values'));
+----
+6	3

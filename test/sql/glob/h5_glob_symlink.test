@@ -4,6 +4,11 @@
 
 require h5db
 
+# HDF5 1.14.6 on Windows fails H5Fopen when the final path component is a
+# file symlink. Keep full file-symlink coverage on non-Windows platforms; the
+# Windows-safe directory-symlink subset lives in h5_glob_symlink_windows.test.
+require notwindows
+
 query II
 SELECT
     (SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/nested.h5')),

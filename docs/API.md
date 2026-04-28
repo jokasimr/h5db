@@ -56,6 +56,10 @@ remote schemes when the underlying DuckDB filesystem supports globbing.
 - In both cases, glob expansion follows DuckDB's other multi-file reader
   semantics such as `read_parquet(...)`. In particular, recursive `**` does not
   traverse symlink directories.
+- On Windows, HDF5 1.14.6 with its native file driver fails to open a file
+  symlink when the symlink itself is passed as the filename. h5db does not
+  resolve those paths before calling HDF5, so final-component file symlink
+  matches are not supported there.
 
 **Examples:**
 
