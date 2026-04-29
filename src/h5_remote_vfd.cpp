@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "h5_internal.hpp"
 #include "h5_remote_backend.hpp"
 
@@ -16,8 +17,8 @@
 namespace duckdb {
 
 static constexpr H5FD_class_value_t DUCKDB_VFD_VALUE = 600;
-static constexpr idx_t REMOTE_CACHE_BLOCK_SIZE = 1048576;
-static constexpr idx_t REMOTE_CACHE_MAX_BLOCKS = 128;
+static constexpr idx_t REMOTE_CACHE_BLOCK_SIZE = 30ULL * 1024ULL;
+static constexpr idx_t REMOTE_CACHE_MAX_BLOCKS = 100;
 static constexpr idx_t REMOTE_LARGE_DATA_CACHE_BUDGET = 200ULL * 1024ULL * 1024ULL;
 static hid_t duckdb_vfd_driver_id = -1;
 static std::once_flag duckdb_vfd_register_once;
@@ -28,6 +29,39 @@ static thread_local bool duckdb_vfd_last_error_interrupted = false;
 struct DuckDBVFDConfig {
 	ClientContext *context;
 };
+
+class H5RemoteVFDQueryState : public ClientContextState {
+public:
+	bool TryConsumeLargeDataCacheBudget(idx_t read_size) {
+		std::lock_guard<std::mutex> lock(large_data_cache_budget_lock);
+		if (remaining_large_data_cache_budget < read_size) {
+			return false;
+		}
+		remaining_large_data_cache_budget -= read_size;
+		return true;
+	}
+
+	void QueryBegin(ClientContext &) override {
+		ResetLargeDataCacheBudget();
+	}
+
+	void QueryEnd() override {
+		ResetLargeDataCacheBudget();
+	}
+
+private:
+	void ResetLargeDataCacheBudget() {
+		std::lock_guard<std::mutex> lock(large_data_cache_budget_lock);
+		remaining_large_data_cache_budget = REMOTE_LARGE_DATA_CACHE_BUDGET;
+	}
+
+	std::mutex large_data_cache_budget_lock;
+	idx_t remaining_large_data_cache_budget = REMOTE_LARGE_DATA_CACHE_BUDGET;
+};
+
+static shared_ptr<H5RemoteVFDQueryState> GetOrCreateRemoteVFDQueryState(ClientContext &context) {
+	return context.registered_state->GetOrCreate<H5RemoteVFDQueryState>("h5db_remote_vfd_query_state");
+}
 
 struct H5FD_duckdb_t : public H5FD_t {
 	struct CachedBlock {
@@ -42,7 +76,7 @@ struct H5FD_duckdb_t : public H5FD_t {
 	std::string path;
 	haddr_t eof;
 	haddr_t eoa;
-	idx_t remaining_large_data_cache_budget = REMOTE_LARGE_DATA_CACHE_BUDGET;
+	shared_ptr<H5RemoteVFDQueryState> query_state;
 	CachedBlockMap cached_blocks;
 	std::list<idx_t> cache_lru;
 };
@@ -206,6 +240,7 @@ static H5FD_t *DuckDBOpen(const char *name, unsigned flags, hid_t fapl_id, haddr
 		file->backend = OpenH5RemoteBackend(*context, name);
 		file->context = context;
 		file->path = name;
+		file->query_state = GetOrCreateRemoteVFDQueryState(*context);
 		file->eof = static_cast<haddr_t>(file->backend->GetFileSize());
 		file->eoa = file->eof;
 		ClearLastErrorInternal();
@@ -286,9 +321,8 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 		// of requested bytes through ReadExactCached before falling back to ReadExact. This budget controls the VFD's
 		// routing decision, not the exact number of bytes DuckDB's external file cache may admit.
 		if (mem_type == H5FD_MEM_DRAW && read_size >= REMOTE_CACHE_BLOCK_SIZE) {
-			if (f->remaining_large_data_cache_budget >= read_size) {
+			if (f->query_state->TryConsumeLargeDataCacheBudget(read_size)) {
 				ReadExactCached(*f, read_offset, read_size, buf);
-				f->remaining_large_data_cache_budget -= read_size;
 			} else {
 				ReadExact(*f, read_offset, read_size, buf);
 			}
