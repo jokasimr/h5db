@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import paramiko
+from paramiko.sftp import CMD_CLOSE
 
 
 def _host_key_name(key: paramiko.PKey) -> str:
@@ -52,9 +53,13 @@ class SFTPServerConfig:
     list_folder_omit_permissions: bool = False
     stat_omit_permissions: bool = False
     stat_omit_mtime: bool = False
+    auth_delay_ms: int = 0
     read_delay_ms: int = 0
     stat_delay_ms: int = 0
+    handle_close_delay_ms: int = 0
     disconnect_on_stat: bool = False
+    fail_stat_calls: int = 0
+    read_eof_after_bytes: Optional[int] = None
     disconnect_after_read_calls: Optional[int] = None
     host_keys: list[paramiko.PKey] = field(default_factory=list)
 
@@ -64,7 +69,11 @@ class ConnectionRecord:
     auth_method: Optional[str] = None
     negotiated_host_key: Optional[str] = None
     read_calls: int = 0
+    password_attempts: int = 0
     publickey_attempts: int = 0
+    channel_eof_messages: int = 0
+    channel_close_messages: int = 0
+    transport_disconnect_messages: int = 0
 
 
 class ServerTelemetry:
@@ -76,6 +85,10 @@ class ServerTelemetry:
         self.total_handle_close_calls = 0
         self.current_open_handles = 0
         self.max_open_handles = 0
+        self.total_handle_close_request_calls = 0
+        self.total_channel_eof_messages = 0
+        self.total_channel_close_messages = 0
+        self.total_transport_disconnect_messages = 0
 
     def add_connection(self) -> ConnectionRecord:
         with self.lock:
@@ -100,21 +113,61 @@ class ServerTelemetry:
             self.total_handle_close_calls += 1
             self.current_open_handles = max(0, self.current_open_handles - 1)
 
+    def record_handle_close_request(self) -> None:
+        with self.lock:
+            self.total_handle_close_request_calls += 1
+
+    def record_channel_eof(self, record: ConnectionRecord | None) -> None:
+        with self.lock:
+            self.total_channel_eof_messages += 1
+            if record is not None:
+                record.channel_eof_messages += 1
+
+    def record_channel_close(self, record: ConnectionRecord | None) -> None:
+        with self.lock:
+            self.total_channel_close_messages += 1
+            if record is not None:
+                record.channel_close_messages += 1
+
+    def record_transport_disconnect(self, record: ConnectionRecord | None) -> None:
+        with self.lock:
+            self.total_transport_disconnect_messages += 1
+            if record is not None:
+                record.transport_disconnect_messages += 1
+
     def snapshot(self) -> tuple[list[ConnectionRecord], int]:
         with self.lock:
             copied = [
-                ConnectionRecord(r.auth_method, r.negotiated_host_key, r.read_calls, r.publickey_attempts)
+                ConnectionRecord(
+                    r.auth_method,
+                    r.negotiated_host_key,
+                    r.read_calls,
+                    r.password_attempts,
+                    r.publickey_attempts,
+                    r.channel_eof_messages,
+                    r.channel_close_messages,
+                    r.transport_disconnect_messages,
+                )
                 for r in self.connections
             ]
             return copied, self.total_read_calls
 
-    def handle_snapshot(self) -> tuple[int, int, int, int]:
+    def handle_snapshot(self) -> tuple[int, int, int, int, int]:
         with self.lock:
             return (
                 self.total_handle_open_calls,
                 self.total_handle_close_calls,
+                self.total_handle_close_request_calls,
                 self.current_open_handles,
                 self.max_open_handles,
+            )
+
+    def graceful_cleanup_snapshot(self) -> tuple[int, int, int]:
+        with self.lock:
+            return (
+                self.total_channel_eof_messages,
+                self.total_channel_close_messages,
+                self.total_transport_disconnect_messages,
             )
 
     def reset(self) -> None:
@@ -125,6 +178,10 @@ class ServerTelemetry:
             self.total_handle_close_calls = 0
             self.current_open_handles = 0
             self.max_open_handles = 0
+            self.total_handle_close_request_calls = 0
+            self.total_channel_eof_messages = 0
+            self.total_channel_close_messages = 0
+            self.total_transport_disconnect_messages = 0
 
 
 class AuthServer(paramiko.ServerInterface):
@@ -134,12 +191,17 @@ class AuthServer(paramiko.ServerInterface):
         self.record = record
 
     def check_auth_password(self, username: str, password: str):
+        self.record.password_attempts += 1
+        if self.config.auth_delay_ms > 0:
+            time.sleep(self.config.auth_delay_ms / 1000.0)
         if self.config.password is not None and username == self.config.username and password == self.config.password:
             self.record.auth_method = "password"
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey):
+        if self.config.auth_delay_ms > 0:
+            time.sleep(self.config.auth_delay_ms / 1000.0)
         self.record.publickey_attempts += 1
         if username == self.config.username and key.asbytes() in self.config.allowed_public_key_blobs:
             self.record.auth_method = "publickey"
@@ -182,6 +244,9 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
         if self.config.disconnect_on_stat:
             self.transport.close()
             return paramiko.SFTP_FAILURE
+        if self.config.fail_stat_calls > 0:
+            self.config.fail_stat_calls -= 1
+            return paramiko.SFTP_FAILURE
         try:
             attrs = paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
             if self.config.stat_omit_mtime:
@@ -198,6 +263,11 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
         if self.config.disconnect_after_read_calls and read_call_count > self.config.disconnect_after_read_calls:
             self.transport.close()
             return paramiko.SFTP_FAILURE
+        if self.config.read_eof_after_bytes is not None:
+            eof_offset = self.config.read_eof_after_bytes
+            if offset >= eof_offset:
+                return b""
+            length = min(length, eof_offset - offset)
         return super().read(offset, length)
 
     def close(self):
@@ -258,6 +328,9 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
         if self.config.disconnect_on_stat:
             self.transport.close()
             return paramiko.SFTP_FAILURE
+        if self.config.fail_stat_calls > 0:
+            self.config.fail_stat_calls -= 1
+            return paramiko.SFTP_FAILURE
         try:
             attrs = paramiko.SFTPAttributes.from_stat(os.stat(self._resolve(path)))
             if self.config.stat_omit_permissions:
@@ -270,6 +343,9 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             return self._convert_error(ex)
 
     def lstat(self, path: str):
+        if self.config.fail_stat_calls > 0:
+            self.config.fail_stat_calls -= 1
+            return paramiko.SFTP_FAILURE
         try:
             return paramiko.SFTPAttributes.from_stat(os.lstat(self._resolve(path)))
         except OSError as ex:
@@ -298,6 +374,47 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             return handle
         except OSError as ex:
             return self._convert_error(ex)
+
+
+class RecordingSFTPServer(paramiko.SFTPServer):
+    def _process(self, t, request_number, msg):
+        if t != CMD_CLOSE:
+            return super()._process(t, request_number, msg)
+
+        self.server.telemetry.record_handle_close_request()
+        if self.server.config.handle_close_delay_ms > 0:
+            time.sleep(self.server.config.handle_close_delay_ms / 1000.0)
+        return super()._process(t, request_number, msg)
+
+
+_ORIGINAL_CHANNEL_EOF_HANDLER = paramiko.Transport._channel_handler_table[paramiko.common.MSG_CHANNEL_EOF]
+_ORIGINAL_CHANNEL_CLOSE_HANDLER = paramiko.Transport._channel_handler_table[paramiko.common.MSG_CHANNEL_CLOSE]
+
+
+def _record_channel_eof_message(channel, message) -> None:
+    telemetry = getattr(channel.transport, "h5db_telemetry", None)
+    if telemetry is not None:
+        telemetry.record_channel_eof(getattr(channel.transport, "h5db_record", None))
+    return _ORIGINAL_CHANNEL_EOF_HANDLER(channel, message)
+
+
+def _record_channel_close_message(channel, message) -> None:
+    telemetry = getattr(channel.transport, "h5db_telemetry", None)
+    if telemetry is not None:
+        telemetry.record_channel_close(getattr(channel.transport, "h5db_record", None))
+    return _ORIGINAL_CHANNEL_CLOSE_HANDLER(channel, message)
+
+
+class RecordingTransport(paramiko.Transport):
+    _channel_handler_table = paramiko.Transport._channel_handler_table.copy()
+    _channel_handler_table[paramiko.common.MSG_CHANNEL_EOF] = _record_channel_eof_message
+    _channel_handler_table[paramiko.common.MSG_CHANNEL_CLOSE] = _record_channel_close_message
+
+    def _parse_disconnect(self, message):
+        telemetry = getattr(self, "h5db_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_transport_disconnect(getattr(self, "h5db_record", None))
+        return super()._parse_disconnect(message)
 
 
 class SFTPTestServer:
@@ -363,13 +480,15 @@ class SFTPTestServer:
     def _serve_client(self, client: socket.socket) -> None:
         transport = None
         try:
-            transport = paramiko.Transport(client)
+            transport = RecordingTransport(client)
+            transport.h5db_telemetry = self.telemetry
             for host_key in self.config.host_keys:
                 transport.add_server_key(host_key)
             record = self.telemetry.add_connection()
+            transport.h5db_record = record
             transport.set_subsystem_handler(
                 "sftp",
-                paramiko.SFTPServer,
+                RecordingSFTPServer,
                 RootedSFTPServer,
                 config=self.config,
                 telemetry=self.telemetry,

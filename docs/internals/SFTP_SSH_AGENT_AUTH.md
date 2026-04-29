@@ -185,15 +185,17 @@ In agent mode:
 - on Unix-like systems, libssh2 resolves the agent via `SSH_AUTH_SOCK`
 - on Windows, libssh2 uses its supported agent backends
 - `h5db` iterates loaded identities and tries them until one succeeds
-- the SSH authentication phase runs in blocking mode for all auth methods
-- the session switches back to nonblocking mode before `libssh2_sftp_init(...)`
-  and the rest of the SFTP/data path
+- remote SSH authentication is run with the session in nonblocking mode, using
+  the same interruptible socket-wait helper as handshake and SFTP setup
+- local SSH-agent setup and identity enumeration are ordinary local calls; only
+  the remote `libssh2_agent_userauth(...)` step uses the nonblocking session loop
 
 This remains a reasonable shape because:
 
-- it matches libssh2's own examples
 - it matches the practical approach in `sshfs`
 - it keeps the implementation small
+- remote network waits remain interruptible without making local agent IPC more
+  complicated than needed
 
 ### Why this is acceptable
 
@@ -241,7 +243,7 @@ The agent branch:
 1. initialize the agent
 2. connect to it
 3. list identities
-4. try identities one by one
+4. try identities one by one with nonblocking remote SSH userauth
 5. disconnect/free the agent
 6. throw a clear error if no identity works
 

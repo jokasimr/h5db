@@ -3,11 +3,14 @@ import argparse
 import hashlib
 import logging
 import os
+import queue
 import re
+import signal
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import textwrap
 import time
 import unittest
@@ -64,6 +67,9 @@ class DuckDBResult:
 
 class SFTPInteractionTests(unittest.TestCase):
     SUBPROCESS_TIMEOUT_SECONDS = 20
+    INTERRUPT_AFTER_SECONDS = 1.0
+    INTERRUPT_FINISH_TIMEOUT_SECONDS = 5.0
+    TEST_HANG_DELAY_MS = 10_000
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -97,6 +103,32 @@ class SFTPInteractionTests(unittest.TestCase):
             SFTPServerConfig(root_dir=cls.data_dir, username="h5db", password="h5db", host_keys=[cls.rsa_host_key]),
         )
         cls.password_server.start()
+
+        cls.delayed_auth_server = SFTPTestServer(
+            "127.0.0.1",
+            0,
+            SFTPServerConfig(
+                root_dir=cls.data_dir,
+                username="h5db",
+                password="h5db",
+                auth_delay_ms=300,
+                host_keys=[cls.rsa_host_key],
+            ),
+        )
+        cls.delayed_auth_server.start()
+
+        cls.hanging_auth_server = SFTPTestServer(
+            "127.0.0.1",
+            0,
+            SFTPServerConfig(
+                root_dir=cls.data_dir,
+                username="h5db",
+                password="h5db",
+                auth_delay_ms=cls.TEST_HANG_DELAY_MS,
+                host_keys=[cls.rsa_host_key],
+            ),
+        )
+        cls.hanging_auth_server.start()
 
         cls.key_server = SFTPTestServer(
             "127.0.0.1",
@@ -136,16 +168,34 @@ class SFTPInteractionTests(unittest.TestCase):
         )
         cls.flaky_server.start()
 
+        cls.hanging_cleanup_server = SFTPTestServer(
+            "127.0.0.1",
+            0,
+            SFTPServerConfig(
+                root_dir=cls.data_dir,
+                username="h5db",
+                password="h5db",
+                handle_close_delay_ms=cls.TEST_HANG_DELAY_MS,
+                host_keys=[cls.rsa_host_key],
+            ),
+        )
+        cls.hanging_cleanup_server.start()
+
         cls.password_known_hosts = cls.tempdir / "password_known_hosts"
+        cls.delayed_auth_known_hosts = cls.tempdir / "delayed_auth_known_hosts"
+        cls.hanging_auth_known_hosts = cls.tempdir / "hanging_auth_known_hosts"
         cls.key_known_hosts = cls.tempdir / "key_known_hosts"
         cls.ipv6_known_hosts = cls.tempdir / "ipv6_known_hosts"
         cls.multi_key_rsa_known_hosts = cls.tempdir / "multi_key_rsa_known_hosts"
         cls.multi_key_all_known_hosts = cls.tempdir / "multi_key_all_known_hosts"
         cls.flaky_known_hosts = cls.tempdir / "flaky_known_hosts"
+        cls.hanging_cleanup_known_hosts = cls.tempdir / "hanging_cleanup_known_hosts"
         cls.disconnect_on_stat_known_hosts = cls.tempdir / "disconnect_on_stat_known_hosts"
         cls.password_host_key_fingerprint = hashlib.sha1(cls.rsa_host_key.asbytes()).hexdigest()
 
         write_known_host(cls.password_known_hosts, "127.0.0.1", cls.password_server.port, cls.rsa_host_key)
+        write_known_host(cls.delayed_auth_known_hosts, "127.0.0.1", cls.delayed_auth_server.port, cls.rsa_host_key)
+        write_known_host(cls.hanging_auth_known_hosts, "127.0.0.1", cls.hanging_auth_server.port, cls.rsa_host_key)
         write_known_host(cls.key_known_hosts, "127.0.0.1", cls.key_server.port, cls.rsa_host_key)
         write_known_host(cls.multi_key_rsa_known_hosts, "127.0.0.1", cls.multi_key_server.port, cls.rsa_host_key)
         write_known_hosts(
@@ -155,6 +205,12 @@ class SFTPInteractionTests(unittest.TestCase):
             [cls.rsa_host_key, cls.ecdsa_host_key],
         )
         write_known_host(cls.flaky_known_hosts, "127.0.0.1", cls.flaky_server.port, cls.rsa_host_key)
+        write_known_host(
+            cls.hanging_cleanup_known_hosts,
+            "127.0.0.1",
+            cls.hanging_cleanup_server.port,
+            cls.rsa_host_key,
+        )
 
         cls.ipv6_server = None
         if socket.has_ipv6:
@@ -246,9 +302,12 @@ class SFTPInteractionTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         for server in (
             cls.password_server,
+            cls.delayed_auth_server,
+            cls.hanging_auth_server,
             cls.key_server,
             cls.multi_key_server,
             cls.flaky_server,
+            cls.hanging_cleanup_server,
             cls.ipv6_server,
             cls.disconnect_on_stat_server,
             cls.mutable_server,
@@ -262,9 +321,12 @@ class SFTPInteractionTests(unittest.TestCase):
     def setUp(self) -> None:
         for server in (
             self.password_server,
+            self.delayed_auth_server,
+            self.hanging_auth_server,
             self.key_server,
             self.multi_key_server,
             self.flaky_server,
+            self.hanging_cleanup_server,
             self.ipv6_server,
             self.disconnect_on_stat_server,
             self.mutable_server,
@@ -295,8 +357,158 @@ class SFTPInteractionTests(unittest.TestCase):
             ) from ex
         return DuckDBResult(completed)
 
+    def send_process_interrupt(self, process: subprocess.Popen[str]) -> None:
+        if os.name == "nt":
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            try:
+                process.send_signal(ctrl_break if ctrl_break is not None else signal.SIGINT)
+            except OSError:
+                pass
+            return
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+
+    def kill_process(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            try:
+                process.kill()
+            except OSError:
+                pass
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def run_sql_with_interrupt(
+        self, sql: str, before_interrupt=None, env: dict[str, str] | None = None
+    ) -> DuckDBResult:
+        popen_kwargs = {
+            "cwd": self.project_root,
+            "env": env,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        process = subprocess.Popen(
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-c", sql],
+            **popen_kwargs,
+        )
+        output_before_interrupt_error = None
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=self.INTERRUPT_AFTER_SECONDS)
+            except subprocess.TimeoutExpired:
+                if before_interrupt is not None:
+                    output_before_interrupt_error = before_interrupt()
+                self.send_process_interrupt(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=self.INTERRUPT_FINISH_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired as ex:
+                    self.kill_process(process)
+                    stdout, stderr = process.communicate()
+                    raise AssertionError(
+                        "DuckDB subprocess did not exit within "
+                        f"{self.INTERRUPT_FINISH_TIMEOUT_SECONDS:.1f}s after interrupt.\n"
+                        f"SQL:\n{sql}\n"
+                        f"Partial output:\n{((stdout or '') + (stderr or '')).strip()}"
+                    ) from ex
+            else:
+                raise AssertionError(
+                    "DuckDB subprocess finished before the interrupt was sent.\n"
+                    f"SQL:\n{sql}\n"
+                    f"Output:\n{((stdout or '') + (stderr or '')).strip()}"
+                )
+        except Exception:
+            self.kill_process(process)
+            raise
+
+        completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        if output_before_interrupt_error is not None:
+            raise AssertionError(
+                output_before_interrupt_error
+                + "\nOutput:\n"
+                + ((completed.stdout or "") + (completed.stderr or "")).strip()
+            )
+        return DuckDBResult(completed)
+
     def assertOutputContains(self, result: DuckDBResult, needle: str) -> None:
         self.assertIn(needle, result.output, msg=result.output)
+
+    def numeric_stdout_lines(self, result: DuckDBResult) -> list[str]:
+        return [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()]
+
+    def query_stdout_lines(self, result: DuckDBResult) -> list[str]:
+        lines = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped and stripped.lower() != "true":
+                lines.append(stripped)
+        return lines
+
+    def assertNumericOutput(self, result: DuckDBResult, expected: list[str]) -> None:
+        self.assertEqual(self.numeric_stdout_lines(result), expected, msg=result.output)
+
+    def assertCsvOutput(self, result: DuckDBResult, expected: list[str]) -> None:
+        self.assertEqual(self.query_stdout_lines(result), expected, msg=result.output)
+
+    def assertGracefulSftpCleanup(
+        self,
+        server: SFTPTestServer,
+        expected_connections: int,
+        require_explicit_handle_closes: bool = False,
+    ) -> None:
+        deadline = time.monotonic() + 2.0
+        last_state = ""
+        while time.monotonic() < deadline:
+            connections, _ = server.telemetry.snapshot()
+            channel_eofs, channel_closes, transport_disconnects = server.telemetry.graceful_cleanup_snapshot()
+            handle_open_calls, handle_close_calls, handle_close_requests, current_open_handles, max_open_handles = (
+                server.telemetry.handle_snapshot()
+            )
+            last_state = (
+                f"connections={len(connections)}, "
+                f"per_connection_cleanup="
+                f"{[(r.channel_eof_messages, r.channel_close_messages, r.transport_disconnect_messages) for r in connections]}, "
+                f"channel_eofs={channel_eofs}, channel_closes={channel_closes}, "
+                f"transport_disconnects={transport_disconnects}, "
+                f"handle_open_calls={handle_open_calls}, handle_close_calls={handle_close_calls}, "
+                f"handle_close_requests={handle_close_requests}, current_open_handles={current_open_handles}, "
+                f"max_open_handles={max_open_handles}"
+            )
+            connections_clean = (
+                len(connections) == expected_connections
+                and all(record.channel_eof_messages > 0 for record in connections)
+                and all(record.channel_close_messages > 0 for record in connections)
+                and all(record.transport_disconnect_messages > 0 for record in connections)
+                and channel_eofs >= expected_connections
+                and channel_closes >= expected_connections
+                and transport_disconnects >= expected_connections
+            )
+            handles_clean = not require_explicit_handle_closes or (
+                handle_open_calls > 0
+                and handle_open_calls == handle_close_requests
+                and handle_open_calls == handle_close_calls
+                and current_open_handles == 0
+            )
+            if connections_clean and handles_clean:
+                return
+            time.sleep(0.02)
+        self.fail(f"SFTP server did not observe graceful cleanup: {last_state}")
 
     def start_ssh_agent(self) -> dict[str, str]:
         if os.name == "nt":
@@ -415,6 +627,98 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, msg=result.output)
         self.assertOutputContains(result, "SSH password authentication failed for 'wrong-user'")
 
+    def test_delayed_password_auth_uses_interruptible_remote_wait(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET delayed_password (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.delayed_auth_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.delayed_auth_known_hosts}',
+                PORT {self.delayed_auth_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.delayed_auth_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        start = time.monotonic()
+        result = self.run_sql(sql)
+        elapsed = time.monotonic() - start
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertNumericOutput(result, ["5"])
+        self.assertGreaterEqual(
+            elapsed,
+            0.2,
+            msg=f"delayed auth query returned before the server-side auth delay was exercised: elapsed={elapsed:.3f}s",
+        )
+        self.assertLess(
+            elapsed,
+            5.0,
+            msg=f"delayed auth query did not return promptly after the auth delay: elapsed={elapsed:.3f}s",
+        )
+        connections, _ = self.delayed_auth_server.telemetry.snapshot()
+        self.assertTrue(any(record.auth_method == "password" for record in connections))
+        self.assertGracefulSftpCleanup(self.delayed_auth_server, expected_connections=1)
+
+    def test_hanging_password_auth_remains_interruptible(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET hanging_password (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.hanging_auth_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.hanging_auth_known_hosts}',
+                PORT {self.hanging_auth_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.hanging_auth_server.port}/simple.h5', '/');
+            """
+        ).strip()
+
+        def auth_wait_started() -> str | None:
+            connections, _ = self.hanging_auth_server.telemetry.snapshot()
+            if not any(record.password_attempts > 0 for record in connections):
+                return "Hanging-auth server did not receive a password auth request before the interrupt was sent."
+            return None
+
+        result = self.run_sql_with_interrupt(sql, before_interrupt=auth_wait_started)
+        self.assertNotIn("5", result.stdout)
+
+    def test_hanging_sftp_cleanup_remains_interruptible(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET hanging_cleanup (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.hanging_cleanup_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.hanging_cleanup_known_hosts}',
+                PORT {self.hanging_cleanup_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.hanging_cleanup_server.port}/simple.h5', '/');
+            """
+        ).strip()
+
+        def cleanup_wait_started() -> str | None:
+            _, _, handle_close_requests, _, _ = self.hanging_cleanup_server.telemetry.handle_snapshot()
+            if handle_close_requests == 0:
+                return "Hanging-cleanup server did not observe an SFTP handle-close request before the interrupt."
+            return None
+
+        start = time.monotonic()
+        self.run_sql_with_interrupt(sql, before_interrupt=cleanup_wait_started)
+        elapsed = time.monotonic() - start
+        self.assertLess(
+            elapsed,
+            self.INTERRUPT_AFTER_SECONDS + 3.0,
+            msg=f"hanging cleanup did not return promptly after interrupt: elapsed={elapsed:.3f}s",
+        )
+        _, _, handle_close_requests, _, _ = self.hanging_cleanup_server.telemetry.handle_snapshot()
+        self.assertGreater(handle_close_requests, 0)
+
     def test_public_key_auth_success(self) -> None:
         sql = textwrap.dedent(
             f"""
@@ -432,9 +736,10 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("5", result.stdout)
+        self.assertNumericOutput(result, ["5"])
         connections, _ = self.key_server.telemetry.snapshot()
         self.assertTrue(any(record.auth_method == "publickey" for record in connections))
+        self.assertGracefulSftpCleanup(self.key_server, expected_connections=1)
 
     def test_encrypted_private_key_auth_success(self) -> None:
         sql = textwrap.dedent(
@@ -454,7 +759,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("5", result.stdout)
+        self.assertNumericOutput(result, ["5"])
         connections, _ = self.key_server.telemetry.snapshot()
         self.assertTrue(any(record.auth_method == "publickey" for record in connections))
 
@@ -478,7 +783,7 @@ class SFTPInteractionTests(unittest.TestCase):
             ).strip()
             result = self.run_sql(sql, env=agent_env)
             self.assertEqual(result.returncode, 0, msg=result.output)
-            self.assertIn("5", result.stdout)
+            self.assertNumericOutput(result, ["5"])
             connections, _ = self.key_server.telemetry.snapshot()
             self.assertTrue(any(record.auth_method == "publickey" for record in connections))
         finally:
@@ -552,7 +857,7 @@ class SFTPInteractionTests(unittest.TestCase):
             ).strip()
             result = self.run_sql(sql, env=agent_env)
             self.assertEqual(result.returncode, 0, msg=result.output)
-            self.assertIn("5", result.stdout)
+            self.assertNumericOutput(result, ["5"])
             connections, _ = self.key_server.telemetry.snapshot()
             self.assertTrue(any(record.auth_method == "publickey" for record in connections))
             self.assertTrue(any(record.publickey_attempts >= 2 for record in connections))
@@ -721,7 +1026,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("5", result.stdout, msg=result.output)
+        self.assertNumericOutput(result, ["5"])
 
     def test_url_username_mismatch_error(self) -> None:
         sql = textwrap.dedent(
@@ -845,7 +1150,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("5", result.stdout)
+        self.assertNumericOutput(result, ["5"])
         connections, _ = self.multi_key_server.telemetry.snapshot()
         negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
         self.assertIn("ssh-rsa", negotiated, msg=str(negotiated))
@@ -986,7 +1291,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("10,5", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["10,5"])
         connections, read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
@@ -1014,7 +1319,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("12,8,5", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["12,8,5"])
         connections, read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
@@ -1139,7 +1444,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("10,5", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["10,5"])
         connections, read_calls = self.key_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
@@ -1168,7 +1473,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("10,123456", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["10,123456"])
         connections, read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
@@ -1206,7 +1511,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("10,123456", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["10,123456"])
         connections, read_calls = self.multi_key_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 2, msg=str([(record.negotiated_host_key, record.read_calls) for record in connections])
@@ -1214,6 +1519,7 @@ class SFTPInteractionTests(unittest.TestCase):
         negotiated = sorted(record.negotiated_host_key for record in connections if record.negotiated_host_key)
         self.assertEqual(negotiated, ["ecdsa-sha2-nistp256", "ssh-rsa"], msg=str(negotiated))
         self.assertGreater(read_calls, 0)
+        self.assertGracefulSftpCleanup(self.multi_key_server, expected_connections=2)
 
     def test_single_query_with_fifty_h5_calls_reuses_one_sftp_connection(self) -> None:
         simple_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
@@ -1247,19 +1553,144 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn(str(expected_total), result.stdout, msg=result.output)
+        self.assertNumericOutput(result, [str(expected_total)])
         connections, read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
         )
         self.assertGreater(read_calls, 0)
-        handle_open_calls, handle_close_calls, current_open_handles, max_open_handles = (
+        handle_open_calls, handle_close_calls, handle_close_requests, current_open_handles, max_open_handles = (
             self.password_server.telemetry.handle_snapshot()
         )
         self.assertGreater(handle_open_calls, 0)
+        self.assertEqual(handle_open_calls, handle_close_requests)
         self.assertEqual(handle_open_calls, handle_close_calls)
         self.assertEqual(current_open_handles, 0)
         self.assertGreater(max_open_handles, 0)
+        self.assertGracefulSftpCleanup(
+            self.password_server,
+            expected_connections=1,
+            require_explicit_handle_closes=True,
+        )
+
+    def test_glob_directory_handles_are_closed_gracefully(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET password_auth (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.password_server.port}/glob/glob_with_attrs_*.h5');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        numeric_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()]
+        self.assertEqual(len(numeric_lines), 1, msg=result.stdout)
+        self.assertGreater(int(numeric_lines[0]), 0)
+        self.assertGracefulSftpCleanup(self.password_server, expected_connections=1)
+
+        deadline = time.monotonic() + 2.0
+        last_state = ""
+        while time.monotonic() < deadline:
+            handle_open_calls, handle_close_calls, handle_close_requests, current_open_handles, max_open_handles = (
+                self.password_server.telemetry.handle_snapshot()
+            )
+            last_state = (
+                f"handle_open_calls={handle_open_calls}, handle_close_calls={handle_close_calls}, "
+                f"handle_close_requests={handle_close_requests}, current_open_handles={current_open_handles}, "
+                f"max_open_handles={max_open_handles}"
+            )
+            if (
+                handle_open_calls > 0
+                and handle_open_calls == handle_close_calls
+                and handle_close_requests > handle_open_calls
+                and current_open_handles == 0
+            ):
+                return
+            time.sleep(0.02)
+        self.fail(f"SFTP server did not observe closed glob directory handles: {last_state}")
+
+    def test_sftp_status_failure_during_file_stat_closes_handle_gracefully(self) -> None:
+        self.password_server.config.fail_stat_calls = 1
+        try:
+            process = subprocess.Popen(
+                [self.duckdb_bin, "-csv", "-noheader", "-unsigned"],
+                cwd=self.project_root,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.addCleanup(lambda: self.kill_process(process))
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET stat_status_failure (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.password_server.port}/simple.h5');
+                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.password_server.port}/simple.h5');
+                .quit
+                """
+            ).strip()
+            stdout, stderr = process.communicate(sql + "\n", timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+            output = (stdout or "") + (stderr or "")
+            self.assertIn("Failed to stat SFTP file", output, msg=output)
+            numeric_lines = [line.strip() for line in stdout.splitlines() if line.strip().isdigit()]
+            self.assertEqual(numeric_lines, ["10"], msg=output)
+            handle_open_calls, handle_close_calls, handle_close_requests, current_open_handles, _ = (
+                self.password_server.telemetry.handle_snapshot()
+            )
+            self.assertGreaterEqual(handle_open_calls, 2)
+            self.assertEqual(handle_open_calls, handle_close_requests)
+            self.assertEqual(handle_open_calls, handle_close_calls)
+            self.assertEqual(current_open_handles, 0)
+        finally:
+            self.password_server.config.fail_stat_calls = 0
+
+    def test_sftp_status_failure_during_glob_stat_closes_directory_handle(self) -> None:
+        self.password_server.config.list_folder_omit_permissions = True
+        self.password_server.config.fail_stat_calls = 1
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET glob_stat_status_failure (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.password_server.port}/glo*/glob_same_*.h5');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertIn("Failed to stat SFTP path", result.output, msg=result.output)
+            handle_open_calls, _, handle_close_requests, current_open_handles, _ = (
+                self.password_server.telemetry.handle_snapshot()
+            )
+            self.assertEqual(handle_open_calls, 0)
+            self.assertGreater(handle_close_requests, 0)
+            self.assertEqual(current_open_handles, 0)
+        finally:
+            self.password_server.config.list_folder_omit_permissions = False
+            self.password_server.config.fail_stat_calls = 0
 
     def test_single_h5_read_list_can_span_two_sftp_remotes(self) -> None:
         password_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
@@ -1289,7 +1720,7 @@ class SFTPInteractionTests(unittest.TestCase):
         ).strip()
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertIn("20,90", result.stdout, msg=result.output)
+        self.assertCsvOutput(result, ["20,90"])
 
         password_connections, password_read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
@@ -1384,11 +1815,72 @@ class SFTPInteractionTests(unittest.TestCase):
         self.addCleanup(cleanup_process)
         self.assertIsNotNone(process.stdin)
         self.assertIsNotNone(process.stdout)
+        self.assertIsNotNone(process.stderr)
+
+        stdout_queue: queue.Queue[str | None] = queue.Queue()
+        stderr_queue: queue.Queue[str | None] = queue.Queue()
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def read_stream(stream, output_queue: queue.Queue[str | None]) -> None:
+            try:
+                for line in stream:
+                    output_queue.put(line)
+            finally:
+                output_queue.put(None)
+
+        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_queue), daemon=True)
+        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_queue), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        def drain_queue(output_queue: queue.Queue[str | None], lines: list[str], timeout: float = 0.0) -> bool:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    if timeout <= 0:
+                        line = output_queue.get_nowait()
+                    else:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        line = output_queue.get(timeout=remaining)
+                except queue.Empty:
+                    return False
+                if line is None:
+                    return True
+                lines.append(line)
+
+        def read_stdout_line(timeout_seconds: float) -> str:
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.kill_process(process)
+                    drain_queue(stdout_queue, stdout_lines, 1.0)
+                    drain_queue(stderr_queue, stderr_lines, 1.0)
+                    self.fail(
+                        "Timed out waiting for DuckDB output.\n"
+                        f"stdout:\n{''.join(stdout_lines)}\n"
+                        f"stderr:\n{''.join(stderr_lines)}"
+                    )
+                try:
+                    line = stdout_queue.get(timeout=remaining)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    drain_queue(stderr_queue, stderr_lines)
+                    self.fail(
+                        "DuckDB process exited before producing the expected query result.\n"
+                        f"stdout:\n{''.join(stdout_lines)}\n"
+                        f"stderr:\n{''.join(stderr_lines)}"
+                    )
+                stdout_lines.append(line)
+                return line
 
         def read_next_numeric_line() -> str:
             while True:
-                line = process.stdout.readline()
-                self.assertNotEqual(line, "", "DuckDB process exited before producing the expected query result")
+                line = read_stdout_line(self.SUBPROCESS_TIMEOUT_SECONDS)
                 stripped = line.strip()
                 if stripped.isdigit():
                     return stripped
@@ -1429,11 +1921,28 @@ class SFTPInteractionTests(unittest.TestCase):
             )
         )
         process.stdin.flush()
+        process.stdin.close()
 
-        stdout, stderr = process.communicate(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
-        self.assertEqual(process.returncode, 0, msg=(stdout or "") + (stderr or ""))
+        try:
+            process.wait(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as ex:
+            self.kill_process(process)
+            process.wait(timeout=1.0)
+            drain_queue(stdout_queue, stdout_lines, 1.0)
+            drain_queue(stderr_queue, stderr_lines, 1.0)
+            raise AssertionError(
+                "DuckDB subprocess timed out after mutable cache invalidation query.\n"
+                f"stdout:\n{''.join(stdout_lines)}\n"
+                f"stderr:\n{''.join(stderr_lines)}"
+            ) from ex
+
+        drain_queue(stdout_queue, stdout_lines, 1.0)
+        drain_queue(stderr_queue, stderr_lines, 1.0)
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+        self.assertEqual(process.returncode, 0, msg=stdout + stderr)
         numeric_lines = [line.strip() for line in stdout.splitlines() if line.strip().isdigit()]
-        self.assertEqual(numeric_lines[0], "3", msg=stdout)
+        self.assertEqual(numeric_lines, ["10", "3"], msg=stdout)
         _, second_read_calls = self.mutable_server.telemetry.snapshot()
         self.assertGreater(second_read_calls, 0)
 
@@ -1455,12 +1964,50 @@ class SFTPInteractionTests(unittest.TestCase):
             );
             """
         ).strip()
+        start = time.monotonic()
         result = self.run_sql(sql)
+        elapsed = time.monotonic() - start
         self.assertNotEqual(result.returncode, 0, msg=result.output)
         self.assertTrue(
             "Failed to read SFTP data" in result.output or "Unexpected EOF while reading SFTP file" in result.output,
             msg=result.output,
         )
+        self.assertLess(
+            elapsed,
+            5.0,
+            msg=f"dead connection cleanup did not return promptly: elapsed={elapsed:.3f}s",
+        )
+        self.assertEqual(self.flaky_server.telemetry.graceful_cleanup_snapshot(), (0, 0, 0))
+        _, _, handle_close_requests, _, _ = self.flaky_server.telemetry.handle_snapshot()
+        self.assertEqual(handle_close_requests, 0)
+
+    def test_sftp_early_eof_before_advertised_size_is_file_error(self) -> None:
+        self.password_server.config.read_eof_after_bytes = 1
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET early_eof (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.password_server.port}/simple.h5');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertIn("Unexpected EOF while reading SFTP file", result.output, msg=result.output)
+            self.assertGracefulSftpCleanup(
+                self.password_server,
+                expected_connections=1,
+                require_explicit_handle_closes=True,
+            )
+        finally:
+            self.password_server.config.read_eof_after_bytes = None
 
     def test_server_disconnect_during_stat(self) -> None:
         sql = textwrap.dedent(

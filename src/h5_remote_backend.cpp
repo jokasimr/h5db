@@ -34,6 +34,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/caching_file_system.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <array>
@@ -422,6 +423,12 @@ static H5SftpConnectionCacheKey BuildSftpConnectionCacheKey(const H5SftpConfig &
 	        config.host_key_algorithms.value_or("")};
 }
 
+static bool H5SftpStatusIndicatesRemoteConnectionUnreliable(unsigned long status) {
+	return status == LIBSSH2_FX_NO_CONNECTION || status == LIBSSH2_FX_CONNECTION_LOST;
+}
+
+using H5SftpCleanupDeadline = std::optional<std::chrono::steady_clock::time_point>;
+
 class ScopedSocket {
 public:
 	explicit ScopedSocket(libssh2_socket_t fd_p) : fd(fd_p) {
@@ -440,16 +447,33 @@ private:
 };
 
 class H5SftpConnection {
+private:
+	enum class SocketWaitResult { READY, TIMEOUT, FAILED };
+	enum class CleanupResult { COMPLETE, BLOCKED, FAILED };
+
+	struct SocketWaitOutcome {
+		SocketWaitResult result;
+		int error_code = 0;
+	};
+
+	static constexpr int IO_WAIT_SLICE_MS = 100;
+	static constexpr int CLEANUP_GRACE_MS = 1000;
+
 public:
 	H5SftpConnection(ClientContext &context_p, const H5SftpConfig &config_p) : config(config_p), context(&context_p) {
 		InitializeSocketApi();
 		InitializeLibssh2();
-		OpenVerifiedSession();
-		Authenticate();
-		OpenSftpSession();
+		try {
+			OpenVerifiedSession();
+			Authenticate();
+			OpenSftpSession();
+		} catch (...) {
+			ResetConnectionState();
+			throw;
+		}
 	}
 
-	~H5SftpConnection() {
+	~H5SftpConnection() noexcept {
 		ResetConnectionState();
 	}
 
@@ -465,14 +489,14 @@ public:
 		return context;
 	}
 
-	void ThrowIfDead() const {
-		if (IsDead()) {
+	void ThrowIfRemoteConnectionUnreliable() const {
+		if (IsRemoteConnectionUnreliable()) {
 			throw IOException("SFTP connection is no longer usable");
 		}
 	}
 
 	void WaitForSessionIO() {
-		ThrowIfDead();
+		ThrowIfRemoteConnectionUnreliable();
 		D_ASSERT(session);
 		auto directions = libssh2_session_block_directions(session);
 		auto wait_read = (directions & LIBSSH2_SESSION_BLOCK_INBOUND) != 0;
@@ -497,12 +521,57 @@ public:
 		return "unknown libssh2 error";
 	}
 
-	void MarkDead() {
-		dead = true;
+	std::optional<unsigned long> GetSftpStatusError(int libssh2_error) const {
+		if (libssh2_error != LIBSSH2_ERROR_SFTP_PROTOCOL || !sftp_session) {
+			return std::nullopt;
+		}
+		return libssh2_sftp_last_error(sftp_session);
 	}
 
-	bool IsDead() const {
-		return dead;
+	bool SftpOperationErrorIndicatesRemoteConnectionUnreliable(int libssh2_error) const {
+		if (libssh2_error == 0 || libssh2_error == LIBSSH2_ERROR_EAGAIN) {
+			return false;
+		}
+		auto sftp_error = GetSftpStatusError(libssh2_error);
+		if (sftp_error) {
+			return H5SftpStatusIndicatesRemoteConnectionUnreliable(*sftp_error);
+		}
+		return true;
+	}
+
+	[[noreturn]] void ThrowSftpOperationError(std::string message, int libssh2_error) {
+		if (SftpOperationErrorIndicatesRemoteConnectionUnreliable(libssh2_error)) {
+			MarkRemoteConnectionUnreliable();
+		}
+		throw IOException(std::move(message));
+	}
+
+	[[noreturn]] void ThrowSftpPathOperationError(const char *operation, const std::string &path, int libssh2_error) {
+		ThrowSftpOperationError(StringUtil::Format("%s '%s': %s", operation, path, LastSessionError()), libssh2_error);
+	}
+
+	void MarkRemoteConnectionUnreliable() {
+		remote_connection_unreliable = true;
+	}
+
+	bool IsRemoteConnectionUnreliable() const {
+		return remote_connection_unreliable;
+	}
+
+	void CloseSftpHandleForCleanup(LIBSSH2_SFTP_HANDLE *handle) noexcept {
+		H5SftpCleanupDeadline deadline;
+		CloseSftpHandleForCleanup(handle, deadline);
+	}
+
+	void CloseSftpHandleForCleanup(LIBSSH2_SFTP_HANDLE *handle, H5SftpCleanupDeadline &deadline) noexcept {
+		if (!handle) {
+			return;
+		}
+		CleanupStep([&]() { return libssh2_sftp_close_handle(handle); }, deadline);
+	}
+
+	void Close() noexcept {
+		ResetConnectionState();
 	}
 
 private:
@@ -605,32 +674,139 @@ private:
 		return attempts;
 	}
 
-	void ResetConnectionState() {
-		auto abortive = context && context->interrupted.load(std::memory_order_relaxed);
-		if (session) {
-			libssh2_session_set_blocking(session, 1);
+	bool ContextInterrupted() const {
+		return context && context->IsInterrupted();
+	}
+
+	bool CleanupDeadlineExpired(H5SftpCleanupDeadline &deadline) const noexcept {
+		if (!deadline && (remote_connection_unreliable || ContextInterrupted())) {
+			deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(CLEANUP_GRACE_MS);
 		}
-		if (abortive) {
-			// Query interruption uses abortive cleanup: close the transport first so
-			// libssh2 teardown cannot wait for a graceful server response.
-			socket_fd.reset();
+		return deadline && std::chrono::steady_clock::now() >= *deadline;
+	}
+
+	int CleanupWaitSliceMs(const H5SftpCleanupDeadline &deadline) const noexcept {
+		if (!deadline) {
+			return IO_WAIT_SLICE_MS;
 		}
+		auto remaining =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now());
+		if (remaining.count() <= 0) {
+			return 0;
+		}
+		if (remaining.count() < IO_WAIT_SLICE_MS) {
+			return UnsafeNumericCast<int>(remaining.count());
+		}
+		return IO_WAIT_SLICE_MS;
+	}
+
+	bool WaitForSessionIOForCleanup(H5SftpCleanupDeadline &deadline) noexcept {
+		if (!session || !socket_fd) {
+			return false;
+		}
+		auto directions = libssh2_session_block_directions(session);
+		auto wait_read = (directions & LIBSSH2_SESSION_BLOCK_INBOUND) != 0;
+		auto wait_write = (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) != 0;
+		if (!wait_read && !wait_write) {
+			wait_read = true;
+			wait_write = true;
+		}
+		while (true) {
+			if (CleanupDeadlineExpired(deadline)) {
+				return false;
+			}
+			auto wait_ms = CleanupWaitSliceMs(deadline);
+			if (wait_ms <= 0) {
+				return false;
+			}
+			auto wait_result = WaitForSocketEventsOnce(wait_read, wait_write, wait_ms);
+			if (wait_result.result == SocketWaitResult::READY) {
+				return true;
+			}
+			if (wait_result.result == SocketWaitResult::TIMEOUT) {
+				continue;
+			}
+			MarkRemoteConnectionUnreliable();
+			return false;
+		}
+	}
+
+	template <class CLEANUP>
+	CleanupResult RunCleanupCall(CLEANUP cleanup, H5SftpCleanupDeadline &deadline) noexcept {
+		if (!session) {
+			return CleanupResult::FAILED;
+		}
+		libssh2_session_set_blocking(session, 0);
+		while (true) {
+			if (CleanupDeadlineExpired(deadline)) {
+				return CleanupResult::BLOCKED;
+			}
+			auto rc = cleanup();
+			if (rc == 0) {
+				return CleanupResult::COMPLETE;
+			}
+			if (rc != LIBSSH2_ERROR_EAGAIN) {
+				MarkRemoteConnectionUnreliable();
+				return CleanupResult::FAILED;
+			}
+			if (!WaitForSessionIOForCleanup(deadline)) {
+				return CleanupResult::BLOCKED;
+			}
+		}
+	}
+
+	template <class CLEANUP>
+	void RunCleanupCallWithoutWaiting(CLEANUP cleanup) noexcept {
+		if (!session) {
+			return;
+		}
+		libssh2_session_set_blocking(session, 0);
+		auto rc = cleanup();
+		if (rc != 0 && rc != LIBSSH2_ERROR_EAGAIN) {
+			MarkRemoteConnectionUnreliable();
+		}
+	}
+
+	template <class CLEANUP>
+	void CleanupStep(CLEANUP cleanup, H5SftpCleanupDeadline &deadline) noexcept {
+		auto result = RunCleanupCall(cleanup, deadline);
+		if (result == CleanupResult::COMPLETE) {
+			return;
+		}
+		ShutdownTransport();
+		if (result == CleanupResult::BLOCKED) {
+			RunCleanupCallWithoutWaiting(cleanup);
+		}
+	}
+
+	void ResetConnectionState() noexcept {
+		H5SftpCleanupDeadline deadline;
 		if (sftp_session) {
-			libssh2_sftp_shutdown(sftp_session);
+			CleanupStep([&]() { return libssh2_sftp_shutdown(sftp_session); }, deadline);
 			sftp_session = nullptr;
 		}
 		if (session) {
-			if (!abortive) {
-				libssh2_session_disconnect(session, "Normal Shutdown");
-			}
-			libssh2_session_free(session);
+			CleanupStep([&]() { return libssh2_session_disconnect(session, "Normal Shutdown"); }, deadline);
+			CleanupStep([&]() { return libssh2_session_free(session); }, deadline);
 			session = nullptr;
 		}
 		socket_fd.reset();
 	}
 
+	void ShutdownTransport() noexcept {
+		MarkRemoteConnectionUnreliable();
+		if (!socket_fd) {
+			return;
+		}
+#ifdef _WIN32
+		(void)shutdown(socket_fd->Get(), SD_BOTH);
+#else
+		(void)shutdown(socket_fd->Get(), SHUT_RDWR);
+#endif
+	}
+
 	void ThrowIfInterrupted() const {
-		if (context && context->interrupted.load(std::memory_order_relaxed)) {
+		if (ContextInterrupted()) {
 			throw InterruptException();
 		}
 	}
@@ -680,69 +856,88 @@ private:
 #endif
 	}
 
-	void WaitForSocketEvents(bool wait_read, bool wait_write) {
-		D_ASSERT(socket_fd);
+	static void TryDisableSigPipe(libssh2_socket_t fd) {
+#ifdef SO_NOSIGPIPE
+		int enabled = 1;
+		(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#else
+		(void)fd;
+#endif
+	}
 
+	SocketWaitOutcome WaitForSocketEventsOnce(bool wait_read, bool wait_write, int timeout_ms) noexcept {
+		D_ASSERT(socket_fd);
+#ifdef _WIN32
+		fd_set readfds;
+		fd_set writefds;
+		fd_set exceptfds;
+		FD_ZERO(&readfds);
+		FD_ZERO(&writefds);
+		FD_ZERO(&exceptfds);
+		if (wait_read) {
+			FD_SET(socket_fd->Get(), &readfds);
+		}
+		if (wait_write) {
+			FD_SET(socket_fd->Get(), &writefds);
+		}
+		FD_SET(socket_fd->Get(), &exceptfds);
+
+		timeval timeout;
+		timeout.tv_sec = timeout_ms / 1000;
+		timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+		auto rc = select(0, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr, &exceptfds, &timeout);
+		if (rc > 0) {
+			return {SocketWaitResult::READY, 0};
+		}
+		if (rc == 0) {
+			return {SocketWaitResult::TIMEOUT, 0};
+		}
+		auto error_code = GetSocketLastError();
+		if (SocketWaitInterrupted(error_code)) {
+			return {SocketWaitResult::TIMEOUT, 0};
+		}
+		return {SocketWaitResult::FAILED, error_code};
+#else
+		short events = 0;
+		if (wait_read) {
+			events |= POLLIN;
+		}
+		if (wait_write) {
+			events |= POLLOUT;
+		}
+
+		struct pollfd pfd;
+		pfd.fd = socket_fd->Get();
+		pfd.events = events;
+		pfd.revents = 0;
+
+		auto rc = poll(&pfd, 1, timeout_ms);
+		if (rc > 0) {
+			return {SocketWaitResult::READY, 0};
+		}
+		if (rc == 0) {
+			return {SocketWaitResult::TIMEOUT, 0};
+		}
+		auto error_code = errno;
+		if (SocketWaitInterrupted(error_code)) {
+			return {SocketWaitResult::TIMEOUT, 0};
+		}
+		return {SocketWaitResult::FAILED, error_code};
+#endif
+	}
+
+	void WaitForSocketEvents(bool wait_read, bool wait_write) {
 		while (true) {
 			ThrowIfInterrupted();
-#ifdef _WIN32
-			fd_set readfds;
-			fd_set writefds;
-			fd_set exceptfds;
-			FD_ZERO(&readfds);
-			FD_ZERO(&writefds);
-			FD_ZERO(&exceptfds);
-			if (wait_read) {
-				FD_SET(socket_fd->Get(), &readfds);
-			}
-			if (wait_write) {
-				FD_SET(socket_fd->Get(), &writefds);
-			}
-			FD_SET(socket_fd->Get(), &exceptfds);
-
-			timeval timeout;
-			timeout.tv_sec = 0;
-			timeout.tv_usec = IO_WAIT_SLICE_MS * 1000;
-
-			auto rc = select(0, wait_read ? &readfds : nullptr, wait_write ? &writefds : nullptr, &exceptfds, &timeout);
-			if (rc > 0) {
+			auto wait_result = WaitForSocketEventsOnce(wait_read, wait_write, IO_WAIT_SLICE_MS);
+			if (wait_result.result == SocketWaitResult::READY) {
 				return;
 			}
-			if (rc == 0) {
+			if (wait_result.result == SocketWaitResult::TIMEOUT) {
 				continue;
 			}
-			auto error_code = GetSocketLastError();
-			if (SocketWaitInterrupted(error_code)) {
-				continue;
-			}
-			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(error_code));
-#else
-			short events = 0;
-			if (wait_read) {
-				events |= POLLIN;
-			}
-			if (wait_write) {
-				events |= POLLOUT;
-			}
-
-			struct pollfd pfd;
-			pfd.fd = socket_fd->Get();
-			pfd.events = events;
-			pfd.revents = 0;
-
-			auto rc = poll(&pfd, 1, IO_WAIT_SLICE_MS);
-			if (rc > 0) {
-				return;
-			}
-			if (rc == 0) {
-				continue;
-			}
-			auto error_code = GetSocketLastError();
-			if (SocketWaitInterrupted(error_code)) {
-				continue;
-			}
-			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(error_code));
-#endif
+			throw IOException("Waiting on SFTP socket failed: %s", SocketErrorMessage(wait_result.error_code));
 		}
 	}
 
@@ -772,6 +967,7 @@ private:
 			if (fd == LIBSSH2_INVALID_SOCKET) {
 				continue;
 			}
+			TryDisableSigPipe(fd);
 			if (!TrySetSocketNonBlocking(fd)) {
 				LIBSSH2_SOCKET_CLOSE(fd);
 				fd = LIBSSH2_INVALID_SOCKET;
@@ -779,6 +975,7 @@ private:
 			}
 			if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
 				socket_fd = make_uniq<ScopedSocket>(fd);
+				remote_connection_unreliable = false;
 				return;
 			}
 
@@ -792,11 +989,13 @@ private:
 				int error_len = sizeof(socket_error);
 				if (getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&socket_error), &error_len) == 0 &&
 				    socket_error == 0) {
+					remote_connection_unreliable = false;
 					return;
 				}
 #else
 				socklen_t error_len = sizeof(socket_error);
 				if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 && socket_error == 0) {
+					remote_connection_unreliable = false;
 					return;
 				}
 #endif
@@ -824,13 +1023,38 @@ private:
 			}
 		}
 		libssh2_session_set_blocking(session, 0);
+		auto rc = RunSessionCall([&]() { return libssh2_session_handshake(session, socket_fd->Get()); });
+		if (rc != 0) {
+			throw IOException("Failed SSH handshake: %s", LastSessionError());
+		}
+	}
+
+	template <class CALL>
+	int RunSessionCall(CALL call) {
+		D_ASSERT(session);
+		libssh2_session_set_blocking(session, 0);
 		while (true) {
-			auto rc = libssh2_session_handshake(session, socket_fd->Get());
-			if (rc == 0) {
-				return;
-			}
+			ThrowIfInterrupted();
+			auto rc = call();
 			if (rc != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed SSH handshake: %s", LastSessionError());
+				return rc;
+			}
+			WaitForSessionIO();
+		}
+	}
+
+	template <class RESULT, class CALL>
+	RESULT *RunSessionPointerCall(CALL call) {
+		D_ASSERT(session);
+		libssh2_session_set_blocking(session, 0);
+		while (true) {
+			ThrowIfInterrupted();
+			auto *result = call();
+			if (result) {
+				return result;
+			}
+			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
+				return nullptr;
 			}
 			WaitForSessionIO();
 		}
@@ -943,19 +1167,6 @@ private:
 	}
 
 	void Authenticate() {
-		// Keep the entire authentication phase in blocking mode. This matches libssh2's documented/examples
-		// usage better than a mixed model, and keeps the backend's nonblocking session logic confined to the
-		// post-auth SFTP/data path where WaitForSessionIO() is the correct wait primitive.
-		struct NonBlockingSessionRestore {
-			explicit NonBlockingSessionRestore(LIBSSH2_SESSION *session_p) : session(session_p) {
-				libssh2_session_set_blocking(session, 1);
-			}
-			~NonBlockingSessionRestore() {
-				libssh2_session_set_blocking(session, 0);
-			}
-			LIBSSH2_SESSION *session;
-		} blocking_guard(session);
-
 		switch (config.auth_method) {
 		case H5SftpAuthMethod::PASSWORD:
 			AuthenticateWithPassword();
@@ -973,7 +1184,8 @@ private:
 
 	void AuthenticateWithPassword() {
 		D_ASSERT(config.password.has_value());
-		auto rc = libssh2_userauth_password(session, config.username.c_str(), config.password->c_str());
+		auto rc = RunSessionCall(
+		    [&]() { return libssh2_userauth_password(session, config.username.c_str(), config.password->c_str()); });
 		if (rc != 0) {
 			throw IOException("SSH password authentication failed for '%s': %s", config.username, LastSessionError());
 		}
@@ -983,8 +1195,10 @@ private:
 		D_ASSERT(config.key_path.has_value());
 		auto passphrase = config.key_passphrase ? config.key_passphrase->c_str() : nullptr;
 		const auto &key_path = config.key_path.value();
-		auto rc = libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr, key_path.c_str(),
-		                                              passphrase);
+		auto rc = RunSessionCall([&]() {
+			return libssh2_userauth_publickey_fromfile(session, config.username.c_str(), nullptr, key_path.c_str(),
+			                                           passphrase);
+		});
 		if (rc != 0) {
 			throw IOException("SSH public key authentication failed for '%s': %s", config.username, LastSessionError());
 		}
@@ -1025,7 +1239,8 @@ private:
 			prev_identity = identity;
 			attempted_identity = true;
 
-			rc = libssh2_agent_userauth(agent.get(), config.username.c_str(), identity);
+			rc = RunSessionCall(
+			    [&]() { return libssh2_agent_userauth(agent.get(), config.username.c_str(), identity); });
 			if (rc == 0) {
 				return;
 			}
@@ -1045,15 +1260,9 @@ private:
 	}
 
 	void OpenSftpSession() {
-		while (true) {
-			sftp_session = libssh2_sftp_init(session);
-			if (sftp_session) {
-				return;
-			}
-			if (libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
-			}
-			WaitForSessionIO();
+		sftp_session = RunSessionPointerCall<LIBSSH2_SFTP>([&]() { return libssh2_sftp_init(session); });
+		if (!sftp_session) {
+			throw IOException("Failed to initialize SFTP session: %s", LastSessionError());
 		}
 	}
 
@@ -1063,8 +1272,7 @@ private:
 	LIBSSH2_SESSION *session = nullptr;
 	LIBSSH2_SFTP *sftp_session = nullptr;
 	// This connection is only touched from the HDF5 VFD path while hdf5_global_mutex is held.
-	bool dead = false;
-	static constexpr int IO_WAIT_SLICE_MS = 100;
+	bool remote_connection_unreliable = false;
 };
 
 class H5SftpConnectionCacheState : public ClientContextState {
@@ -1073,7 +1281,7 @@ public:
 		auto key = BuildSftpConnectionCacheKey(config);
 		auto lookup = connections.find(key);
 		if (lookup != connections.end()) {
-			if (lookup->second && !lookup->second->IsDead()) {
+			if (lookup->second && !lookup->second->IsRemoteConnectionUnreliable()) {
 				return lookup->second;
 			}
 			connections.erase(lookup);
@@ -1085,6 +1293,11 @@ public:
 	}
 
 	void QueryEnd() override {
+		for (auto &entry : connections) {
+			if (entry.second) {
+				entry.second->Close();
+			}
+		}
 		connections.clear();
 	}
 
@@ -1142,7 +1355,7 @@ static H5SftpRemotePattern ParseSftpRemotePattern(const std::string &remote_path
 
 static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, const std::string &path, int stat_type,
                               LIBSSH2_SFTP_ATTRIBUTES &attrs) {
-	connection->ThrowIfDead();
+	connection->ThrowIfRemoteConnectionUnreliable();
 	while (true) {
 		auto rc = libssh2_sftp_stat_ex(connection->GetSftpSession(), path.c_str(),
 		                               UnsafeNumericCast<unsigned int>(path.size()), stat_type, &attrs);
@@ -1153,11 +1366,11 @@ static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, co
 			connection->WaitForSessionIO();
 			continue;
 		}
-		auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
-		if (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH) {
+		auto sftp_error = connection->GetSftpStatusError(rc);
+		if (sftp_error && (*sftp_error == LIBSSH2_FX_NO_SUCH_FILE || *sftp_error == LIBSSH2_FX_NO_SUCH_PATH)) {
 			return false;
 		}
-		throw IOException("Failed to stat SFTP path '%s': %s", path, connection->LastSessionError());
+		connection->ThrowSftpPathOperationError("Failed to stat SFTP path", path, rc);
 	}
 }
 
@@ -1166,27 +1379,23 @@ static bool H5SftpPathAttrsAreDirectory(const LIBSSH2_SFTP_ATTRIBUTES &attrs) {
 }
 
 static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
-	connection->ThrowIfDead();
+	connection->ThrowIfRemoteConnectionUnreliable();
 	while (true) {
 		auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
 		if (dir_handle) {
-			while (true) {
-				auto rc = libssh2_sftp_closedir(dir_handle);
-				if (rc == 0) {
-					return true;
-				}
-				if (rc != LIBSSH2_ERROR_EAGAIN) {
-					connection->MarkDead();
-					return true;
-				}
-				connection->WaitForSessionIO();
-			}
+			connection->CloseSftpHandleForCleanup(dir_handle);
+			return true;
 		}
-		if (libssh2_session_last_errno(connection->GetSession()) == LIBSSH2_ERROR_EAGAIN) {
+		auto last_error = libssh2_session_last_errno(connection->GetSession());
+		if (last_error == LIBSSH2_ERROR_EAGAIN) {
 			connection->WaitForSessionIO();
 			continue;
 		}
-		return false;
+		auto sftp_error = connection->GetSftpStatusError(last_error);
+		if (sftp_error && !H5SftpStatusIndicatesRemoteConnectionUnreliable(*sftp_error)) {
+			return false;
+		}
+		connection->ThrowSftpPathOperationError("Failed to open SFTP directory", path, last_error);
 	}
 }
 
@@ -1264,25 +1473,26 @@ private:
 	}
 
 	LIBSSH2_SFTP_HANDLE *OpenDirectoryHandle(const std::string &path, bool allow_probe_failure = false) const {
-		connection->ThrowIfDead();
+		connection->ThrowIfRemoteConnectionUnreliable();
 		while (true) {
 			auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
 			if (dir_handle) {
 				return dir_handle;
 			}
-			if (libssh2_session_last_errno(connection->GetSession()) == LIBSSH2_ERROR_EAGAIN) {
+			auto last_error = libssh2_session_last_errno(connection->GetSession());
+			if (last_error == LIBSSH2_ERROR_EAGAIN) {
 				connection->WaitForSessionIO();
 				continue;
 			}
-			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
-			if (allow_probe_failure && IsIgnorableGlobDirectoryFailure(sftp_error)) {
+			auto sftp_error = connection->GetSftpStatusError(last_error);
+			if (allow_probe_failure && sftp_error && IsIgnorableGlobDirectoryFailure(*sftp_error)) {
 				// During glob expansion, match DuckDB's local filesystem semantics:
 				// unreadable, missing, or non-directory paths are treated as simply not
 				// traversable instead of raising a glob error. Some servers report both
 				// "not a directory" and permission failures as a generic FX_FAILURE.
 				return nullptr;
 			}
-			throw IOException("Failed to open SFTP directory '%s': %s", path, connection->LastSessionError());
+			connection->ThrowSftpPathOperationError("Failed to open SFTP directory", path, last_error);
 		}
 	}
 
@@ -1296,23 +1506,7 @@ private:
 	}
 
 	bool TryStatPath(const std::string &path, int stat_type, LIBSSH2_SFTP_ATTRIBUTES &attrs) const {
-		connection->ThrowIfDead();
-		while (true) {
-			auto rc = libssh2_sftp_stat_ex(connection->GetSftpSession(), path.c_str(),
-			                               UnsafeNumericCast<unsigned int>(path.size()), stat_type, &attrs);
-			if (rc == 0) {
-				return true;
-			}
-			if (rc == LIBSSH2_ERROR_EAGAIN) {
-				connection->WaitForSessionIO();
-				continue;
-			}
-			auto sftp_error = libssh2_sftp_last_error(connection->GetSftpSession());
-			if (sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH) {
-				return false;
-			}
-			throw IOException("Failed to stat SFTP path '%s': %s", path, connection->LastSessionError());
-		}
+		return H5SftpTryStatPath(connection, path, stat_type, attrs);
 	}
 
 	H5SftpPathKind TryGetResolvedPathKind(const std::string &path) const {
@@ -1360,20 +1554,7 @@ private:
 	}
 
 	void CloseDirectoryHandle(LIBSSH2_SFTP_HANDLE *dir_handle) const {
-		if (!dir_handle) {
-			return;
-		}
-		while (true) {
-			auto rc = libssh2_sftp_closedir(dir_handle);
-			if (rc == 0) {
-				return;
-			}
-			if (rc != LIBSSH2_ERROR_EAGAIN) {
-				connection->MarkDead();
-				return;
-			}
-			connection->WaitForSessionIO();
-		}
+		connection->CloseSftpHandleForCleanup(dir_handle);
 	}
 
 	vector<H5SftpListEntry> ListDirectory(const std::string &path) const {
@@ -1393,7 +1574,8 @@ private:
 					continue;
 				}
 				if (rc < 0) {
-					throw IOException("Failed to list SFTP directory '%s': %s", path, connection->LastSessionError());
+					connection->ThrowSftpPathOperationError("Failed to list SFTP directory", path,
+					                                        UnsafeNumericCast<int>(rc));
 				}
 				if (rc == 0) {
 					break;
@@ -1508,7 +1690,7 @@ public:
 			OpenReadHandle(0);
 			StatFile();
 		} catch (...) {
-			MarkConnectionDeadAfterFileEngineFailure();
+			CloseReadHandles();
 			throw;
 		}
 	}
@@ -1517,9 +1699,7 @@ public:
 		if (profiling_enabled) {
 			stats.Print(remote_path);
 		}
-		for (auto &handle_slot : sftp_handles) {
-			CloseReadHandle(handle_slot);
-		}
+		CloseReadHandles();
 	}
 
 	idx_t GetFileSize() const {
@@ -1531,14 +1711,7 @@ public:
 	}
 
 	void Read(idx_t offset, idx_t size, void *buf) {
-		try {
-			ReadInternal(offset, size, buf);
-		} catch (const InterruptException &) {
-			throw;
-		} catch (...) {
-			MarkConnectionDeadAfterFileEngineFailure();
-			throw;
-		}
+		ReadInternal(offset, size, buf);
 	}
 
 private:
@@ -1648,45 +1821,27 @@ private:
 	};
 
 	void ThrowIfInterrupted() const {
-		if (context && context->interrupted.load(std::memory_order_relaxed)) {
+		if (context && context->IsInterrupted()) {
 			throw InterruptException();
 		}
 	}
 
-	void MarkConnectionDeadAfterFileEngineFailure() noexcept {
-		// Conservative v1 policy: we invalidate the shared connection on any file-engine failure
-		// instead of trying to distinguish file-local SFTP errors from transport/session failures here.
-		// That boundary could be made more selective later, but with a query-local cache and fail-fast
-		// query behavior the practical impact of over-invalidating is low.
-		connection->MarkDead();
+	void CloseReadHandles() noexcept {
+		H5SftpCleanupDeadline deadline;
+		for (auto &handle_slot : sftp_handles) {
+			CloseReadHandle(handle_slot, deadline);
+		}
 	}
 
-	void CloseReadHandle(SftpReadHandle &handle_slot) noexcept {
+	void CloseReadHandle(SftpReadHandle &handle_slot, H5SftpCleanupDeadline &deadline) noexcept {
 		auto *handle = handle_slot.handle;
 		handle_slot.handle = nullptr;
 		handle_slot.current_offset.reset();
-		if (!handle) {
-			return;
-		}
-		try {
-			while (true) {
-				auto rc = libssh2_sftp_close_handle(handle);
-				if (rc == 0) {
-					return;
-				}
-				if (rc != LIBSSH2_ERROR_EAGAIN) {
-					connection->MarkDead();
-					return;
-				}
-				connection->WaitForSessionIO();
-			}
-		} catch (...) {
-			connection->MarkDead();
-		}
+		connection->CloseSftpHandleForCleanup(handle, deadline);
 	}
 
 	void ReadInternal(idx_t offset, idx_t size, void *buf) {
-		connection->ThrowIfDead();
+		connection->ThrowIfRemoteConnectionUnreliable();
 		auto &handle_slot = SelectReadHandle(offset);
 		if (profiling_enabled) {
 			stats.RecordRead(offset, size, handle_slot.index);
@@ -1705,7 +1860,9 @@ private:
 				continue;
 			}
 			if (nread < 0) {
-				throw IOException("Failed to read SFTP data: %s", connection->LastSessionError());
+				connection->ThrowSftpOperationError(
+				    StringUtil::Format("Failed to read SFTP data: %s", connection->LastSessionError()),
+				    UnsafeNumericCast<int>(nread));
 			}
 			if (nread == 0) {
 				throw IOException("Unexpected EOF while reading SFTP file");
@@ -1721,7 +1878,7 @@ private:
 	}
 
 	SftpReadHandle &OpenReadHandle(idx_t handle_index) {
-		connection->ThrowIfDead();
+		connection->ThrowIfRemoteConnectionUnreliable();
 		auto &handle_slot = sftp_handles[handle_index];
 		if (handle_slot.handle) {
 			return handle_slot;
@@ -1736,15 +1893,16 @@ private:
 				}
 				return handle_slot;
 			}
-			if (libssh2_session_last_errno(connection->GetSession()) != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to open SFTP file '%s': %s", remote_path, connection->LastSessionError());
+			auto last_error = libssh2_session_last_errno(connection->GetSession());
+			if (last_error != LIBSSH2_ERROR_EAGAIN) {
+				connection->ThrowSftpPathOperationError("Failed to open SFTP file", remote_path, last_error);
 			}
 			connection->WaitForSessionIO();
 		}
 	}
 
 	void StatFile() {
-		connection->ThrowIfDead();
+		connection->ThrowIfRemoteConnectionUnreliable();
 		LIBSSH2_SFTP_ATTRIBUTES attrs;
 		while (true) {
 			auto rc = libssh2_sftp_fstat_ex(sftp_handles[0].handle, &attrs, 0);
@@ -1752,7 +1910,7 @@ private:
 				break;
 			}
 			if (rc != LIBSSH2_ERROR_EAGAIN) {
-				throw IOException("Failed to stat SFTP file '%s': %s", remote_path, connection->LastSessionError());
+				connection->ThrowSftpPathOperationError("Failed to stat SFTP file", remote_path, rc);
 			}
 			connection->WaitForSessionIO();
 		}
