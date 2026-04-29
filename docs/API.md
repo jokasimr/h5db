@@ -59,7 +59,7 @@ remote schemes when the underlying DuckDB filesystem supports globbing.
 - On Windows, HDF5 1.14.6 with its native file driver fails to open a file
   symlink when the symlink itself is passed as the filename. h5db does not
   resolve those paths before calling HDF5, so final-component file symlink
-  matches are not supported there.
+  paths are not supported there.
 
 **Examples:**
 

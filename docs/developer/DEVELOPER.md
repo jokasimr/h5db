@@ -294,6 +294,20 @@ This target rewrites the main SQL suite against `sftp://` URLs, starts the local
 dedicated interaction harness in `test/scripts/run_sftp_interaction_tests.py`. The runner will use the repo venv when
 present and otherwise falls back to `python3`/`python`, installing `paramiko` if needed.
 
+### SFTP Interrupt and Cleanup Behavior
+
+The native SFTP backend keeps libssh2 sessions in nonblocking mode. Remote SSH/SFTP operations wait in short slices and
+check DuckDB's query interrupt state between waits, so user interrupts can stop connection setup, authentication,
+directory listing, file reads, and normal cleanup. The intentional exception is `getaddrinfo(...)`, which remains a
+regular local resolver call to avoid adding resolver-specific machinery.
+
+Cleanup is graceful by default: h5db tries to close SFTP handles, shut down the SFTP subsystem, send SSH disconnect, and
+free the libssh2 session through the normal libssh2 APIs. Cleanup switches to bounded abortive behavior when either the
+connection has already seen an unreliable remote-connection event or DuckDB reports the query context as interrupted.
+Once that condition is observed, all cleanup steps in the current cleanup cascade share one 1s grace period. If graceful
+cleanup still cannot make progress, h5db shuts down the socket transport and releases local ownership of the SFTP/session
+objects rather than letting cleanup block the query indefinitely.
+
 Windows CI currently skips these SQL glob tests:
 
 - `test/sql/glob/h5_glob_missing_notwindows.test`
