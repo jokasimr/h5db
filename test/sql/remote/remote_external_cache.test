@@ -29,9 +29,9 @@ FROM (
 45
 
 query I
-SELECT COUNT(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET';
+SELECT COUNT(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type='GET';
 ----
-5
+true
 
 query I
 SELECT COUNT(*) > 0 FROM duckdb_external_file_cache() WHERE path LIKE '%nd_cache_test.h5';

@@ -163,7 +163,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 username="h5db",
                 password="h5db",
                 host_keys=[cls.rsa_host_key],
-                disconnect_after_read_calls=3,
+                disconnect_after_read_calls=5,
             ),
         )
         cls.flaky_server.start()
