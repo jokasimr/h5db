@@ -490,14 +490,16 @@ class SFTPInteractionTests(unittest.TestCase):
                 f"handle_close_requests={handle_close_requests}, current_open_handles={current_open_handles}, "
                 f"max_open_handles={max_open_handles}"
             )
+            # libssh2_session_disconnect() only waits until the final SSH disconnect
+            # packet is accepted by the local socket. It does not wait for the server
+            # to parse that packet, so transport_disconnects is useful diagnostic
+            # telemetry but is not a stable cross-platform cleanup assertion.
             connections_clean = (
                 len(connections) == expected_connections
                 and all(record.channel_eof_messages > 0 for record in connections)
                 and all(record.channel_close_messages > 0 for record in connections)
-                and all(record.transport_disconnect_messages > 0 for record in connections)
                 and channel_eofs >= expected_connections
                 and channel_closes >= expected_connections
-                and transport_disconnects >= expected_connections
             )
             handles_clean = not require_explicit_handle_closes or (
                 handle_open_calls > 0
