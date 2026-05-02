@@ -105,6 +105,97 @@ ORDER BY ALL;
 test/data/glob_order/order_1.h5
 test/data/glob_order/order_1.h5
 
+# Filename filter pushdown should skip filtered-out files before opening them.
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+])
+WHERE filename = 'test/data/simple.h5';
+----
+10
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+])
+WHERE filename IN ('test/data/simple.h5', 'test/data/other.h5');
+----
+10
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+])
+WHERE filename LIKE '%/simple.h5';
+----
+10
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], filename=true)
+WHERE filename = 'test/data/simple.h5' AND path = '/';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], filename='source')
+WHERE source = 'test/data/simple.h5' AND path = '/';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], filename='source')
+WHERE source = 'test/data/no_match.h5';
+----
+0
+
+query I
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+])
+WHERE filename = 'test/data/no_match.h5';
+----
+0
+
+statement error
+SELECT COUNT(*)
+FROM h5_tree([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+])
+WHERE filename = 'test/data/no_match.h5' OR path = '/';
+----
+<REGEX>:.*Failed to open HDF5 file: test/data/does_not_exist_filename_pushdown.h5.*
+
+statement error
+FROM h5_tree('test/data/simple.h5', filename='path');
+----
+Binder Error: Option filename adds column "path", but that column name is already present in h5_tree output
+
+statement error
+FROM h5_tree('test/data/simple.h5', filename='PATH');
+----
+Binder Error: Option filename adds column "PATH", but that column name is already present in h5_tree output
+
 statement error
 FROM h5_tree(
     'test/data/with_attrs.h5',
@@ -251,6 +342,97 @@ ORDER BY ALL;
 ----
 test/data/glob_order/order_1.h5
 test/data/glob_order/order_1.h5
+
+# Filename filter pushdown should skip filtered-out files before opening them.
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/')
+WHERE filename = 'test/data/simple.h5';
+----
+5
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/')
+WHERE filename IN ('test/data/simple.h5', 'test/data/other.h5');
+----
+5
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/')
+WHERE filename LIKE '%/simple.h5';
+----
+5
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/', filename=true)
+WHERE filename = 'test/data/simple.h5' AND path = '/integers';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/', filename='source')
+WHERE source = 'test/data/simple.h5' AND path = '/integers';
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/', filename='source')
+WHERE source = 'test/data/no_match.h5';
+----
+0
+
+query I
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/')
+WHERE filename = 'test/data/no_match.h5';
+----
+0
+
+statement error
+SELECT COUNT(*)
+FROM h5_ls([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/simple.h5'
+], '/')
+WHERE filename = 'test/data/no_match.h5' OR path = '/integers';
+----
+<REGEX>:.*Failed to open HDF5 file: test/data/does_not_exist_filename_pushdown.h5.*
+
+statement error
+FROM h5_ls('test/data/simple.h5', '/', filename='path');
+----
+Binder Error: Option filename adds column "path", but that column name is already present in h5_ls output
+
+statement error
+FROM h5_ls('test/data/simple.h5', '/', filename='PATH');
+----
+Binder Error: Option filename adds column "PATH", but that column name is already present in h5_ls output
 
 statement error
 FROM h5_ls(

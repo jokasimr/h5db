@@ -288,13 +288,13 @@ IO Error: h5_read requires at least one regular (non-RSE) dataset to determine r
 
 **Error: Invalid run_starts**
 ```
-IO Error: RSE run_starts must be strictly increasing
+IO Error: RSE run_starts must be strictly increasing: /state_run_starts in file: file.h5
 ```
 **Solution**: Ensure `run_starts` is strictly increasing
 
 **Error: Size mismatch**
 ```
-IO Error: RSE run_starts and values must have same size. Got 3 and 4
+IO Error: RSE run_starts and values must have same size. Got 3 and 4 for run_starts dataset: /state_run_starts, values dataset: /state_values in file: file.h5
 ```
 **Solution**: Ensure run_starts and values arrays have the same length
 

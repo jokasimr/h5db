@@ -14,6 +14,8 @@ stack or SFTP.
 - Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
 - Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
   patterns, or `VARCHAR[]` filename inputs.
+- `h5_tree(...)` and table-valued `h5_ls(...)` can prune glob/list inputs from selective `filename` filters before
+  opening files.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
@@ -140,9 +142,6 @@ Multi-file semantics:
 - `h5_index()` is the outermost-dimension row index within each matched file, so it starts at `0` for each file
 - table `h5_tree(...)`, table `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden virtual
   `filename` column; refer to it explicitly when you need file provenance
-- `filename := true` adds `filename` to the visible output schema, so it appears in `FROM ...` / `SELECT *`
-- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
-  and replaces the hidden `filename` binding with that visible name
 - `h5_read(...)` requires compatible column definitions across all matched files
 - `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
 - scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand lists or glob patterns
@@ -157,6 +156,23 @@ traverse symlink directories. Globs support the usual `*`, `?`, and bracket
 classes, plus one recursive `**` segment per pattern. A pattern that matches
 no files raises an error.
 
+When you filter `h5_tree(...)` or table-valued `h5_ls(...)` by the virtual `filename` column, h5db can apply that
+filter before opening each expanded file:
+
+```sql
+SELECT path, type
+FROM h5_tree('runs/**/*.h5')
+WHERE filename LIKE '%/run_042.h5';
+
+SELECT filename, path
+FROM h5_ls('runs/run_*.h5', '/entry')
+WHERE filename IN ('runs/run_001.h5', 'runs/run_002.h5');
+```
+
+This pruning applies to filename-only predicates and filename predicates inside `AND` filters that DuckDB pushes into
+the table function. Dynamic predicates from joins, semi-joins, or scalar subqueries may still open all expanded files.
+`h5_read(...)` and `h5_attributes(...)` do not currently use `filename` filters to avoid opening files.
+
 When several files contain the same HDF5 path, use `filename` to distinguish them:
 
 ```sql
@@ -164,7 +180,8 @@ SELECT filename, path
 FROM h5_tree('runs/**/*.h5')
 WHERE path = '/entry/data';
 
-FROM h5_read('runs/run_*.h5', '/entry/data', filename := true);
+SELECT filename, *
+FROM h5_read('runs/run_*.h5', '/entry/data');
 ```
 
 - DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,

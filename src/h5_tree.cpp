@@ -7,6 +7,7 @@
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
@@ -334,8 +335,9 @@ private:
 		        : H5Lvisit_by_name2(reader.GetFileHandle(), task.root_path.c_str(), H5_INDEX_NAME, H5_ITER_NATIVE,
 		                            VisitCallback, &visit_context, H5P_DEFAULT);
 		if (status < 0 && !stop_requested) {
-			throw IOException(task.root_path == "/" ? "Failed to traverse HDF5 namespace"
-			                                        : "Failed to traverse HDF5 namespace subtree");
+			throw IOException(FormatRemoteFileError(task.root_path == "/" ? "Failed to traverse HDF5 namespace"
+			                                                              : "Failed to traverse HDF5 namespace subtree",
+			                                        reader.GetFilename()));
 		}
 		for (auto &deferred : visit_context.deferred_tasks) {
 			tasks.push_back(std::move(deferred));
@@ -448,6 +450,12 @@ static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunction
 	return std::move(result);
 }
 
+static void H5TreePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                        vector<unique_ptr<Expression>> &filters) {
+	auto &bind_data = bind_data_p->Cast<H5TreeBindData>();
+	H5ApplyFilenameFilterPushdown(context, get, bind_data.visible_filename_idx, bind_data.filenames, filters);
+}
+
 static void H5TreeOpenFileScanner(ClientContext &context, const H5TreeBindData &bind_data, H5TreeGlobalState &state,
                                   idx_t file_idx) {
 	D_ASSERT(file_idx < bind_data.filenames.size());
@@ -461,8 +469,9 @@ static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, T
 	auto &bind_data = input.bind_data->Cast<H5TreeBindData>();
 	auto result = make_uniq<H5TreeGlobalState>();
 	result->output_layout = H5TreeBuildOutputLayout(bind_data, input.column_ids);
-	D_ASSERT(!bind_data.filenames.empty());
-	H5TreeOpenFileScanner(context, bind_data, *result, 0);
+	if (!bind_data.filenames.empty()) {
+		H5TreeOpenFileScanner(context, bind_data, *result, 0);
+	}
 	return std::move(result);
 }
 
@@ -471,6 +480,11 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &bind_data = data.bind_data->Cast<H5TreeBindData>();
 	auto &gstate = data.global_state->Cast<H5TreeGlobalState>();
 	vector<H5TreeRow> rows;
+	if (!gstate.scanner) {
+		D_ASSERT(bind_data.filenames.empty());
+		output.SetCardinality(0);
+		return;
+	}
 	while (true) {
 		gstate.scanner->ReadRows(rows);
 		if (!rows.empty()) {
@@ -628,6 +642,7 @@ void RegisterH5TreeFunction(ExtensionLoader &loader) {
 	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
 	// h5_tree still intentionally collects full object metadata for each emitted row.
 	h5_tree_function.projection_pushdown = true;
+	h5_tree_function.pushdown_complex_filter = H5TreePushdownComplexFilter;
 	h5_tree_function.get_virtual_columns = H5GetFilenameVirtualColumns;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_tree_function)));
 }

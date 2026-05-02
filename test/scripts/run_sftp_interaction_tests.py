@@ -339,7 +339,7 @@ class SFTPInteractionTests(unittest.TestCase):
     def run_sql(self, sql: str, env: dict[str, str] | None = None) -> DuckDBResult:
         try:
             completed = subprocess.run(
-                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-c", sql],
+                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
                 cwd=self.project_root,
                 env=env,
                 text=True,
@@ -405,7 +405,7 @@ class SFTPInteractionTests(unittest.TestCase):
             popen_kwargs["start_new_session"] = True
 
         process = subprocess.Popen(
-            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-c", sql],
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
             **popen_kwargs,
         )
         output_before_interrupt_error = None
@@ -1622,7 +1622,7 @@ class SFTPInteractionTests(unittest.TestCase):
         self.password_server.config.fail_stat_calls = 1
         try:
             process = subprocess.Popen(
-                [self.duckdb_bin, "-csv", "-noheader", "-unsigned"],
+                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init"],
                 cwd=self.project_root,
                 text=True,
                 encoding="utf-8",
@@ -1796,7 +1796,7 @@ class SFTPInteractionTests(unittest.TestCase):
         self.replace_mutable_fixture("simple.h5", now - 120)
 
         process = subprocess.Popen(
-            [self.duckdb_bin, "-csv", "-noheader", "-unsigned"],
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init"],
             cwd=self.project_root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

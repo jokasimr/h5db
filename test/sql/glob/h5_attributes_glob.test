@@ -116,4 +116,4 @@ FROM h5_attributes([
     'test/data/glob/glob_same_1.h5'
 ], '/target');
 ----
-IO Error: Failed to open object: /target
+IO Error: Failed to open object: /target in file: test/data/glob/glob_same_1.h5

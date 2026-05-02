@@ -435,13 +435,11 @@ The project uses automated code formatting to maintain consistency.
 
 **Before committing**:
 ```bash
-source venv/bin/activate
-
 # Check formatting (fast)
-make format-check
+source venv/bin/activate && make format-check
 
 # Auto-fix formatting issues
-make format
+source venv/bin/activate && make format-fix
 ```
 
 **What gets formatted:**

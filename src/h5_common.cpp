@@ -7,13 +7,21 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/error_manager.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #include <algorithm>
-#include <vector>
-#include <string>
-#include <mutex>
 #include <cstring>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace duckdb {
 
@@ -121,6 +129,139 @@ H5ExpandedFileList H5ExpandFilePatterns(ClientContext &context, const Value &inp
 	return result;
 }
 
+static bool H5IsFilenameColumnId(const std::optional<idx_t> &visible_filename_idx, column_t column_id) {
+	return column_id == MultiFileReader::COLUMN_IDENTIFIER_FILENAME ||
+	       (visible_filename_idx.has_value() && column_id == *visible_filename_idx);
+}
+
+static std::unordered_set<idx_t> H5GetFilenameColumnRefIndexes(LogicalGet &get,
+                                                               const std::optional<idx_t> &visible_filename_idx) {
+	std::unordered_set<idx_t> result;
+	const auto &column_ids = get.GetColumnIds();
+	for (idx_t column_ref_idx = 0; column_ref_idx < column_ids.size(); column_ref_idx++) {
+		const auto &column_id = column_ids[column_ref_idx];
+		if (!column_id.HasPrimaryIndex()) {
+			continue;
+		}
+		if (H5IsFilenameColumnId(visible_filename_idx, column_id.GetPrimaryIndex())) {
+			result.insert(column_ref_idx);
+		}
+	}
+	return result;
+}
+
+static bool H5IsFilenameColumnRef(const BoundColumnRefExpression &column_ref, idx_t table_index,
+                                  const std::unordered_set<idx_t> &filename_column_refs) {
+	return column_ref.depth == 0 && column_ref.binding.table_index == table_index &&
+	       filename_column_refs.find(column_ref.binding.column_index) != filename_column_refs.end();
+}
+
+static bool H5ExpressionReferencesFilenameColumn(const Expression &expr, idx_t table_index,
+                                                 const std::unordered_set<idx_t> &filename_column_refs) {
+	bool found = false;
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+	    expr, [&](const BoundColumnRefExpression &column_ref) {
+		    if (H5IsFilenameColumnRef(column_ref, table_index, filename_column_refs)) {
+			    found = true;
+		    }
+	    });
+	return found;
+}
+
+static void H5ReplaceFilenameColumnRefs(unique_ptr<Expression> &expr, idx_t table_index,
+                                        const std::unordered_set<idx_t> &filename_column_refs, const string &filename) {
+	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+	    expr, [&](BoundColumnRefExpression &column_ref, unique_ptr<Expression> &current) {
+		    if (H5IsFilenameColumnRef(column_ref, table_index, filename_column_refs)) {
+			    current = make_uniq<BoundConstantExpression>(Value(filename));
+		    }
+	    });
+}
+
+static std::optional<bool> H5TryEvaluateFilenameFilter(ClientContext &context, const Expression &expr,
+                                                       idx_t table_index,
+                                                       const std::unordered_set<idx_t> &filename_column_refs,
+                                                       const string &filename) {
+	auto filter_copy = expr.Copy();
+	H5ReplaceFilenameColumnRefs(filter_copy, table_index, filename_column_refs, filename);
+	if (!filter_copy->IsScalar() || !filter_copy->IsFoldable()) {
+		return std::nullopt;
+	}
+
+	Value result;
+	if (!ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
+		return std::nullopt;
+	}
+	if (result.IsNull()) {
+		return false;
+	}
+	return result.GetValue<bool>();
+}
+
+static bool H5FilenameFilterRejectsFile(ClientContext &context, const Expression &expr, idx_t table_index,
+                                        const std::unordered_set<idx_t> &filename_column_refs, const string &filename) {
+	auto result = H5TryEvaluateFilenameFilter(context, expr, table_index, filename_column_refs, filename);
+	if (result.has_value()) {
+		return !*result;
+	}
+
+	if (expr.expression_class != ExpressionClass::BOUND_CONJUNCTION) {
+		return false;
+	}
+
+	auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+	if (conjunction.type != ExpressionType::CONJUNCTION_AND) {
+		return false;
+	}
+	for (const auto &child : conjunction.children) {
+		if (H5FilenameFilterRejectsFile(context, *child, table_index, filename_column_refs, filename)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void H5ApplyFilenameFilterPushdown(ClientContext &context, LogicalGet &get,
+                                   const std::optional<idx_t> &visible_filename_idx, vector<string> &filenames,
+                                   vector<unique_ptr<Expression>> &filters) {
+	if (filenames.empty() || filters.empty()) {
+		return;
+	}
+
+	auto filename_column_refs = H5GetFilenameColumnRefIndexes(get, visible_filename_idx);
+	if (filename_column_refs.empty()) {
+		return;
+	}
+
+	const auto table_index = get.table_index;
+	vector<const Expression *> candidate_filters;
+	candidate_filters.reserve(filters.size());
+	for (const auto &filter : filters) {
+		if (H5ExpressionReferencesFilenameColumn(*filter, table_index, filename_column_refs)) {
+			candidate_filters.push_back(filter.get());
+		}
+	}
+	if (candidate_filters.empty()) {
+		return;
+	}
+
+	vector<string> pruned_filenames;
+	pruned_filenames.reserve(filenames.size());
+	for (const auto &filename : filenames) {
+		bool rejected = false;
+		for (const auto *filter : candidate_filters) {
+			if (H5FilenameFilterRejectsFile(context, *filter, table_index, filename_column_refs, filename)) {
+				rejected = true;
+				break;
+			}
+		}
+		if (!rejected) {
+			pruned_filenames.push_back(filename);
+		}
+	}
+	filenames = std::move(pruned_filenames);
+}
+
 std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,
                                       const std::string &argument_name) {
 	if (value.IsNull()) {
@@ -192,6 +333,16 @@ std::string AppendRemoteError(const std::string &message, const std::string &fil
 
 std::string FormatRemoteFileError(const std::string &prefix, const std::string &filename) {
 	return AppendRemoteError(prefix + ": " + filename, filename);
+}
+
+std::string FormatHDF5ObjectError(const std::string &prefix, const std::string &filename,
+                                  const std::string &object_path) {
+	return AppendRemoteError(prefix + ": " + object_path + " in file: " + filename, filename);
+}
+
+std::string FormatHDF5ObjectContextError(const std::string &message, const std::string &filename,
+                                         const std::string &object_path) {
+	return AppendRemoteError(message + " in object: " + object_path + " in file: " + filename, filename);
 }
 
 std::string H5NormalizeExceptionMessage(const std::string &message) {

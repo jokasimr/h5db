@@ -143,7 +143,7 @@ static vector<AttributeInfo> BindSingleH5AttributesFile(ClientContext &context, 
 
 	H5ObjectHandle obj(file, object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException(AppendRemoteError("Failed to open object: " + object_path, filename));
+		throw IOException(FormatHDF5ObjectError("Failed to open object", filename, object_path));
 	}
 
 	hsize_t idx = 0;
@@ -152,13 +152,13 @@ static vector<AttributeInfo> BindSingleH5AttributesFile(ClientContext &context, 
 	auto status = H5Aiterate2(obj, H5_INDEX_NAME, H5_ITER_NATIVE, &idx, attr_info_callback, &iter_data);
 	if (status < 0) {
 		if (iter_data.error) {
-			throw IOException(AppendRemoteError(iter_data.error_message, filename));
+			throw IOException(FormatHDF5ObjectContextError(iter_data.error_message, filename, object_path));
 		}
-		throw IOException(AppendRemoteError("Failed to iterate attributes for: " + object_path, filename));
+		throw IOException(FormatHDF5ObjectError("Failed to iterate attributes for object", filename, object_path));
 	}
 
 	if (result.empty()) {
-		throw IOException("Object has no attributes: " + object_path);
+		throw IOException(FormatHDF5ObjectError("Object has no attributes", filename, object_path));
 	}
 	return result;
 }
@@ -236,13 +236,13 @@ static void H5AttributesPopulateFilenameColumns(const string &filename, const H5
 	}
 }
 
-static Value H5AttributesReadAttributeValue(H5ObjectHandle &obj, const AttributeInfo &attr_info,
-                                            const string &filename) {
+static Value H5AttributesReadAttributeValue(H5ObjectHandle &obj, const AttributeInfo &attr_info, const string &filename,
+                                            const string &object_path) {
 	try {
 		auto opened = H5OpenAttribute(obj, attr_info.name);
 		return H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), attr_info.type, attr_info.name);
 	} catch (const std::exception &ex) {
-		throw IOException(AppendRemoteError(H5NormalizeExceptionMessage(ex.what()), filename));
+		throw IOException(FormatHDF5ObjectContextError(H5NormalizeExceptionMessage(ex.what()), filename, object_path));
 	}
 }
 
@@ -260,11 +260,12 @@ static void H5AttributesWriteFileRow(ClientContext &context, const H5AttributesB
 
 	H5ObjectHandle obj(file, bind_data.object_path.c_str());
 	if (!obj.is_valid()) {
-		throw IOException(AppendRemoteError("Failed to open object: " + bind_data.object_path, filename));
+		throw IOException(FormatHDF5ObjectError("Failed to open object", filename, bind_data.object_path));
 	}
 
 	for (idx_t attr_idx = 0; attr_idx < bind_data.attributes.size(); attr_idx++) {
-		auto value = H5AttributesReadAttributeValue(obj, bind_data.attributes[attr_idx], filename);
+		auto value =
+		    H5AttributesReadAttributeValue(obj, bind_data.attributes[attr_idx], filename, bind_data.object_path);
 		auto output_idx = layout.attribute_output_idxs[attr_idx];
 		if (output_idx.has_value()) {
 			output.data[*output_idx].SetValue(row_idx, value);

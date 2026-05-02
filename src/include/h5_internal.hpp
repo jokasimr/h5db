@@ -6,8 +6,12 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <optional>
 
 namespace duckdb {
+
+class Expression;
+class LogicalGet;
 
 // Global mutex for all HDF5 operations
 // HDF5 is not guaranteed to be thread-safe, so we serialize all HDF5 calls
@@ -32,6 +36,9 @@ struct H5FilenameColumnOption {
 H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &named_parameters);
 std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,
                                       const std::string &argument_name);
+void H5ApplyFilenameFilterPushdown(ClientContext &context, LogicalGet &get,
+                                   const std::optional<idx_t> &visible_filename_idx, vector<string> &filenames,
+                                   vector<unique_ptr<Expression>> &filters);
 
 // Parse and validate h5db batch size from a VARCHAR setting value.
 // Invalid inputs throw InvalidInputException.
@@ -45,6 +52,10 @@ void ThrowIfInterrupted(ClientContext &context);
 H5RemoteErrorInfo TakeRemoteErrorInfo(const std::string &filename);
 std::string AppendRemoteError(const std::string &message, const std::string &filename);
 std::string FormatRemoteFileError(const std::string &prefix, const std::string &filename);
+std::string FormatHDF5ObjectError(const std::string &prefix, const std::string &filename,
+                                  const std::string &object_path);
+std::string FormatHDF5ObjectContextError(const std::string &message, const std::string &filename,
+                                         const std::string &object_path);
 std::string H5NormalizeExceptionMessage(const std::string &message);
 
 // Type tag for compile-time type dispatch

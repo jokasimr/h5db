@@ -116,7 +116,7 @@ SELECT h5_ls(
     h5_attr('invalid_utf8_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_ls(
@@ -125,7 +125,7 @@ SELECT * FROM h5_ls(
     h5_attr('invalid_utf8_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT h5_ls(
@@ -134,7 +134,7 @@ SELECT h5_ls(
     h5_attr('invalid_utf8_fixed_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_fixed_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_ls(
@@ -143,7 +143,7 @@ SELECT * FROM h5_ls(
     h5_attr('invalid_utf8_fixed_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_fixed_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 query TTTITTTITTTITTTI
 SELECT
@@ -360,7 +360,7 @@ SELECT h5_ls(
     h5_attr('invalid_utf8_string_array_attr', []::VARCHAR[])
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_ls(
@@ -369,7 +369,7 @@ SELECT * FROM h5_ls(
     h5_attr('invalid_utf8_string_array_attr', []::VARCHAR[])
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT h5_ls(
@@ -378,7 +378,7 @@ SELECT h5_ls(
     h5_attr('invalid_utf8_vlen_string_array_attr', []::VARCHAR[])
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_vlen_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_ls(
@@ -387,7 +387,7 @@ SELECT * FROM h5_ls(
     h5_attr('invalid_utf8_vlen_string_array_attr', []::VARCHAR[])
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_vlen_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 query I
 SELECT struct_extract(map_extract_value(h5_ls('test/data/links.h5', '/', h5_attr('attr', -1::INTEGER)), 'external_link'), 'attr');
@@ -746,7 +746,7 @@ test/data/swmr_enabled.h5	1
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', '/does_not_exist');
 ----
-IO Error: Failed to open object: /does_not_exist
+IO Error: Failed to open object: /does_not_exist in file: test/data/links.h5
 
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', NULL);
@@ -761,7 +761,7 @@ Invalid Input Error: h5_ls path must not be NULL
 statement error
 SELECT h5_ls('test/data/links.h5', '/does_not_exist');
 ----
-IO Error: Failed to open object: /does_not_exist
+IO Error: Failed to open object: /does_not_exist in file: test/data/links.h5
 
 query II
 SELECT
@@ -904,9 +904,9 @@ Invalid Input Error: scalar h5_ls extra arguments must be h5_attr(), h5_attr(nam
 statement error
 SELECT * FROM h5_ls('test/data/links.h5', '/group/data');
 ----
-IO Error: Object is not a group: /group/data
+IO Error: Object is not a group: /group/data in file: test/data/links.h5
 
 statement error
 SELECT h5_ls('test/data/links.h5', '/group/data');
 ----
-IO Error: Object is not a group: /group/data
+IO Error: Object is not a group: /group/data in file: test/data/links.h5

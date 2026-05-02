@@ -9,6 +9,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
@@ -262,6 +263,12 @@ static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBi
 	return std::move(result);
 }
 
+static void H5LsPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                      vector<unique_ptr<Expression>> &filters) {
+	auto &bind_data = bind_data_p->Cast<H5LsBindData>();
+	H5ApplyFilenameFilterPushdown(context, get, bind_data.visible_filename_idx, bind_data.filenames, filters);
+}
+
 static void H5LsOpenFileScanner(ClientContext &context, const H5LsBindData &bind_data, idx_t file_idx,
                                 H5LsGlobalState &state) {
 	ThrowIfInterrupted(context);
@@ -276,8 +283,9 @@ static unique_ptr<GlobalTableFunctionState> H5LsInit(ClientContext &context, Tab
 	auto &bind_data = input.bind_data->Cast<H5LsBindData>();
 	auto result = make_uniq<H5LsGlobalState>();
 	result->output_layout = H5LsBuildOutputLayout(bind_data, input.column_ids);
-	D_ASSERT(!bind_data.filenames.empty());
-	H5LsOpenFileScanner(context, bind_data, 0, *result);
+	if (!bind_data.filenames.empty()) {
+		H5LsOpenFileScanner(context, bind_data, 0, *result);
+	}
 	return std::move(result);
 }
 
@@ -286,6 +294,11 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	auto &bind_data = input.bind_data->Cast<H5LsBindData>();
 	auto &gstate = input.global_state->Cast<H5LsGlobalState>();
 	auto &rows = gstate.batch_rows;
+	if (!gstate.scanner) {
+		D_ASSERT(bind_data.filenames.empty());
+		output.SetCardinality(0);
+		return;
+	}
 	while (true) {
 		D_ASSERT(gstate.scanner);
 		auto exhausted = gstate.scanner->ReadRows(context, rows);
@@ -522,6 +535,7 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
 	// h5_ls still intentionally collects full child metadata for each emitted row.
 	h5_ls_table_function.projection_pushdown = true;
+	h5_ls_table_function.pushdown_complex_filter = H5LsPushdownComplexFilter;
 	h5_ls_table_function.get_virtual_columns = H5GetFilenameVirtualColumns;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_ls_table_function)));
 

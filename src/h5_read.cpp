@@ -57,12 +57,16 @@ static string FormatRemoteHDF5Error(const string &prefix, const string &filename
 	return FormatRemoteFileError(prefix, filename);
 }
 
+static string FormatDatasetError(const string &prefix, const string &filename, const string &dataset_path) {
+	return AppendRemoteError(prefix + ": " + dataset_path + " in file: " + filename, filename);
+}
+
 static string FormatRemoteDatasetReadError(const string &filename, const string &dataset_path) {
-	return AppendRemoteError("Failed to read data from dataset: " + dataset_path, filename);
+	return FormatDatasetError("Failed to read data from dataset", filename, dataset_path);
 }
 
 static string FormatInvalidDatasetStringError(const string &filename, const string &dataset_path) {
-	return AppendRemoteError("Invalid unicode (byte sequence mismatch) detected in dataset: " + dataset_path, filename);
+	return FormatDatasetError("Invalid unicode (byte sequence mismatch) detected in dataset", filename, dataset_path);
 }
 
 static string ValidateHDF5StringValue(string value, H5T_cset_t cset, const string &filename,
@@ -130,6 +134,12 @@ struct RSEColumnSpec {
 	LogicalType column_type;
 	std::optional<H5TypeHandle> values_string_h5_type; // Present only for string values datasets
 };
+
+static string FormatRSEDatasetPairError(const string &message, const string &filename, const RSEColumnSpec &spec) {
+	auto base_message = message + " for run_starts dataset: " + spec.run_starts_path +
+	                    ", values dataset: " + spec.values_path + " in file: " + filename;
+	return AppendRemoteError(base_message, filename);
+}
 
 // Virtual index column specification
 struct IndexColumnSpec {
@@ -445,7 +455,8 @@ static void BuildH5ReadProjectionLayout(const H5ReadBindData &bind_data, const v
 }
 
 // Helper function to build nested array types for multi-dimensional datasets
-static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims) {
+static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims,
+                                  const string &filename, const string &dataset_path) {
 	if (ndims == 0) {
 		return base_type;
 	}
@@ -454,7 +465,8 @@ static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize
 	}
 
 	if (ndims > 4) {
-		throw IOException("Datasets with more than 4 dimensions are not currently supported");
+		throw IOException(FormatDatasetError("Datasets with more than 4 dimensions are not currently supported",
+		                                     filename, dataset_path));
 	}
 
 	// Build nested array types from innermost to outermost
@@ -574,13 +586,13 @@ static std::pair<H5DatasetHandle, H5TypeHandle> OpenDatasetAndGetType(hid_t file
 	}
 
 	if (!dataset.is_valid()) {
-		throw IOException(AppendRemoteError("Failed to open dataset: " + path, filename));
+		throw IOException(FormatDatasetError("Failed to open dataset", filename, path));
 	}
 
 	// Get datatype
 	hid_t type_id = H5Dget_type(dataset);
 	if (type_id < 0) {
-		throw IOException(AppendRemoteError("Failed to get dataset type: " + path, filename));
+		throw IOException(FormatDatasetError("Failed to get dataset type", filename, path));
 	}
 
 	return {std::move(dataset), H5TypeHandle::TakeOwnershipOf(type_id)};
@@ -596,11 +608,11 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 	}
 	htri_t is_variable = H5Tis_variable_str(h5_type);
 	if (is_variable < 0) {
-		throw IOException(AppendRemoteError("Failed to inspect string type for dataset: " + dataset_path, filename));
+		throw IOException(FormatDatasetError("Failed to inspect string type for dataset", filename, dataset_path));
 	}
 	H5T_cset_t cset = H5Tget_cset(h5_type);
 	if (cset == H5T_CSET_ERROR) {
-		throw IOException(AppendRemoteError("Failed to inspect string charset for dataset: " + dataset_path, filename));
+		throw IOException(FormatDatasetError("Failed to inspect string charset for dataset", filename, dataset_path));
 	}
 
 	if (is_variable > 0) {
@@ -618,8 +630,8 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		H5DataspaceHandle reclaim_space(1, &mem_dim);
 		auto reclaim = [&]() {
 			if (H5Dvlen_reclaim(h5_type, reclaim_space, H5P_DEFAULT, string_data.data()) < 0) {
-				throw IOException(AppendRemoteError(
-				    "Failed to reclaim variable-length string data from dataset: " + dataset_path, filename));
+				throw IOException(FormatDatasetError("Failed to reclaim variable-length string data from dataset",
+				                                     filename, dataset_path));
 			}
 		};
 
@@ -648,7 +660,7 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 		H5T_str_t strpad = H5Tget_strpad(h5_type);
 		if (strpad == H5T_STR_ERROR) {
 			throw IOException(
-			    AppendRemoteError("Failed to inspect string padding for dataset: " + dataset_path, filename));
+			    FormatDatasetError("Failed to inspect string padding for dataset", filename, dataset_path));
 		}
 		std::vector<char> buffer(count * str_len);
 
@@ -870,17 +882,19 @@ static vector<idx_t> LoadRunStarts(const string &filename, const RSEColumnSpec &
 	H5ErrorSuppressor suppress;
 	herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, run_starts.data());
 	if (status < 0) {
-		throw IOException(AppendRemoteError("Failed to read run_starts from: " + spec.run_starts_path, filename));
+		throw IOException(FormatDatasetError("Failed to read run_starts from", filename, spec.run_starts_path));
 	}
 
 	for (size_t i = 1; i < num_runs; i++) {
 		if (run_starts[i] <= run_starts[i - 1]) {
-			throw IOException("RSE run_starts must be strictly increasing");
+			throw IOException(
+			    FormatDatasetError("RSE run_starts must be strictly increasing", filename, spec.run_starts_path));
 		}
 	}
 	if (num_runs > 0 && run_starts.back() >= num_rows) {
-		throw IOException("RSE run_starts contains index " + std::to_string(run_starts.back()) +
-		                  " which exceeds dataset length " + std::to_string(num_rows));
+		throw IOException(FormatDatasetError("RSE run_starts contains index " + std::to_string(run_starts.back()) +
+		                                         " which exceeds dataset length " + std::to_string(num_rows),
+		                                     filename, spec.run_starts_path));
 	}
 
 	return run_starts;
@@ -904,7 +918,7 @@ static RSEColumnState::RSEValueStorage LoadRSEValues(const string &filename, con
 			herr_t status =
 			    H5Dread(values_ds, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, typed_values.data());
 			if (status < 0) {
-				throw IOException(AppendRemoteError("Failed to read values from: " + spec.values_path, filename));
+				throw IOException(FormatDatasetError("Failed to read values from", filename, spec.values_path));
 			}
 			return typed_values;
 		}
@@ -1041,7 +1055,8 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Open run_starts dataset and get type
 			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, result.filename, run_starts);
 			if (H5Tget_class(starts_type) != H5T_INTEGER) {
-				throw IOException("RSE run_starts must be integer type");
+				throw IOException(
+				    FormatDatasetError("RSE run_starts must be integer type", result.filename, run_starts));
 			}
 
 			// Open values dataset and get type
@@ -1074,17 +1089,17 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Get dataspace to determine dimensions - RAII handles cleanup
 			H5DataspaceHandle space(dataset);
 			if (!space.is_valid()) {
-				throw IOException(
-				    AppendRemoteError("Failed to get dataset dataspace: " + ds_info.path, result.filename));
+				throw IOException(FormatDatasetError("Failed to get dataset dataspace", result.filename, ds_info.path));
 			}
 
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
 				throw IOException(
-				    AppendRemoteError("Failed to get dataset dimensions: " + ds_info.path, result.filename));
+				    FormatDatasetError("Failed to get dataset dimensions", result.filename, ds_info.path));
 			}
 			if (ds_info.is_string && ds_info.ndims > 1) {
-				throw IOException("String datasets with more than 1 dimension are not supported");
+				throw IOException(FormatDatasetError("String datasets with more than 1 dimension are not supported",
+				                                     result.filename, ds_info.path));
 			}
 
 			if (ds_info.ndims == 0) {
@@ -1130,7 +1145,7 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			}
 
 			// Build array type for multi-dimensional datasets
-			ds_info.column_type = BuildArrayType(base_type, ds_info.dims, ds_info.ndims);
+			ds_info.column_type = BuildArrayType(base_type, ds_info.dims, ds_info.ndims, result.filename, ds_info.path);
 
 			result.columns.push_back(std::move(ds_info));
 		}
@@ -1339,15 +1354,14 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException(
-					        AppendRemoteError("Failed to open dataset: " + spec.path, bind_data.filename));
+					    throw IOException(FormatDatasetError("Failed to open dataset", bind_data.filename, spec.path));
 				    }
 
 				    // Cache the file dataspace (reused across all chunks)
 				    H5DataspaceHandle file_space(dataset);
 				    if (!file_space.is_valid()) {
 					    throw IOException(
-					        AppendRemoteError("Failed to get dataspace for dataset: " + spec.path, bind_data.filename));
+					        FormatDatasetError("Failed to get dataspace for dataset", bind_data.filename, spec.path));
 				    }
 
 				    RegularColumnState state;
@@ -1394,8 +1408,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    }
 
 				    if (!dataset.is_valid()) {
-					    throw IOException(
-					        AppendRemoteError("Failed to open dataset: " + spec.path, bind_data.filename));
+					    throw IOException(FormatDatasetError("Failed to open dataset", bind_data.filename, spec.path));
 				    }
 
 				    ScalarColumnState scalar_state;
@@ -1434,14 +1447,14 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 					    H5ErrorSuppressor suppress;
 					    starts_ds = H5DatasetHandle(result->file, spec.run_starts_path.c_str());
 					    if (!starts_ds.is_valid()) {
-						    throw IOException(AppendRemoteError(
-						        "Failed to open RSE run_starts dataset: " + spec.run_starts_path, bind_data.filename));
+						    throw IOException(FormatDatasetError("Failed to open RSE run_starts dataset",
+						                                         bind_data.filename, spec.run_starts_path));
 					    }
 
 					    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
 					    if (!values_ds.is_valid()) {
-						    throw IOException(AppendRemoteError(
-						        "Failed to open RSE values dataset: " + spec.values_path, bind_data.filename));
+						    throw IOException(FormatDatasetError("Failed to open RSE values dataset",
+						                                         bind_data.filename, spec.values_path));
 					    }
 				    }
 
@@ -1449,27 +1462,34 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    H5DataspaceHandle starts_space(starts_ds);
 				    int starts_ndims = H5Sget_simple_extent_ndims(starts_space);
 				    if (starts_ndims < 0) {
-					    throw IOException("Failed to get dimensions for RSE run_starts dataset: " +
-					                      spec.run_starts_path);
+					    throw IOException(FormatDatasetError("Failed to get dimensions for RSE run_starts dataset",
+					                                         bind_data.filename, spec.run_starts_path));
 				    }
 				    if (starts_ndims != 1) {
-					    throw IOException("RSE run_starts must be a 1-dimensional dataset");
+					    throw IOException(FormatDatasetError("RSE run_starts must be a 1-dimensional dataset",
+					                                         bind_data.filename, spec.run_starts_path));
 				    }
 				    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(starts_space);
 
 				    H5DataspaceHandle values_space(values_ds);
 				    int values_ndims = H5Sget_simple_extent_ndims(values_space);
 				    if (values_ndims < 0) {
-					    throw IOException("Failed to get dimensions for RSE values dataset: " + spec.values_path);
+					    throw IOException(FormatDatasetError("Failed to get dimensions for RSE values dataset",
+					                                         bind_data.filename, spec.values_path));
 				    }
 				    if (values_ndims != 1) {
-					    throw IOException("RSE values must be a 1-dimensional dataset");
+					    throw IOException(FormatDatasetError("RSE values must be a 1-dimensional dataset",
+					                                         bind_data.filename, spec.values_path));
 				    }
 				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
-				    if (num_runs_hssize < 0 || num_values_hssize < 0) {
-					    throw IOException(
-					        AppendRemoteError("Failed to get dataset sizes for RSE column", bind_data.filename));
+				    if (num_runs_hssize < 0) {
+					    throw IOException(FormatDatasetError("Failed to get dataset size for RSE run_starts dataset",
+					                                         bind_data.filename, spec.run_starts_path));
+				    }
+				    if (num_values_hssize < 0) {
+					    throw IOException(FormatDatasetError("Failed to get dataset size for RSE values dataset",
+					                                         bind_data.filename, spec.values_path));
 				    }
 
 				    size_t num_runs = static_cast<size_t>(num_runs_hssize);
@@ -1477,8 +1497,10 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 
 				    // Validate: run_starts and values must have same size
 				    if (num_runs != num_values) {
-					    throw IOException("RSE run_starts and values must have same size. Got " +
-					                      std::to_string(num_runs) + " and " + std::to_string(num_values));
+					    throw IOException(FormatRSEDatasetPairError(
+					        "RSE run_starts and values must have same size. Got " + std::to_string(num_runs) + " and " +
+					            std::to_string(num_values),
+					        bind_data.filename, spec));
 				    }
 
 				    rse_col.run_starts =

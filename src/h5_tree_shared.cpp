@@ -427,13 +427,14 @@ void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEn
 	H5ErrorSuppressor suppress;
 	auto object = OpenObject(identity, path, parent_loc, link_name);
 	if (!object.is_valid()) {
-		throw IOException("Failed to open object during tree traversal: " + path);
+		throw IOException(FormatHDF5ObjectError("Failed to open object during tree traversal", filename, path));
 	}
 
 	if (need_dataset_metadata) {
 		hid_t type_id = H5Dget_type(object);
 		if (type_id < 0) {
-			throw IOException("Failed to get dataset type during tree traversal: " + path);
+			throw IOException(
+			    FormatHDF5ObjectError("Failed to get dataset type during tree traversal", filename, path));
 		}
 		H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 		row.dtype = H5TypeToString(type);
@@ -443,10 +444,14 @@ void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEn
 
 	if (need_projected_attributes) {
 		for (idx_t i = 0; i < projected_attributes.size(); i++) {
-			if (projected_attributes[i].all_attributes) {
-				H5TreePopulateAllAttributesValue(row.projected_values[i], object);
-			} else {
-				H5TreePopulateProjectedAttributeValue(row.projected_values[i], object, projected_attributes[i]);
+			try {
+				if (projected_attributes[i].all_attributes) {
+					H5TreePopulateAllAttributesValue(row.projected_values[i], object);
+				} else {
+					H5TreePopulateProjectedAttributeValue(row.projected_values[i], object, projected_attributes[i]);
+				}
+			} catch (const std::exception &ex) {
+				throw IOException(FormatHDF5ObjectContextError(H5NormalizeExceptionMessage(ex.what()), filename, path));
 			}
 		}
 	}
@@ -472,15 +477,15 @@ static void H5TreeValidateListGroupInternal(H5TreeFileReader &reader, const std:
                                             hsize_t *link_count) {
 	H5ObjectHandle group(reader.GetFileHandle(), group_path.c_str());
 	if (!group.is_valid()) {
-		throw IOException(AppendRemoteError("Failed to open object: " + group_path, reader.GetFilename()));
+		throw IOException(FormatHDF5ObjectError("Failed to open object", reader.GetFilename(), group_path));
 	}
 
 	H5O_info2_t group_info;
 	if (H5Oget_info3(group, &group_info, H5O_INFO_BASIC) < 0) {
-		throw IOException(AppendRemoteError("Failed to inspect object: " + group_path, reader.GetFilename()));
+		throw IOException(FormatHDF5ObjectError("Failed to inspect object", reader.GetFilename(), group_path));
 	}
 	if (group_info.type != H5O_TYPE_GROUP) {
-		throw IOException(AppendRemoteError("Object is not a group: " + group_path, reader.GetFilename()));
+		throw IOException(FormatHDF5ObjectError("Object is not a group", reader.GetFilename(), group_path));
 	}
 	H5G_info_t group_meta;
 	if (link_count && H5Gget_info(group, &group_meta) >= 0) {
@@ -530,7 +535,7 @@ static bool H5TreeListEntriesInternal(H5TreeFileReader &reader, const std::strin
 		if (iter_data.error) {
 			throw IOException(AppendRemoteError(iter_data.error_message, reader.GetFilename()));
 		}
-		throw IOException(AppendRemoteError("Failed to list group entries: " + group_path, reader.GetFilename()));
+		throw IOException(FormatHDF5ObjectError("Failed to list group entries", reader.GetFilename(), group_path));
 	}
 	return status == 0;
 }

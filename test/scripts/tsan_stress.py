@@ -329,7 +329,7 @@ def build_command(binary: Path, disable_aslr: bool) -> list[str]:
         if setarch and platform.system() == "Linux" and platform.machine() in {"x86_64", "amd64"}:
             command.extend([setarch, platform.machine(), "-R"])
     command.append(str(binary))
-    command.extend(["-csv", "-c"])
+    command.extend(["-csv", "-no-init", "-c"])
     return command
 
 

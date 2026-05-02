@@ -61,6 +61,19 @@ remote schemes when the underlying DuckDB filesystem supports globbing.
   resolve those paths before calling HDF5, so final-component file symlink
   paths are not supported there.
 
+**Filename filter pruning:**
+
+`h5_tree(...)` and table-valued `h5_ls(...)` can apply selective filters on the virtual `filename` column before
+opening each expanded file. This includes hidden `filename` filters and filters on the visible renamed column when
+using `filename := 'source_file'`.
+
+Useful shapes include simple comparisons, `IN`, `LIKE`, and filename predicates inside `AND` filters, as long as DuckDB
+pushes the filter into the table function and the predicate can be evaluated from the filename alone. Dynamic filters
+whose values come from joins, semi-joins, scalar subqueries, or later query blocks may still open all expanded files.
+
+This file-open pruning currently applies only to `h5_tree(...)` and table-valued `h5_ls(...)`. `h5_read(...)` and
+`h5_attributes(...)` do not use `filename` filters to avoid opening files.
+
 **Examples:**
 
 ```sql
@@ -78,6 +91,14 @@ SELECT * FROM h5_read(
 
 SELECT filename, units
 FROM h5_attributes('runs/run_*.h5', '/entry/data');
+
+SELECT path, type
+FROM h5_tree('runs/**/*.h5')
+WHERE filename LIKE '%/run_042.h5';
+
+SELECT source_file, path
+FROM h5_ls('runs/run_*.h5', '/entry', filename := 'source_file')
+WHERE source_file IN ('runs/run_001.h5', 'runs/run_002.h5');
 ```
 
 ### SFTP Secrets
@@ -378,7 +399,7 @@ Reads attributes from an object or the file root.
 **Returns:** One row per matched file where each non-virtual column represents one attribute
 - Column names are the attribute names
 - Column types match the attribute types (numeric, string, or arrays)
-- If the target object has no attributes, the function raises `IO Error: Object has no attributes: ...`
+- If the target object has no attributes, the function raises `IO Error: Object has no attributes: ... in file: ...`
 - Invalid UTF-8 string attribute values raise an error in `h5_attributes()`
 - Multiple matched files must have the same attribute names, types, and order.
 - Attribute output names must be unique under DuckDB's case-insensitive identifier matching.
@@ -701,10 +722,10 @@ Note: Multi-dimensional string datasets are not currently supported.
 All functions provide clear error messages for common issues:
 
 - **File not found**: "IO Error: Failed to open HDF5 file"
-- **Invalid path**: "IO Error: Dataset or group not found"
+- **Invalid path**: "IO Error: Failed to open dataset/object: ... in file: ..."
 - **Unsupported type**: "IO Error: Unsupported HDF5 type"
-- **Invalid RSE data**: "IO Error: RSE run_starts must be strictly increasing"
-- **No attributes**: "IO Error: Object has no attributes"
+- **Invalid RSE data**: "IO Error: RSE run_starts must be strictly increasing: ... in file: ..."
+- **No attributes**: "IO Error: Object has no attributes: ... in file: ..."
 
 ---
 
@@ -716,6 +737,9 @@ All functions provide clear error messages for common issues:
   to reduce I/O. Supported shapes include `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, bind-time-foldable RHS expressions, and
   comparison-cast forms that normalize to those operators. Unsupported boolean shapes such as `OR`, `!=`,
   `IS DISTINCT FROM`, or expressions like `index + 1 > 10` remain post-scan filters.
+- **`h5_tree`/`h5_ls` filename filter pruning**: Filters on the hidden or visible renamed `filename` column can remove
+  files from expanded glob/list inputs before the file is opened. This applies only to `h5_tree(...)` and table-valued
+  `h5_ls(...)`, not to `h5_read(...)` or `h5_attributes(...)`.
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row

@@ -218,9 +218,8 @@ Useful mental models:
 - duplicate files are preserved
 - table `h5_tree(...)`, table `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden virtual
   `filename` column
-- `filename := true` adds `filename` to the visible output schema
-- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`
-  and replaces the hidden `filename` binding with that visible name
+- `filename := true` adds `filename` to the visible output schema, which is useful when you want it included in
+  `SELECT *`
 - a pattern that matches no files raises an error
 - `h5_read(...)` requires compatible column definitions across all matched files
 - `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
@@ -232,17 +231,37 @@ Useful mental models:
   multi-file readers such as `read_parquet(...)`
 - in particular, recursive `**` does not traverse symlink directories
 
-When you need to keep track of which file produced a row, ask for `filename`
-explicitly:
+`h5_tree(...)` and table-valued `h5_ls(...)` can use selective filters on the virtual `filename` column to skip
+expanded files before opening them:
+
+```sql
+SELECT path, type
+FROM h5_tree('runs/**/*.h5')
+WHERE filename LIKE '%/run_042.h5';
+
+SELECT filename, path
+FROM h5_ls('runs/run_*.h5', '/entry')
+WHERE filename IN ('runs/run_001.h5', 'runs/run_002.h5');
+```
+
+This works for filename-only filters, and for filename filters combined with other predicates using `AND`, when DuckDB
+pushes the filter into the table function. Filters whose values come from joins, semi-joins, scalar subqueries, or later
+query blocks may still open all expanded files. `h5_read(...)` and `h5_attributes(...)` do not currently use
+`filename` filters to avoid opening files.
+
+When you need to keep track of which file produced a row, you can select the hidden `filename` column explicitly:
 
 ```sql
 SELECT filename, path
 FROM h5_tree('runs/**/*.h5')
 WHERE path = '/entry/data';
+```
 
-FROM h5_read('runs/run_*.h5', '/counts', filename := true);
+Or use `filename := true` when you want `filename` included in `SELECT *`:
 
-FROM h5_attributes('runs/run_*.h5', '/entry/data', filename := true);
+```sql
+FROM h5_tree('runs/**/*.h5', filename := true)
+WHERE path = '/entry/data';
 ```
 
 ### Rename output columns

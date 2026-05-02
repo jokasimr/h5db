@@ -409,7 +409,7 @@ Binder Error: Table function "h5_tree" does not support lateral join column para
 statement error
 SELECT * FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', 0::INTEGER));
 ----
-IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER
+IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER in object: /dataset_with_attrs in file: test/data/with_attrs.h5
 
 statement error
 SELECT * FROM h5_tree(
@@ -417,7 +417,7 @@ SELECT * FROM h5_tree(
     h5_attr('invalid_utf8_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_tree(
@@ -425,7 +425,7 @@ SELECT * FROM h5_tree(
     h5_attr('invalid_utf8_fixed_attr', NULL::VARCHAR)
 );
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_fixed_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 query TTTITTTITTTITTTI
 SELECT
@@ -526,7 +526,7 @@ SELECT * FROM h5_tree(
 )
 WHERE path = '/invalid_utf8_string_array_attr_dataset';
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_tree(
@@ -535,12 +535,12 @@ SELECT * FROM h5_tree(
 )
 WHERE path = '/invalid_utf8_vlen_string_array_attr_dataset';
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_vlen_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_tree('test/data/attrs_edge_cases.h5', h5_attr('attr_2d', [0, 0, 0]::INTEGER[]));
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 # A failed projected-attribute scan must not poison a subsequent h5_tree scan.
 query T
@@ -581,7 +581,7 @@ FROM h5_tree(
     h5_attr('missing_attr', 'fallback'::VARCHAR)
 );
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 query T
 SELECT safe_attr

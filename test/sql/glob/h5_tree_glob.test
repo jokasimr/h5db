@@ -42,7 +42,7 @@ FROM h5_tree(
     h5_attr('attr_2d', [0, 0, 0]::INTEGER[])
 );
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/glob/glob_attrs_edge_1.h5
 
 query II
 SELECT

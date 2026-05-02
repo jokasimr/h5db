@@ -346,7 +346,7 @@ SELECT COUNT(*) FROM h5_read('test/data/multidim.h5', '/array_2d');
 statement error
 SELECT * FROM h5_read('test/data/multidim.h5', '/array_2d_strings');
 ----
-IO Error: String datasets with more than 1 dimension are not supported
+IO Error: String datasets with more than 1 dimension are not supported: /array_2d_strings in file: test/data/multidim.h5
 
 query I
 SELECT array_2d[1] FROM h5_read('test/data/multidim.h5', '/array_2d') LIMIT 1;
@@ -433,7 +433,7 @@ IO Error: Failed to open HDF5 file: nonexistent.h5
 statement error
 SELECT * FROM h5_read('test/data/simple.h5', '/nonexistent');
 ----
-IO Error: Failed to open dataset: /nonexistent
+IO Error: Failed to open dataset: /nonexistent in file: test/data/simple.h5
 
 # =============================================================================
 # h5_read() Tests - Column Naming
@@ -968,7 +968,7 @@ SELECT * FROM h5_read(
     h5_rse('/nonexistent_starts', '/experiment1/state_values')
 );
 ----
-IO Error: Failed to open dataset: /nonexistent_starts
+IO Error: Failed to open dataset: /nonexistent_starts in file: test/data/run_encoded.h5
 
 # Test error: non-existent values dataset
 statement error
@@ -978,7 +978,7 @@ SELECT * FROM h5_read(
     h5_rse('/experiment1/state_run_starts', '/nonexistent_values')
 );
 ----
-IO Error: Failed to open dataset: /nonexistent_values
+IO Error: Failed to open dataset: /nonexistent_values in file: test/data/run_encoded.h5
 
 #===--------------------------------------------------------------------===#
 # h5_attributes tests
@@ -1024,4 +1024,4 @@ IO Error: Failed to open HDF5 file: nonexistent.h5
 statement error
 SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/nonexistent_path');
 ----
-IO Error: Failed to open object: /nonexistent_path
+IO Error: Failed to open object: /nonexistent_path in file: test/data/with_attrs.h5

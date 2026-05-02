@@ -71,6 +71,30 @@ SELECT
 2	2	2	2
 
 statement error
+SELECT * FROM h5_read([
+    'test/data/glob_order/order_1.h5',
+    'test/data/glob_order/order_2.h5'
+], '/marker_1');
+----
+IO Error: Failed to open dataset: /marker_1 in file: test/data/glob_order/order_2.h5
+
+statement error
+SELECT * FROM h5_ls([
+    'test/data/links.h5',
+    'test/data/attrs_edge_cases.h5'
+], '/group');
+----
+IO Error: Failed to open object: /group in file: test/data/attrs_edge_cases.h5
+
+statement error
+SELECT * FROM h5_tree([
+    'test/data/with_attrs.h5',
+    'test/data/attrs_edge_cases.h5'
+], h5_attr('attr_2d', [0, 0, 0]::INTEGER[]));
+----
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+
+statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR[]);
 ----
 Parser Error: h5_tree cannot take NULL list as parameter

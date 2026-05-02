@@ -14,6 +14,7 @@ Contributor documentation:
 Internal design notes:
 
 - [internals/PARTITION_OWNERSHIP_DESIGN.md](internals/PARTITION_OWNERSHIP_DESIGN.md)
+- [internals/H5_READ_ROW_ALIGNMENT.md](internals/H5_READ_ROW_ALIGNMENT.md)
 - [internals/REMOTE_METADATA_AND_INTERRUPTS.md](internals/REMOTE_METADATA_AND_INTERRUPTS.md)
 - [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md)
 - [internals/SFTP_SSH_AGENT_AUTH.md](internals/SFTP_SSH_AGENT_AUTH.md)

@@ -11,12 +11,12 @@ require h5db
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/empty_dataset');
 ----
-IO Error: Object has no attributes: /empty_dataset
+IO Error: Object has no attributes: /empty_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/empty_group');
 ----
-IO Error: Object has no attributes: /empty_group
+IO Error: Object has no attributes: /empty_group in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/root_attrs.h5', NULL::VARCHAR);
@@ -42,32 +42,32 @@ FROM h5_attributes('test/data/attrs_edge_cases.h5', '/nullpad_attr_dataset');
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT COUNT(*) FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_fixed_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_fixed_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/invalid_string_array_attrs.h5', '/invalid_utf8_string_array_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/invalid_string_array_attrs.h5', '/invalid_utf8_vlen_string_array_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_vlen_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_after_nul_attr_dataset');
 ----
-IO Error: Invalid unicode (byte sequence mismatch) detected in value construction
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_after_nul_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 # Root attributes should work for both '/' and ''.
 query TI
@@ -128,7 +128,7 @@ INTEGER[]	3	1	VARCHAR[]	3	1
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset');
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported)
+IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 # =============================================================================
 # Unsupported attribute types
@@ -137,29 +137,29 @@ IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/enum_attr_dataset');
 ----
-IO Error: Attribute 'enum_attr' has unsupported type: Unsupported HDF5 type class: 8
+IO Error: Attribute 'enum_attr' has unsupported type: Unsupported HDF5 type class: 8 in object: /enum_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/compound_attr_dataset');
 ----
-IO Error: Attribute 'compound_attr' has unsupported type: Unsupported HDF5 type class: 6
+IO Error: Attribute 'compound_attr' has unsupported type: Unsupported HDF5 type class: 6 in object: /compound_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset');
 ----
-IO Error: Attribute 'float16_attr' has unsupported type: Unsupported float size: 2
+IO Error: Attribute 'float16_attr' has unsupported type: Unsupported float size: 2 in object: /float16_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/reference_attr_dataset');
 ----
-IO Error: Attribute 'ref_attr' has unsupported type: Unsupported HDF5 type class: 7
+IO Error: Attribute 'ref_attr' has unsupported type: Unsupported HDF5 type class: 7 in object: /reference_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/opaque_attr_dataset');
 ----
-IO Error: Attribute 'opaque_attr' has unsupported type: Unsupported HDF5 type class: 5
+IO Error: Attribute 'opaque_attr' has unsupported type: Unsupported HDF5 type class: 5 in object: /opaque_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset');
 ----
-IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4
+IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4 in object: /bitfield_attr_dataset in file: test/data/attrs_edge_cases.h5
