@@ -115,7 +115,7 @@ FROM h5_read('test/data/glob_order/order_*.h5', '/values');
 statement error
 SELECT * FROM h5_read('test/data/glob_order/order_*.h5', '/marker_1');
 ----
-<REGEX>:.*Failed to open dataset: /marker_1 in file: test[\\\\/]data[\\\\/]glob_order[\\\\/]order_10\.h5.*
+<REGEX>:.*Failed to open dataset: /marker_1 in file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob_order[\\\\/]order_10\.h5.*
 
 query I
 SELECT path
@@ -228,7 +228,7 @@ SELECT COUNT(*) FROM h5_read('test/data/glob_literal_meta/literal[1].h5', '/valu
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob_literal_meta/dir[1]');
 ----
-<REGEX>:.*No files found that match the pattern "test[\\\\/]data[\\\\/]glob_literal_meta[\\\\/]dir\[1\]".*
+<REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob_literal_meta[\\\\/]dir\[1\]".*
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/**/**/*.h5');

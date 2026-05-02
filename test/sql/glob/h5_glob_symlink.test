@@ -79,17 +79,17 @@ SELECT
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/broken*.h5');
 ----
-<REGEX>:.*No files found that match the pattern "test[\\\\/]data[\\\\/]glob_symlink[\\\\/]broken\*\.h5".*
+<REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob_symlink[\\\\/]broken\*\.h5".*
 
 statement error
 SELECT COUNT(*) FROM h5_ls('test/data/glob_symlink/broken*.h5', '/');
 ----
-<REGEX>:.*No files found that match the pattern "test[\\\\/]data[\\\\/]glob_symlink[\\\\/]broken\*\.h5".*
+<REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob_symlink[\\\\/]broken\*\.h5".*
 
 statement error
 SELECT COUNT(*) FROM h5_read('test/data/glob_symlink/broken*.h5', '/values');
 ----
-<REGEX>:.*No files found that match the pattern "test[\\\\/]data[\\\\/]glob_symlink[\\\\/]broken\*\.h5".*
+<REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob_symlink[\\\\/]broken\*\.h5".*
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob_symlink/*/');

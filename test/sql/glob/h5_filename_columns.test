@@ -184,7 +184,7 @@ FROM h5_tree([
 ])
 WHERE filename = 'test/data/no_match.h5' OR path = '/';
 ----
-<REGEX>:.*Failed to open HDF5 file: test[\\\\/]data[\\\\/]does_not_exist_filename_pushdown\.h5.*
+<REGEX>:.*Failed to open HDF5 file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)does_not_exist_filename_pushdown\.h5.*
 
 statement error
 FROM h5_tree('test/data/simple.h5', filename='path');
@@ -422,7 +422,7 @@ FROM h5_ls([
 ], '/')
 WHERE filename = 'test/data/no_match.h5' OR path = '/integers';
 ----
-<REGEX>:.*Failed to open HDF5 file: test[\\\\/]data[\\\\/]does_not_exist_filename_pushdown\.h5.*
+<REGEX>:.*Failed to open HDF5 file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)does_not_exist_filename_pushdown\.h5.*
 
 statement error
 FROM h5_ls('test/data/simple.h5', '/', filename='path');
