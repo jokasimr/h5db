@@ -130,7 +130,9 @@ SELECT * FROM h5_read(
 **Optional secret fields:**
 - `KEY_PASSPHRASE`: passphrase for an encrypted private key
 - `PORT`: default `22`
-- `HOST_KEY_ALGORITHMS`: libssh2 host-key preference string, for example
+- `HOST_KEY_ALGORITHMS`: comma-separated libssh2 host-key algorithms accepted during the SSH handshake, in preference
+  order. If omitted, matching entries in `KNOWN_HOSTS_PATH` are used to prefer known host-key algorithms; otherwise
+  libssh2 uses its default host-key algorithm list. Example:
   `'ssh-ed25519,ecdsa-sha2-nistp256'`
 
 **Notes:**

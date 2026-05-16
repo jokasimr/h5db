@@ -22,6 +22,7 @@ from sftp_test_server_lib import (
     SFTPServerConfig,
     SFTPTestServer,
     load_or_create_host_key,
+    write_hashed_known_host,
     write_known_host,
     write_known_hosts,
 )
@@ -187,6 +188,7 @@ class SFTPInteractionTests(unittest.TestCase):
         cls.key_known_hosts = cls.tempdir / "key_known_hosts"
         cls.ipv6_known_hosts = cls.tempdir / "ipv6_known_hosts"
         cls.multi_key_rsa_known_hosts = cls.tempdir / "multi_key_rsa_known_hosts"
+        cls.multi_key_rsa_hashed_known_hosts = cls.tempdir / "multi_key_rsa_hashed_known_hosts"
         cls.multi_key_all_known_hosts = cls.tempdir / "multi_key_all_known_hosts"
         cls.flaky_known_hosts = cls.tempdir / "flaky_known_hosts"
         cls.hanging_cleanup_known_hosts = cls.tempdir / "hanging_cleanup_known_hosts"
@@ -198,6 +200,12 @@ class SFTPInteractionTests(unittest.TestCase):
         write_known_host(cls.hanging_auth_known_hosts, "127.0.0.1", cls.hanging_auth_server.port, cls.rsa_host_key)
         write_known_host(cls.key_known_hosts, "127.0.0.1", cls.key_server.port, cls.rsa_host_key)
         write_known_host(cls.multi_key_rsa_known_hosts, "127.0.0.1", cls.multi_key_server.port, cls.rsa_host_key)
+        write_hashed_known_host(
+            cls.multi_key_rsa_hashed_known_hosts,
+            "127.0.0.1",
+            cls.multi_key_server.port,
+            cls.rsa_host_key,
+        )
         write_known_hosts(
             cls.multi_key_all_known_hosts,
             "127.0.0.1",
@@ -1090,28 +1098,6 @@ class SFTPInteractionTests(unittest.TestCase):
         negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
         self.assertEqual(negotiated, ["ecdsa-sha2-nistp256"], msg=str(negotiated))
 
-        self.multi_key_server.telemetry.reset()
-        rsa_sql = textwrap.dedent(
-            f"""
-            LOAD h5db;
-            CREATE OR REPLACE TEMPORARY SECRET host_key_algos_rsa (
-                TYPE sftp,
-                SCOPE 'sftp://127.0.0.1:{self.multi_key_server.port}/',
-                USERNAME 'h5db',
-                PASSWORD 'h5db',
-                KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
-                PORT {self.multi_key_server.port},
-                HOST_KEY_ALGORITHMS 'ssh-rsa'
-            );
-            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
-            """
-        ).strip()
-        result = self.run_sql(rsa_sql)
-        self.assertEqual(result.returncode, 0, msg=result.output)
-        connections, _ = self.multi_key_server.telemetry.snapshot()
-        negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
-        self.assertEqual(negotiated, ["ssh-rsa"], msg=str(negotiated))
-
     def test_host_key_algorithms_multi_entry_order_is_respected(self) -> None:
         sql = textwrap.dedent(
             f"""
@@ -1123,7 +1109,7 @@ class SFTPInteractionTests(unittest.TestCase):
                 PASSWORD 'h5db',
                 KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
                 PORT {self.multi_key_server.port},
-                HOST_KEY_ALGORITHMS 'ssh-rsa,ecdsa-sha2-nistp256'
+                HOST_KEY_ALGORITHMS 'ecdsa-sha2-nistp256,ssh-rsa'
             );
             SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
             """
@@ -1132,9 +1118,9 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.output)
         connections, _ = self.multi_key_server.telemetry.snapshot()
         negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
-        self.assertEqual(negotiated, ["ssh-rsa"], msg=str(negotiated))
+        self.assertEqual(negotiated, ["ecdsa-sha2-nistp256"], msg=str(negotiated))
 
-    def test_invalid_host_key_algorithms_fall_back(self) -> None:
+    def test_invalid_host_key_algorithms_are_rejected(self) -> None:
         sql = textwrap.dedent(
             f"""
             LOAD h5db;
@@ -1151,11 +1137,75 @@ class SFTPInteractionTests(unittest.TestCase):
             """
         ).strip()
         result = self.run_sql(sql)
-        self.assertEqual(result.returncode, 0, msg=result.output)
-        self.assertNumericOutput(result, ["5"])
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(result, "Failed to set SSH host key algorithm preference 'bogus'")
+        self.assertOutputContains(result, "not currently supported")
+
+    def test_host_key_algorithms_do_not_fall_back_to_other_host_keys(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET host_key_algos_no_fallback (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.multi_key_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.multi_key_rsa_known_hosts}',
+                PORT {self.multi_key_server.port},
+                HOST_KEY_ALGORITHMS 'ecdsa-sha2-nistp256'
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(result, "SSH host key verification failed")
+        self.assertOutputContains(result, "algorithm=ecdsa-sha2-nistp256")
         connections, _ = self.multi_key_server.telemetry.snapshot()
         negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
-        self.assertIn("ssh-rsa", negotiated, msg=str(negotiated))
+        self.assertEqual(negotiated, ["ecdsa-sha2-nistp256"], msg=str(negotiated))
+
+    def test_known_hosts_entries_prefer_matching_host_key_when_algorithms_unset(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET known_hosts_host_key_preference (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.multi_key_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.multi_key_rsa_known_hosts}',
+                PORT {self.multi_key_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        connections, _ = self.multi_key_server.telemetry.snapshot()
+        negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
+        self.assertEqual(negotiated, ["ssh-rsa"], msg=str(negotiated))
+
+    def test_hashed_known_hosts_entries_prefer_matching_host_key_when_algorithms_unset(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET hashed_known_hosts_host_key_preference (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.multi_key_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.multi_key_rsa_hashed_known_hosts}',
+                PORT {self.multi_key_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        connections, _ = self.multi_key_server.telemetry.snapshot()
+        negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
+        self.assertEqual(negotiated, ["ssh-rsa"], msg=str(negotiated))
 
     def test_repeated_metadata_query_uses_external_cache(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
@@ -1483,28 +1533,26 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertGreater(read_calls, 0)
 
     def test_single_query_with_different_sftp_configs_opens_two_connections(self) -> None:
-        simple_url = f"sftp://127.0.0.1:{self.multi_key_server.port}/simple.h5"
-        with_attrs_url = f"sftp://127.0.0.1:{self.multi_key_server.port}/with_attrs.h5"
+        simple_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        with_attrs_url = f"sftp://127.0.0.1:{self.password_server.port}/with_attrs.h5"
         sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            CREATE OR REPLACE TEMPORARY SECRET file_specific_rsa (
+            CREATE OR REPLACE TEMPORARY SECRET file_specific_known_hosts (
                 TYPE sftp,
                 SCOPE '{simple_url}',
                 USERNAME 'h5db',
                 PASSWORD 'h5db',
-                KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
-                PORT {self.multi_key_server.port},
-                HOST_KEY_ALGORITHMS 'ssh-rsa'
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
             );
-            CREATE OR REPLACE TEMPORARY SECRET file_specific_ecdsa (
+            CREATE OR REPLACE TEMPORARY SECRET file_specific_fingerprint (
                 TYPE sftp,
                 SCOPE '{with_attrs_url}',
                 USERNAME 'h5db',
                 PASSWORD 'h5db',
-                KNOWN_HOSTS_PATH '{self.multi_key_all_known_hosts}',
-                PORT {self.multi_key_server.port},
-                HOST_KEY_ALGORITHMS 'ecdsa-sha2-nistp256'
+                HOST_KEY_FINGERPRINT '{self.password_host_key_fingerprint}',
+                PORT {self.password_server.port}
             );
             SELECT
                 (SELECT COUNT(*) FROM h5_tree('{simple_url}')) AS tree_cnt,
@@ -1514,14 +1562,12 @@ class SFTPInteractionTests(unittest.TestCase):
         result = self.run_sql(sql)
         self.assertEqual(result.returncode, 0, msg=result.output)
         self.assertCsvOutput(result, ["10,123456"])
-        connections, read_calls = self.multi_key_server.telemetry.snapshot()
+        connections, read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(
-            len(connections), 2, msg=str([(record.negotiated_host_key, record.read_calls) for record in connections])
+            len(connections), 2, msg=str([(record.auth_method, record.read_calls) for record in connections])
         )
-        negotiated = sorted(record.negotiated_host_key for record in connections if record.negotiated_host_key)
-        self.assertEqual(negotiated, ["ecdsa-sha2-nistp256", "ssh-rsa"], msg=str(negotiated))
         self.assertGreater(read_calls, 0)
-        self.assertGracefulSftpCleanup(self.multi_key_server, expected_connections=2)
+        self.assertGracefulSftpCleanup(self.password_server, expected_connections=2)
 
     def test_single_query_with_fifty_h5_calls_reuses_one_sftp_connection(self) -> None:
         simple_url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"

@@ -416,6 +416,17 @@ CREATE OR REPLACE SECRET beamline_sftp (
 );
 ```
 
+SFTP host verification must use either `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`. The example above uses
+`KNOWN_HOSTS_PATH`, which means the host must already have a matching entry in the known hosts file. h5db does not add
+entries automatically. Without a matching entry, the query fails with
+`SSH host key verification failed for 'host:port' (algorithm=..., known_hosts=NOTFOUND)`.
+
+To add the default OpenSSH known hosts entry, connect once and accept the host key after verifying its fingerprint:
+
+```sh
+sftp alice@beamline.example.org
+```
+
 Then query the file normally:
 
 ```sql

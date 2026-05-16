@@ -238,7 +238,7 @@ Optional SFTP secret fields:
 
 - `KEY_PASSPHRASE`
 - `PORT` (default `22`)
-- `HOST_KEY_ALGORITHMS`
+- `HOST_KEY_ALGORITHMS` (libssh2 host-key algorithm list)
 
 For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. For agent-based auth, use
 `USE_AGENT true`. On Unix-like systems libssh2 resolves the agent through `SSH_AUTH_SOCK`; on Windows it uses the

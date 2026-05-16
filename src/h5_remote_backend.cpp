@@ -35,7 +35,6 @@
 #include "duckdb/storage/caching_file_system.hpp"
 
 #include <chrono>
-#include <cstring>
 #include <cstdlib>
 #include <array>
 #include <map>
@@ -127,8 +126,6 @@ struct H5SftpUrl {
 	std::optional<int> port;
 };
 
-using SecretScopeCacheKey = std::pair<std::string, vector<string>>;
-
 enum class H5SftpAuthMethod : uint8_t { PASSWORD, KEY_FILE, SSH_AGENT };
 
 struct H5SftpConfig {
@@ -142,36 +139,11 @@ struct H5SftpConfig {
 	std::optional<std::string> known_hosts_path;
 	std::optional<std::string> host_key_fingerprint;
 	std::optional<std::string> host_key_algorithms;
-	SecretScopeCacheKey secret_scope_cache_key;
 	std::string remote_path;
-};
-
-struct SftpHostKeyHintCacheKey {
-	SecretScopeCacheKey scope_key;
-	std::string host;
-	int port;
-	std::string known_hosts_path;
-	std::string host_key_fingerprint;
-	std::string host_key_algorithms;
-
-	bool operator<(const SftpHostKeyHintCacheKey &other) const {
-		return std::tie(scope_key, host, port, known_hosts_path, host_key_fingerprint, host_key_algorithms) <
-		       std::tie(other.scope_key, other.host, other.port, other.known_hosts_path, other.host_key_fingerprint,
-		                other.host_key_algorithms);
-	}
 };
 
 using H5SftpConnectionCacheKey = std::tuple<std::string, int, std::string, H5SftpAuthMethod, std::optional<hash_t>,
                                             std::string, std::optional<hash_t>, std::string, std::string, std::string>;
-
-// Access to this process-global hint cache is currently serialized by hdf5_global_mutex.
-// H5SftpConnection is only constructed from the remote HDF5 VFD open path, and file opens happen while that
-// mutex is held. If the SFTP backend is ever used outside that path, this cache would need explicit synchronization.
-static std::map<SftpHostKeyHintCacheKey, std::string> sftp_host_key_hint_cache;
-
-static SecretScopeCacheKey BuildSecretScopeCacheKey(const BaseSecret &secret) {
-	return {secret.GetName(), secret.GetScope()};
-}
 
 static int HostKeyTypeToKnownHostMask(int hostkey_type) {
 	switch (hostkey_type) {
@@ -212,6 +184,64 @@ static std::string HostKeyTypeToString(int hostkey_type, const char *method_name
 	default:
 		return "unknown";
 	}
+}
+
+static int HostKeyAlgorithmToKnownHostMask(const std::string &algorithm) {
+	if (algorithm == "ssh-ed25519") {
+		return LIBSSH2_KNOWNHOST_KEY_ED25519;
+	}
+	if (algorithm == "ecdsa-sha2-nistp256") {
+		return LIBSSH2_KNOWNHOST_KEY_ECDSA_256;
+	}
+	if (algorithm == "ecdsa-sha2-nistp384") {
+		return LIBSSH2_KNOWNHOST_KEY_ECDSA_384;
+	}
+	if (algorithm == "ecdsa-sha2-nistp521") {
+		return LIBSSH2_KNOWNHOST_KEY_ECDSA_521;
+	}
+	if (algorithm == "rsa-sha2-512" || algorithm == "rsa-sha2-256" || algorithm == "ssh-rsa") {
+		return LIBSSH2_KNOWNHOST_KEY_SSHRSA;
+	}
+	if (algorithm == "ssh-dss") {
+		return LIBSSH2_KNOWNHOST_KEY_SSHDSS;
+	}
+	return 0;
+}
+
+static vector<string> GetSupportedHostKeyAlgorithms(LIBSSH2_SESSION *session) {
+	const char **algs = nullptr;
+	auto rc = libssh2_session_supported_algs(session, LIBSSH2_METHOD_HOSTKEY, &algs);
+	if (rc < 0 || !algs) {
+		return {};
+	}
+
+	vector<string> result;
+	result.reserve(UnsafeNumericCast<size_t>(rc));
+	for (int i = 0; i < rc; i++) {
+		result.emplace_back(algs[i]);
+	}
+	libssh2_free(session, const_cast<char **>(algs));
+	return result;
+}
+
+static bool KnownHostsContainKeyType(LIBSSH2_KNOWNHOSTS *known_hosts, const std::string &host, int port,
+                                     int known_host_mask) {
+	static constexpr char DUMMY_KEY = '\0';
+	auto check = libssh2_knownhost_checkp(known_hosts, host.c_str(), port, &DUMMY_KEY, 1,
+	                                      LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_host_mask,
+	                                      nullptr);
+	return check == LIBSSH2_KNOWNHOST_CHECK_MATCH || check == LIBSSH2_KNOWNHOST_CHECK_MISMATCH;
+}
+
+static std::string JoinCommaSeparated(const vector<string> &values) {
+	std::string result;
+	for (const auto &value : values) {
+		if (!result.empty()) {
+			result += ",";
+		}
+		result += value;
+	}
+	return result;
 }
 
 static std::string KnownHostCheckToString(int check) {
@@ -340,7 +370,6 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 		throw InvalidConfigurationException("No sftp secret found for '%s'", url.original_url);
 	}
 	const auto &secret = dynamic_cast<const KeyValueSecret &>(*secret_match.secret_entry->secret);
-	config.secret_scope_cache_key = BuildSecretScopeCacheKey(secret);
 
 	Value value;
 	if (!secret.TryGetValue("username", value)) {
@@ -575,9 +604,10 @@ public:
 	}
 
 private:
+	using KnownHostsPtr = unique_ptr<LIBSSH2_KNOWNHOSTS, decltype(&libssh2_knownhost_free)>;
+
 	struct HostVerificationResult {
 		bool success = false;
-		bool retryable = false;
 		std::string negotiated_algorithm;
 		std::string error_message;
 	};
@@ -613,65 +643,6 @@ private:
 
 		static WinsockState winsock_state;
 #endif
-	}
-
-	static const std::vector<std::string> &GetSupportedHostKeyAlgorithms() {
-		static std::once_flag supported_once;
-		static std::vector<std::string> supported_algorithms;
-
-		std::call_once(supported_once, []() {
-			auto *supported_session = libssh2_session_init();
-			if (!supported_session) {
-				return;
-			}
-			const char **algs = nullptr;
-			auto rc = libssh2_session_supported_algs(supported_session, LIBSSH2_METHOD_HOSTKEY, &algs);
-			if (rc > 0 && algs) {
-				supported_algorithms.reserve(UnsafeNumericCast<size_t>(rc));
-				for (int i = 0; i < rc; i++) {
-					supported_algorithms.emplace_back(algs[i]);
-				}
-				libssh2_free(supported_session, const_cast<char **>(algs));
-			}
-			libssh2_session_free(supported_session);
-		});
-
-		return supported_algorithms;
-	}
-
-	SftpHostKeyHintCacheKey GetHostKeyHintCacheKey() const {
-		return {config.secret_scope_cache_key,
-		        config.host,
-		        config.port,
-		        config.known_hosts_path.value_or(""),
-		        config.host_key_fingerprint.value_or(""),
-		        config.host_key_algorithms.value_or("")};
-	}
-
-	std::vector<std::string> BuildHostKeyAlgorithmAttempts() const {
-		std::vector<std::string> attempts;
-		case_insensitive_set_t seen;
-
-		auto add_attempt = [&](const std::string &attempt) {
-			if (seen.insert(attempt).second) {
-				attempts.push_back(attempt);
-			}
-		};
-
-		if (config.host_key_algorithms) {
-			add_attempt(*config.host_key_algorithms);
-		}
-
-		auto lookup = sftp_host_key_hint_cache.find(GetHostKeyHintCacheKey());
-		if (lookup != sftp_host_key_hint_cache.end()) {
-			add_attempt(lookup->second);
-		}
-
-		add_attempt("");
-		for (const auto &algorithm : GetSupportedHostKeyAlgorithms()) {
-			add_attempt(algorithm);
-		}
-		return attempts;
 	}
 
 	bool ContextInterrupted() const {
@@ -1010,12 +981,51 @@ private:
 		throw IOException("Failed to connect to SFTP host '%s:%d'", config.host, config.port);
 	}
 
+	std::optional<std::string> BuildKnownHostsHostKeyAlgorithmPreference() {
+		if (!config.known_hosts_path) {
+			return std::nullopt;
+		}
+
+		KnownHostsPtr known_hosts(libssh2_knownhost_init(session), &libssh2_knownhost_free);
+		if (!known_hosts) {
+			throw IOException("Failed to initialize SSH known_hosts");
+		}
+		if (libssh2_knownhost_readfile(known_hosts.get(), config.known_hosts_path->c_str(),
+		                               LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
+			throw IOException("Failed to read known_hosts file '%s'", *config.known_hosts_path);
+		}
+
+		auto supported_algorithms = GetSupportedHostKeyAlgorithms(session);
+		vector<string> host_key_preferences;
+		for (const auto &algorithm : supported_algorithms) {
+			auto known_host_mask = HostKeyAlgorithmToKnownHostMask(algorithm);
+			if (known_host_mask == 0) {
+				continue;
+			}
+			if (KnownHostsContainKeyType(known_hosts.get(), config.host, config.port, known_host_mask)) {
+				host_key_preferences.push_back(algorithm);
+			}
+		}
+
+		if (host_key_preferences.empty()) {
+			return std::nullopt;
+		}
+		return JoinCommaSeparated(host_key_preferences);
+	}
+
 	void OpenSession(const char *host_key_preferences) {
 		session = libssh2_session_init();
 		if (!session) {
 			throw IOException("Failed to create libssh2 session");
 		}
-		if (host_key_preferences && host_key_preferences[0] != '\0') {
+		auto known_hosts_host_key_preferences = std::optional<std::string>();
+		if (!host_key_preferences) {
+			known_hosts_host_key_preferences = BuildKnownHostsHostKeyAlgorithmPreference();
+			if (known_hosts_host_key_preferences) {
+				host_key_preferences = known_hosts_host_key_preferences->c_str();
+			}
+		}
+		if (host_key_preferences) {
 			auto rc = libssh2_session_method_pref(session, LIBSSH2_METHOD_HOSTKEY, host_key_preferences);
 			if (rc < 0) {
 				throw IOException("Failed to set SSH host key algorithm preference '%s': %s", host_key_preferences,
@@ -1074,28 +1084,23 @@ private:
 		result.negotiated_algorithm = HostKeyTypeToString(hostkey_type, negotiated_method);
 
 		if (config.known_hosts_path) {
-			auto *known_hosts = libssh2_knownhost_init(session);
+			KnownHostsPtr known_hosts(libssh2_knownhost_init(session), &libssh2_knownhost_free);
 			if (!known_hosts) {
 				result.error_message = "Failed to initialize SSH known_hosts";
 				return result;
 			}
-			if (libssh2_knownhost_readfile(known_hosts, config.known_hosts_path->c_str(),
+			if (libssh2_knownhost_readfile(known_hosts.get(), config.known_hosts_path->c_str(),
 			                               LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
-				libssh2_knownhost_free(known_hosts);
 				result.error_message =
 				    StringUtil::Format("Failed to read known_hosts file '%s'", *config.known_hosts_path);
 				return result;
 			}
 
-			struct libssh2_knownhost *host = nullptr;
-			auto check = libssh2_knownhost_checkp(known_hosts, config.host.c_str(), config.port, hostkey, hostkey_len,
-			                                      LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW |
-			                                          HostKeyTypeToKnownHostMask(hostkey_type),
-			                                      &host);
-			libssh2_knownhost_free(known_hosts);
+			auto check = libssh2_knownhost_checkp(
+			    known_hosts.get(), config.host.c_str(), config.port, hostkey, hostkey_len,
+			    LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | HostKeyTypeToKnownHostMask(hostkey_type),
+			    nullptr);
 			if (check != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
-				result.retryable =
-				    check == LIBSSH2_KNOWNHOST_CHECK_MISMATCH || check == LIBSSH2_KNOWNHOST_CHECK_NOTFOUND;
 				result.error_message = StringUtil::Format(
 				    "SSH host key verification failed for '%s:%d' (algorithm=%s, known_hosts=%s)", config.host,
 				    config.port, result.negotiated_algorithm, KnownHostCheckToString(check));
@@ -1112,7 +1117,6 @@ private:
 			}
 			auto actual = ToHexLower(fingerprint, 20);
 			if (actual != *config.host_key_fingerprint) {
-				result.retryable = true;
 				result.error_message =
 				    StringUtil::Format("SSH host key fingerprint mismatch for '%s:%d' (algorithm=%s)", config.host,
 				                       config.port, result.negotiated_algorithm);
@@ -1125,45 +1129,15 @@ private:
 	}
 
 	void OpenVerifiedSession() {
-		std::string last_error;
-		std::string last_verification_error;
+		ConnectSocket();
+		OpenSession(config.host_key_algorithms ? config.host_key_algorithms->c_str() : nullptr);
 
-		for (const auto &attempt : BuildHostKeyAlgorithmAttempts()) {
-			ResetConnectionState();
-			ConnectSocket();
-			try {
-				OpenSession(attempt.empty() ? nullptr : attempt.c_str());
-			} catch (const IOException &ex) {
-				if (attempt.empty() && last_verification_error.empty()) {
-					throw;
-				}
-				if (last_verification_error.empty()) {
-					last_error = ex.what();
-				}
-				continue;
-			}
-
-			auto verification = VerifyHost();
-			if (verification.success) {
-				sftp_host_key_hint_cache[GetHostKeyHintCacheKey()] = verification.negotiated_algorithm;
-				return;
-			}
-			if (!verification.retryable) {
-				ResetConnectionState();
-				throw IOException("%s", verification.error_message);
-			}
-			last_verification_error = verification.error_message;
-			last_error = verification.error_message;
+		auto verification = VerifyHost();
+		if (verification.success) {
+			return;
 		}
-
 		ResetConnectionState();
-		if (!last_verification_error.empty()) {
-			throw IOException("%s", last_verification_error);
-		}
-		if (!last_error.empty()) {
-			throw IOException("%s", last_error);
-		}
-		throw IOException("SSH host key verification failed for '%s:%d'", config.host, config.port);
+		throw IOException("%s", verification.error_message);
 	}
 
 	void Authenticate() {

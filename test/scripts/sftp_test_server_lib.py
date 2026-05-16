@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import base64
+import hashlib
+import hmac
 import os
 import posixpath
 import socket
@@ -23,6 +26,18 @@ def _host_key_name(key: paramiko.PKey) -> str:
 def write_known_host(path: str | Path, host: str, port: int, host_key: paramiko.PKey) -> None:
     known_host = f"[{host}]:{port}" if port != 22 else host
     line = f"{known_host} {_host_key_name(host_key)} {host_key.get_base64()}\n"
+    Path(path).write_text(line, encoding="utf-8")
+
+
+def write_hashed_known_host(path: str | Path, host: str, port: int, host_key: paramiko.PKey) -> None:
+    known_host = f"[{host}]:{port}" if port != 22 else host
+    salt = b"h5db-known-host-salt"
+    digest = hmac.new(salt, known_host.encode("utf-8"), hashlib.sha1).digest()
+    hashed_host = "|1|{}|{}".format(
+        base64.b64encode(salt).decode("ascii"),
+        base64.b64encode(digest).decode("ascii"),
+    )
+    line = f"{hashed_host} {_host_key_name(host_key)} {host_key.get_base64()}\n"
     Path(path).write_text(line, encoding="utf-8")
 
 
