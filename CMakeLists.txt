@@ -30,6 +30,7 @@ set(EXTENSION_SOURCES
     src/h5_remote_backend.cpp
     src/h5_remote_vfd.cpp
     src/h5_tree_shared.cpp
+    src/h5_first_file.cpp
     src/h5_tree.cpp
     src/h5_ls.cpp
     src/h5_read.cpp

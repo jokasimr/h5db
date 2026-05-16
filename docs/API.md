@@ -441,6 +441,59 @@ FROM h5_attributes('runs/run_*.h5', '/measurements', filename := true);
 
 ## Scalar Functions
 
+### `h5_first_file(filename_or_filenames)`
+
+Planning-time helper that expands a filename input using the same h5db filename expansion rules as table-valued
+functions and returns the first expanded filename.
+
+Use this when one part of a query should read only one representative file from a filename pattern or filename list,
+while another part of the query still reads every matched file.
+
+**Parameters:**
+- `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to an HDF5 file, a glob pattern, or a list
+  of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+
+**Returns:** `VARCHAR`
+
+**Semantics:**
+- An exact filename is returned unchanged.
+- A single glob returns the first file after h5db's normal sorted glob expansion.
+- A `VARCHAR[]` input expands entries left-to-right and returns the first expanded filename.
+- `h5_first_file(...)` is evaluated while the statement is bound, not while rows are executed. This is what lets it be
+  used as an argument to typed table functions such as `h5_read(...)`, which need a concrete file at bind time to infer
+  their output schema.
+- The argument must be known while the query is planned, for example a literal, constant expression, or prepared
+  statement parameter. Per-row column values are not supported.
+- SFTP inputs use h5db's SFTP expansion rules.
+- A glob pattern that matches no files raises an error.
+
+**Examples:**
+```sql
+SELECT h5_first_file('runs/run_*.h5');
+
+-- Read detector metadata once, while reading event data from every matched file.
+WITH pixels AS (
+    FROM h5_read(
+        h5_first_file('runs/run_*.h5'),
+        '/entry/instrument/detector/pixel_id',
+        '/entry/instrument/detector/x',
+        '/entry/instrument/detector/y'
+    )
+),
+events AS (
+    FROM h5_read(
+        'runs/run_*.h5',
+        '/entry/events/pixel_id',
+        '/entry/events/time'
+    )
+)
+SELECT *
+FROM events
+JOIN pixels USING (pixel_id);
+```
+
+---
+
 ### `h5_ls(filename, group_path[, projected_attributes...])`
 
 Returns the immediate children of a group as a `MAP(VARCHAR, STRUCT(...))` keyed

@@ -58,6 +58,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterH5AliasFunction(loader);
 	RegisterH5AttrFunction(loader);
 	RegisterH5IndexFunction(loader);
+	RegisterH5FirstFileFunction(loader);
 	RegisterH5AttributesFunction(loader);
 	RegisterH5SftpSecrets(loader);
 }

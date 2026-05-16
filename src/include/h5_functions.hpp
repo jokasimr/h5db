@@ -81,6 +81,9 @@ void RegisterH5AttrFunction(ExtensionLoader &loader);
 // Scalar function for adding a virtual index column
 void RegisterH5IndexFunction(ExtensionLoader &loader);
 
+// Scalar function for resolving the first concrete file from h5db filename inputs
+void RegisterH5FirstFileFunction(ExtensionLoader &loader);
+
 // Table function for reading HDF5 attributes
 void RegisterH5AttributesFunction(ExtensionLoader &loader);
 

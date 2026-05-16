@@ -1,0 +1,232 @@
+# name: test/sql/glob/h5_first_file.test
+# description: h5_first_file filename expansion helper
+# group: [glob]
+
+require h5db
+
+query I
+SELECT h5_first_file('test/data/simple.h5');
+----
+test/data/simple.h5
+
+query I
+SELECT h5_first_file('test/data/no_such_exact_file.h5');
+----
+test/data/no_such_exact_file.h5
+
+query I
+SELECT h5_first_file('test/data/glob_order/order_*.h5');
+----
+test/data/glob_order/order_1.h5
+
+query I
+SELECT h5_first_file('test/data/glob_order/order_' || '*.h5');
+----
+test/data/glob_order/order_1.h5
+
+query I
+SELECT h5_first_file([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_*.h5'
+]);
+----
+test/data/glob_order/order_2.h5
+
+query I
+SELECT h5_first_file([
+    'test/data/glob_order/order_*.h5',
+    'test/data/glob_order/order_2.h5'
+]);
+----
+test/data/glob_order/order_1.h5
+
+query I
+SELECT h5_first_file([
+    'test/data/glob_order/order_*.h5',
+    'test/data/glob_order/order_2.h5',
+    'test/data/simple.h5'
+]::VARCHAR[3]);
+----
+test/data/glob_order/order_1.h5
+
+query I
+SELECT SUM(values)
+FROM h5_read(
+    h5_first_file('test/data/glob_order/order_*.h5'),
+    '/values'
+);
+----
+1
+
+statement ok
+PREPARE h5_first_file_varchar AS SELECT h5_first_file($1::VARCHAR);
+
+query I
+EXECUTE h5_first_file_varchar('test/data/glob_order/order_*.h5');
+----
+test/data/glob_order/order_1.h5
+
+query I
+EXECUTE h5_first_file_varchar('test/data/simple.h5');
+----
+test/data/simple.h5
+
+statement ok
+PREPARE h5_first_file_varchar_list AS SELECT h5_first_file($1::VARCHAR[]);
+
+query I
+EXECUTE h5_first_file_varchar_list([
+    'test/data/glob_order/order_*.h5',
+    'test/data/simple.h5'
+]);
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+PREPARE h5_first_file_read AS
+SELECT SUM(values)
+FROM h5_read(h5_first_file($1::VARCHAR), '/values');
+
+query I
+EXECUTE h5_first_file_read('test/data/glob_order/order_*.h5');
+----
+1
+
+statement ok
+CREATE MACRO h5_first_file_macro(path) AS h5_first_file(path);
+
+query I
+SELECT h5_first_file_macro('test/data/glob_order/order_*.h5');
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+CREATE MACRO h5_first_file_typed_macro(path VARCHAR) AS h5_first_file(path);
+
+query I
+SELECT h5_first_file_typed_macro('test/data/glob_order/order_*.h5');
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+CREATE MACRO h5_first_file_concat_macro(suffix VARCHAR) AS h5_first_file('test/data/glob_order/order_' || suffix);
+
+query I
+SELECT h5_first_file_concat_macro('*.h5');
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+CREATE MACRO h5_first_file_list_macro(path VARCHAR) AS h5_first_file([path, 'test/data/simple.h5']);
+
+query I
+SELECT h5_first_file_list_macro('test/data/glob_order/order_*.h5');
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+CREATE MACRO h5_first_file_default_macro(path := 'test/data/glob_order/order_*.h5') AS h5_first_file(path);
+
+query I
+SELECT h5_first_file_default_macro();
+----
+test/data/glob_order/order_1.h5
+
+statement ok
+CREATE MACRO h5_first_file_missing_default_macro(path := 'test/data/glob/no_such_*.h5') AS h5_first_file(path);
+
+statement ok
+CREATE MACRO h5_first_file_missing_literal_macro() AS h5_first_file('test/data/glob/no_such_*.h5');
+
+statement error
+SELECT h5_first_file_missing_literal_macro();
+----
+IO Error: No files found that match the pattern
+
+statement ok
+CREATE MACRO h5_first_file_read_macro(path) AS TABLE
+SELECT SUM(values) AS total
+FROM h5_read(h5_first_file(path), '/values');
+
+query I
+SELECT total FROM h5_first_file_read_macro('test/data/glob_order/order_*.h5');
+----
+1
+
+statement ok
+CREATE MACRO h5_first_file_read_default_macro(path := 'test/data/glob_order/order_*.h5') AS TABLE
+SELECT SUM(values) AS total
+FROM h5_read(h5_first_file(path), '/values');
+
+query I
+SELECT total FROM h5_first_file_read_default_macro();
+----
+1
+
+statement ok
+CREATE MACRO h5_first_file_read_missing_default_macro(path := 'test/data/glob/no_such_*.h5') AS TABLE
+SELECT *
+FROM h5_read(h5_first_file(path), '/values');
+
+statement ok
+CREATE MACRO h5_first_file_read_missing_literal_macro() AS TABLE
+SELECT *
+FROM h5_read(h5_first_file('test/data/glob/no_such_*.h5'), '/values');
+
+statement error
+SELECT * FROM h5_first_file_read_missing_literal_macro();
+----
+IO Error: No files found that match the pattern
+
+statement error
+CREATE MACRO h5_first_file_bad_type_macro() AS h5_first_file(42);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_first_file\(INTEGER_LITERAL\)'.*
+
+statement ok
+CREATE MACRO h5_first_file_column_macro() AS TABLE
+SELECT h5_first_file(filename)
+FROM (VALUES ('test/data/simple.h5')) t(filename);
+
+statement error
+SELECT * FROM h5_first_file_column_macro();
+----
+Invalid Input Error: h5_first_file input must be a constant expression
+
+query II
+SELECT
+    CASE WHEN h5_first_file(NULL::VARCHAR) IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN h5_first_file(NULL::VARCHAR[]) IS NULL THEN 1 ELSE 0 END;
+----
+1	1
+
+statement error
+SELECT h5_first_file([]::VARCHAR[]);
+----
+IO Error: h5_first_file needs at least one file to read
+
+statement error
+SELECT h5_first_file([NULL]::VARCHAR[]);
+----
+Parser Error: h5_first_file reader cannot take NULL input as parameter
+
+statement error
+SELECT h5_first_file(filename)
+FROM (VALUES ('test/data/simple.h5')) t(filename);
+----
+Invalid Input Error: h5_first_file input must be a constant expression
+
+statement error
+SELECT h5_first_file(42);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_first_file\(INTEGER_LITERAL\)'.*
+
+statement error
+SELECT h5_first_file([1]::INTEGER[]);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_first_file\(INTEGER\[\]\)'.*
+
+statement error
+SELECT h5_first_file([1]::INTEGER[1]);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_first_file\(INTEGER\[1\]\)'.*

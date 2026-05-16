@@ -32,6 +32,11 @@ FROM h5_attributes('test/data/glob/no_such_*.h5', '/target');
 <REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob[\\\\/]no_such_\*\.h5".*
 
 statement error
+SELECT h5_first_file('test/data/glob/no_such_*.h5');
+----
+<REGEX>:.*No files found that match the pattern "(test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob[\\\\/]no_such_\*\.h5".*
+
+statement error
 SELECT COUNT(*) FROM h5_tree([
     'test/data/glob_order/order_1.h5',
     'test/data/glob/no_such_*.h5'
