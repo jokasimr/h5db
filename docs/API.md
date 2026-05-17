@@ -2,6 +2,37 @@
 
 This document describes the public SQL functions provided by the h5db extension.
 
+## Contents
+
+- [Remote Access](#remote-access)
+  - [Filename Patterns and Filename Lists](#filename-patterns-and-filename-lists)
+  - [SFTP Secrets](#sftp-secrets)
+- [Table Functions](#table-functions)
+  - [`h5_tree(filename_or_filenames, projected_attributes...)`](#h5_treefilename_or_filenames-projected_attributes)
+  - [`h5_ls(filename_or_filenames[, group_path], projected_attributes...)`](#h5_lsfilename_or_filenames-group_path-projected_attributes)
+  - [`h5_read(filename_or_filenames, dataset_path, ...)`](#h5_readfilename_or_filenames-dataset_path-)
+  - [`h5_attributes(filename_or_filenames, object_path)`](#h5_attributesfilename_or_filenames-object_path)
+- [Scalar Functions](#scalar-functions)
+  - [`h5_first_file(filename_or_filenames)`](#h5_first_filefilename_or_filenames)
+  - [`h5_ls(filename, group_path[, projected_attributes...])`](#h5_lsfilename-group_path-projected_attributes)
+  - [`h5_ls_swmr(filename, group_path[, projected_attributes...])`](#h5_ls_swmrfilename-group_path-projected_attributes)
+  - [`h5_rse(run_starts_path, values_path)`](#h5_rserun_starts_path-values_path)
+  - [`h5_index()`](#h5_index)
+  - [`h5_attr([name[, default_value]])`](#h5_attrname-default_value)
+  - [`h5_alias(name, definition)`](#h5_aliasname-definition)
+- [Test Functions](#test-functions)
+  - [`h5db_version(name)`](#h5db_versionname)
+- [Settings](#settings)
+  - [`h5db_swmr_default` (BOOLEAN)](#h5db_swmr_default-boolean)
+  - [`h5db_batch_size` (VARCHAR)](#h5db_batch_size-varchar)
+- [Type Mapping](#type-mapping)
+  - [HDF5 to DuckDB Type Conversion](#hdf5-to-duckdb-type-conversion)
+  - [Multi-Dimensional Arrays](#multi-dimensional-arrays)
+- [Error Handling](#error-handling)
+- [Performance Notes](#performance-notes)
+- [Limitations](#limitations)
+- [See Also](#see-also)
+
 ## Remote Access
 
 The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
