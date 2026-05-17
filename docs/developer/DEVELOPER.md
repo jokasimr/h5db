@@ -308,18 +308,8 @@ Once that condition is observed, all cleanup steps in the current cleanup cascad
 cleanup still cannot make progress, h5db shuts down the socket transport and releases local ownership of the SFTP/session
 objects rather than letting cleanup block the query indefinitely.
 
-Windows CI currently skips these SQL glob tests:
+Windows CI currently skips this SQL glob test:
 
-- `test/sql/glob/h5_glob_missing_notwindows.test`
-  Contains missing-glob assertions for `h5_tree`, `h5_ls`, `h5_read`, `h5_attributes`, and a `VARCHAR[]` input that
-  includes `test/data/glob/no_such_*.h5`. These assertions pass locally and in the SFTP rewrite on Linux, but failed in
-  the Windows SFTP CI run. The SFTP glob fallback correctly probes the original wildcard path as an exact path after no
-  glob matches are found, matching DuckDB's local glob semantics. On Windows CI, that exact fallback stat returned an
-  SFTP status that h5db did not classify as not-found and the query surfaced
-  `Failed to stat SFTP path ...: SFTP Protocol Error` instead of the expected
-  `No files found that match the pattern ...`. The exact `libssh2_sftp_last_error()` value was not captured in that CI
-  output. The assertions are isolated and marked `require notwindows` so Windows CI can pass without changing production
-  SFTP error handling.
 - `test/sql/glob/h5_glob_symlink.test`
   Contains full file-symlink glob coverage for `h5_tree`, `h5_ls`, and `h5_read`, including direct and globbed access to
   `test/data/glob_symlink/link_file.h5`. Windows CI showed that direct `H5Fopen` with HDF5 1.14.6 fails when the final

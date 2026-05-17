@@ -1,14 +1,8 @@
-# name: test/sql/glob/h5_glob_missing_notwindows.test
+# name: test/sql/glob/h5_glob_missing.test
 # description: missing glob error coverage for h5_tree, h5_ls, h5_read, and h5_attributes
 # group: [glob]
 
 require h5db
-
-# These assertions are isolated because the remote SFTP test harness rewrites
-# test/data paths to sftp:// URLs. On Windows, a server-side stat of a literal
-# wildcard path can fail with a server-specific SFTP status instead of the
-# no-such-file status needed to reach this exact h5db error text.
-require notwindows
 
 statement error
 SELECT COUNT(*) FROM h5_tree('test/data/glob/no_such_*.h5');

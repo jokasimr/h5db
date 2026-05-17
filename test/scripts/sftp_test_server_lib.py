@@ -74,6 +74,7 @@ class SFTPServerConfig:
     handle_close_delay_ms: int = 0
     disconnect_on_stat: bool = False
     fail_stat_calls: int = 0
+    fail_stat_paths: set[str] = field(default_factory=set)
     read_eof_after_bytes: Optional[int] = None
     disconnect_after_read_calls: Optional[int] = None
     host_keys: list[paramiko.PKey] = field(default_factory=list)
@@ -311,13 +312,17 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
         self.root_dir = os.path.realpath(config.root_dir)
 
     def _resolve(self, path: str) -> str:
-        normalized = posixpath.normpath(path)
-        if not normalized.startswith("/"):
-            normalized = "/" + normalized
+        normalized = self._normalized_remote_path(path)
         candidate = os.path.realpath(os.path.join(self.root_dir, normalized.lstrip("/")))
         if candidate != self.root_dir and not candidate.startswith(self.root_dir + os.sep):
             raise PermissionError("Path escapes server root")
         return candidate
+
+    def _normalized_remote_path(self, path: str) -> str:
+        normalized = posixpath.normpath(path)
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        return normalized
 
     def _convert_error(self, ex: OSError):
         errno = ex.errno if ex.errno is not None else 1
@@ -345,6 +350,8 @@ class RootedSFTPServer(paramiko.SFTPServerInterface):
             return paramiko.SFTP_FAILURE
         if self.config.fail_stat_calls > 0:
             self.config.fail_stat_calls -= 1
+            return paramiko.SFTP_FAILURE
+        if self._normalized_remote_path(path) in self.config.fail_stat_paths:
             return paramiko.SFTP_FAILURE
         try:
             attrs = paramiko.SFTPAttributes.from_stat(os.stat(self._resolve(path)))

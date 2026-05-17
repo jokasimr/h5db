@@ -1490,6 +1490,29 @@ class SFTPInteractionTests(unittest.TestCase):
         finally:
             self.password_server.config.list_folder_omit_permissions = False
 
+    def test_missing_sftp_glob_treats_generic_exact_fallback_stat_failure_as_no_match(self) -> None:
+        self.password_server.config.fail_stat_paths.add("/glob/no_such_*.h5")
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET missing_glob_generic_stat_failure_as_no_match (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT h5_first_file('sftp://127.0.0.1:{self.password_server.port}/glob/no_such_*.h5');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertOutputContains(result, "No files found that match the pattern")
+        finally:
+            self.password_server.config.fail_stat_paths.discard("/glob/no_such_*.h5")
+
     def test_sftp_glob_literal_directory_component_handles_missing_stat_permissions(self) -> None:
         self.password_server.config.stat_omit_permissions = True
         try:

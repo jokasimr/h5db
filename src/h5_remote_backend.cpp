@@ -474,6 +474,15 @@ static bool H5SftpStatusIndicatesRemoteConnectionUnreliable(unsigned long status
 	return status == LIBSSH2_FX_NO_CONNECTION || status == LIBSSH2_FX_CONNECTION_LOST;
 }
 
+static bool H5SftpStatusIndicatesMissingPath(unsigned long status) {
+	return status == LIBSSH2_FX_NO_SUCH_FILE || status == LIBSSH2_FX_NO_SUCH_PATH;
+}
+
+static bool H5SftpStatusIndicatesIgnorableGlobDirectoryFailure(unsigned long status) {
+	return H5SftpStatusIndicatesMissingPath(status) || status == LIBSSH2_FX_PERMISSION_DENIED ||
+	       status == LIBSSH2_FX_FAILURE;
+}
+
 using H5SftpCleanupDeadline = std::optional<std::chrono::steady_clock::time_point>;
 
 class ScopedSocket {
@@ -1360,8 +1369,10 @@ static H5SftpRemotePattern ParseSftpRemotePattern(const std::string &remote_path
 	return result;
 }
 
+enum class H5SftpStatMode : uint8_t { DEFAULT, EXACT_GLOB_FALLBACK };
+
 static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, const std::string &path, int stat_type,
-                              LIBSSH2_SFTP_ATTRIBUTES &attrs) {
+                              LIBSSH2_SFTP_ATTRIBUTES &attrs, H5SftpStatMode mode = H5SftpStatMode::DEFAULT) {
 	connection->ThrowIfRemoteConnectionUnreliable();
 	while (true) {
 		auto rc = libssh2_sftp_stat_ex(connection->GetSftpSession(), path.c_str(),
@@ -1374,7 +1385,8 @@ static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, co
 			continue;
 		}
 		auto sftp_error = connection->GetSftpStatusError(rc);
-		if (sftp_error && (*sftp_error == LIBSSH2_FX_NO_SUCH_FILE || *sftp_error == LIBSSH2_FX_NO_SUCH_PATH)) {
+		if (sftp_error && (H5SftpStatusIndicatesMissingPath(*sftp_error) ||
+		                   (mode == H5SftpStatMode::EXACT_GLOB_FALLBACK && *sftp_error == LIBSSH2_FX_FAILURE))) {
 			return false;
 		}
 		connection->ThrowSftpPathOperationError("Failed to stat SFTP path", path, rc);
@@ -1406,9 +1418,10 @@ static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connectio
 	}
 }
 
-static bool H5SftpExactNonDirectoryPathExists(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+static bool H5SftpExactGlobFallbackNonDirectoryPathExists(const shared_ptr<H5SftpConnection> &connection,
+                                                          const std::string &path) {
 	LIBSSH2_SFTP_ATTRIBUTES attrs {};
-	if (!H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs)) {
+	if (!H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs, H5SftpStatMode::EXACT_GLOB_FALLBACK)) {
 		return false;
 	}
 	if (H5SftpPathAttrsAreDirectory(attrs)) {
@@ -1466,11 +1479,6 @@ private:
 		return H5SftpPathKind::OTHER;
 	}
 
-	static bool IsIgnorableGlobDirectoryFailure(unsigned long sftp_error) {
-		return sftp_error == LIBSSH2_FX_NO_SUCH_FILE || sftp_error == LIBSSH2_FX_NO_SUCH_PATH ||
-		       sftp_error == LIBSSH2_FX_PERMISSION_DENIED || sftp_error == LIBSSH2_FX_FAILURE;
-	}
-
 	H5SftpPathKind TryGetPathKind(const std::string &path, int stat_type) const {
 		LIBSSH2_SFTP_ATTRIBUTES attrs {};
 		if (!TryStatPath(path, stat_type, attrs)) {
@@ -1492,7 +1500,7 @@ private:
 				continue;
 			}
 			auto sftp_error = connection->GetSftpStatusError(last_error);
-			if (allow_probe_failure && sftp_error && IsIgnorableGlobDirectoryFailure(*sftp_error)) {
+			if (allow_probe_failure && sftp_error && H5SftpStatusIndicatesIgnorableGlobDirectoryFailure(*sftp_error)) {
 				// During glob expansion, match DuckDB's local filesystem semantics:
 				// unreadable, missing, or non-directory paths are treated as simply not
 				// traversable instead of raising a glob error. Some servers report both
@@ -2199,7 +2207,7 @@ H5ExpandedFileList ExpandH5SftpFilePattern(ClientContext &context, const std::st
 	if (result.filenames.empty()) {
 		// Match DuckDB reader semantics for local paths: if glob expansion finds
 		// nothing, fall back to treating the full input as an exact path.
-		if (H5SftpExactNonDirectoryPathExists(connection, url.remote_path)) {
+		if (H5SftpExactGlobFallbackNonDirectoryPathExists(connection, url.remote_path)) {
 			result.filenames.push_back(path_pattern);
 			result.had_glob = true;
 			return result;
