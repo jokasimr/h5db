@@ -1102,9 +1102,10 @@ private:
 			    LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | HostKeyTypeToKnownHostMask(hostkey_type),
 			    nullptr);
 			if (check != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
+				auto hint = check == LIBSSH2_KNOWNHOST_CHECK_NOTFOUND ? "; add host to known_hosts" : "";
 				result.error_message = StringUtil::Format(
-				    "SSH host key verification failed for '%s:%d' (algorithm=%s, known_hosts=%s)", config.host,
-				    config.port, result.negotiated_algorithm, KnownHostCheckToString(check));
+				    "SSH host key verification failed for '%s:%d' (algorithm=%s, known_hosts=%s%s)", config.host,
+				    config.port, result.negotiated_algorithm, KnownHostCheckToString(check), hint);
 				return result;
 			}
 		}

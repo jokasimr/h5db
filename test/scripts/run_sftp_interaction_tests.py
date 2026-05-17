@@ -996,6 +996,27 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, msg=result.output)
         self.assertOutputContains(result, "Failed to read known_hosts file")
 
+    def test_known_hosts_missing_host_error_mentions_known_hosts(self) -> None:
+        known_hosts_without_host = self.tempdir / "known_hosts_without_host"
+        write_known_host(known_hosts_without_host, "127.0.0.2", self.password_server.port, self.rsa_host_key)
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET missing_known_host (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{known_hosts_without_host}',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(result, "known_hosts=NOTFOUND; add host to known_hosts")
+
     def test_host_key_fingerprint_mismatch_error(self) -> None:
         sql = textwrap.dedent(
             f"""
