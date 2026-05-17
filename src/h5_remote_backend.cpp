@@ -35,6 +35,7 @@
 #include "duckdb/storage/caching_file_system.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <array>
 #include <map>

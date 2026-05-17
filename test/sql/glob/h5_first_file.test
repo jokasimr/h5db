@@ -15,37 +15,37 @@ SELECT h5_first_file('test/data/no_such_exact_file.h5');
 test/data/no_such_exact_file.h5
 
 query I
-SELECT h5_first_file('test/data/glob_order/order_*.h5');
+SELECT replace(h5_first_file('test/data/glob_order/order_*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
 query I
-SELECT h5_first_file('test/data/glob_order/order_' || '*.h5');
+SELECT replace(h5_first_file('test/data/glob_order/order_' || '*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
 query I
-SELECT h5_first_file([
+SELECT replace(h5_first_file([
     'test/data/glob_order/order_2.h5',
     'test/data/glob_order/order_*.h5'
-]);
+]), '\', '/');
 ----
 test/data/glob_order/order_2.h5
 
 query I
-SELECT h5_first_file([
+SELECT replace(h5_first_file([
     'test/data/glob_order/order_*.h5',
     'test/data/glob_order/order_2.h5'
-]);
+]), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
 query I
-SELECT h5_first_file([
+SELECT replace(h5_first_file([
     'test/data/glob_order/order_*.h5',
     'test/data/glob_order/order_2.h5',
     'test/data/simple.h5'
-]::VARCHAR[3]);
+]::VARCHAR[3]), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
@@ -59,7 +59,7 @@ FROM h5_read(
 1
 
 statement ok
-PREPARE h5_first_file_varchar AS SELECT h5_first_file($1::VARCHAR);
+PREPARE h5_first_file_varchar AS SELECT replace(h5_first_file($1::VARCHAR), '\', '/');
 
 query I
 EXECUTE h5_first_file_varchar('test/data/glob_order/order_*.h5');
@@ -72,7 +72,7 @@ EXECUTE h5_first_file_varchar('test/data/simple.h5');
 test/data/simple.h5
 
 statement ok
-PREPARE h5_first_file_varchar_list AS SELECT h5_first_file($1::VARCHAR[]);
+PREPARE h5_first_file_varchar_list AS SELECT replace(h5_first_file($1::VARCHAR[]), '\', '/');
 
 query I
 EXECUTE h5_first_file_varchar_list([
@@ -96,7 +96,7 @@ statement ok
 CREATE MACRO h5_first_file_macro(path) AS h5_first_file(path);
 
 query I
-SELECT h5_first_file_macro('test/data/glob_order/order_*.h5');
+SELECT replace(h5_first_file_macro('test/data/glob_order/order_*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
@@ -104,7 +104,7 @@ statement ok
 CREATE MACRO h5_first_file_typed_macro(path VARCHAR) AS h5_first_file(path);
 
 query I
-SELECT h5_first_file_typed_macro('test/data/glob_order/order_*.h5');
+SELECT replace(h5_first_file_typed_macro('test/data/glob_order/order_*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
@@ -112,7 +112,7 @@ statement ok
 CREATE MACRO h5_first_file_concat_macro(suffix VARCHAR) AS h5_first_file('test/data/glob_order/order_' || suffix);
 
 query I
-SELECT h5_first_file_concat_macro('*.h5');
+SELECT replace(h5_first_file_concat_macro('*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
@@ -120,7 +120,7 @@ statement ok
 CREATE MACRO h5_first_file_list_macro(path VARCHAR) AS h5_first_file([path, 'test/data/simple.h5']);
 
 query I
-SELECT h5_first_file_list_macro('test/data/glob_order/order_*.h5');
+SELECT replace(h5_first_file_list_macro('test/data/glob_order/order_*.h5'), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
@@ -128,7 +128,7 @@ statement ok
 CREATE MACRO h5_first_file_default_macro(path := 'test/data/glob_order/order_*.h5') AS h5_first_file(path);
 
 query I
-SELECT h5_first_file_default_macro();
+SELECT replace(h5_first_file_default_macro(), '\', '/');
 ----
 test/data/glob_order/order_1.h5
 
