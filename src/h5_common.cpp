@@ -92,7 +92,7 @@ H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &
 }
 
 H5ExpandedFileList H5ExpandFilePattern(ClientContext &context, const std::string &pattern) {
-	if (StringUtil::StartsWith(StringUtil::Lower(pattern), "sftp://")) {
+	if (StringUtil::CIStartsWith(pattern, "sftp://")) {
 		return ExpandH5SftpFilePattern(context, pattern);
 	}
 

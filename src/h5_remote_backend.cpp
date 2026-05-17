@@ -25,6 +25,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
@@ -48,12 +49,8 @@ namespace duckdb {
 
 namespace {
 
-static bool StartsWithCI(const std::string &path, const char *prefix) {
-	return StringUtil::StartsWith(StringUtil::Lower(path), prefix);
-}
-
 static bool IsSftpPath(const std::string &path) {
-	return StartsWithCI(path, "sftp://");
+	return StringUtil::CIStartsWith(path, "sftp://");
 }
 
 static bool TryGetDuckDBFsRemoteExtension(const std::string &path, std::string &required_extension) {
@@ -120,10 +117,9 @@ private:
 
 struct H5SftpUrl {
 	std::string original_url;
-	std::string authority;
+	std::string url_authority;
 	std::string host;
 	std::string remote_path;
-	std::optional<std::string> username;
 	std::optional<int> port;
 };
 
@@ -304,15 +300,12 @@ static H5SftpUrl ParseSftpUrl(const std::string &url) {
 
 	H5SftpUrl result;
 	result.original_url = url;
-	result.authority = parsed.GetAuthority();
+	result.url_authority = parsed.GetAuthority();
 	result.remote_path = GetSftpRemotePath(parsed);
 
-	auto authority = parsed.GetAuthority();
-	auto at_pos = authority.rfind('@');
-	std::string host_port = authority;
-	if (at_pos != std::string::npos) {
-		result.username = authority.substr(0, at_pos);
-		host_port = authority.substr(at_pos + 1);
+	const auto &host_port = result.url_authority;
+	if (host_port.find('@') != std::string::npos) {
+		throw InvalidInputException("sftp URL must not contain username or password");
 	}
 
 	if (host_port.empty()) {
@@ -359,6 +352,32 @@ static std::string ToHexLower(const unsigned char *data, size_t len) {
 	return result;
 }
 
+static std::string StripBase64Padding(std::string value) {
+	while (!value.empty() && value.back() == '=') {
+		value.pop_back();
+	}
+	return value;
+}
+
+static std::optional<std::string> HostKeySha1Hex(LIBSSH2_SESSION *session) {
+	static constexpr size_t SHA1_HASH_LENGTH = 20;
+	auto *fingerprint =
+	    reinterpret_cast<const unsigned char *>(libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1));
+	if (!fingerprint) {
+		return std::nullopt;
+	}
+	return ToHexLower(fingerprint, SHA1_HASH_LENGTH);
+}
+
+static std::optional<std::string> HostKeySha256Base64(LIBSSH2_SESSION *session) {
+	static constexpr uint32_t SHA256_HASH_LENGTH = 32;
+	auto *fingerprint = reinterpret_cast<const char *>(libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256));
+	if (!fingerprint) {
+		return std::nullopt;
+	}
+	return StripBase64Padding(Blob::ToBase64(string_t(fingerprint, SHA256_HASH_LENGTH)));
+}
+
 static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &url) {
 	H5SftpConfig config;
 	config.host = url.host;
@@ -394,17 +413,15 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 		config.known_hosts_path = value.GetValue<string>();
 	}
 	if (secret.TryGetValue("host_key_fingerprint", value)) {
-		config.host_key_fingerprint = StringUtil::Lower(value.GetValue<string>());
+		auto fingerprint = value.GetValue<string>();
+		StringUtil::Trim(fingerprint);
+		config.host_key_fingerprint = std::move(fingerprint);
 	}
 	if (secret.TryGetValue("host_key_algorithms", value)) {
 		config.host_key_algorithms = value.GetValue<string>();
 	}
 	auto use_agent = secret.TryGetValue("use_agent", value) && value.GetValue<bool>();
 
-	if (url.username && *url.username != config.username) {
-		throw InvalidConfigurationException("sftp URL username '%s' does not match secret username '%s'", *url.username,
-		                                    config.username);
-	}
 	if (url.port && *url.port != config.port) {
 		throw InvalidConfigurationException("sftp URL port '%d' does not match secret port '%d'", *url.port,
 		                                    config.port);
@@ -1111,14 +1128,28 @@ private:
 		}
 
 		if (config.host_key_fingerprint) {
-			auto *fingerprint =
-			    reinterpret_cast<const unsigned char *>(libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1));
-			if (!fingerprint) {
+			const auto &expected = *config.host_key_fingerprint;
+			std::optional<std::string> actual;
+			std::string expected_normalized;
+			if (StringUtil::CIStartsWith(expected, "SHA256:")) {
+				expected_normalized = StripBase64Padding(expected.substr(std::strlen("SHA256:")));
+				actual = HostKeySha256Base64(session);
+			} else {
+				expected_normalized = expected;
+				if (expected_normalized.size() != 40) {
+					result.error_message = StringUtil::Format("Unsupported SSH host key fingerprint format for '%s:%d' "
+					                                          "(expected SHA256:<base64> or SHA1 hex)",
+					                                          config.host, config.port);
+					return result;
+				}
+				expected_normalized = StringUtil::Lower(expected_normalized);
+				actual = HostKeySha1Hex(session);
+			}
+			if (!actual) {
 				result.error_message = "Failed to compute SSH host key fingerprint";
 				return result;
 			}
-			auto actual = ToHexLower(fingerprint, 20);
-			if (actual != *config.host_key_fingerprint) {
+			if (*actual != expected_normalized) {
 				result.error_message =
 				    StringUtil::Format("SSH host key fingerprint mismatch for '%s:%d' (algorithm=%s)", config.host,
 				                       config.port, result.negotiated_algorithm);
@@ -2164,7 +2195,7 @@ H5ExpandedFileList ExpandH5SftpFilePattern(ClientContext &context, const std::st
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 	auto config = ResolveSftpConfig(context, url);
 	auto connection = GetOrCreateCachedSftpConnection(context, config);
-	result.filenames = H5SftpGlobExpander(connection, url.authority, std::move(pattern)).Expand();
+	result.filenames = H5SftpGlobExpander(connection, url.url_authority, std::move(pattern)).Expand();
 	if (result.filenames.empty()) {
 		// Match DuckDB reader semantics for local paths: if glob expansion finds
 		// nothing, fall back to treating the full input as an exact path.

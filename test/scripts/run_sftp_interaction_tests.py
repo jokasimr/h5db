@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
 import logging
 import os
@@ -194,6 +195,9 @@ class SFTPInteractionTests(unittest.TestCase):
         cls.hanging_cleanup_known_hosts = cls.tempdir / "hanging_cleanup_known_hosts"
         cls.disconnect_on_stat_known_hosts = cls.tempdir / "disconnect_on_stat_known_hosts"
         cls.password_host_key_fingerprint = hashlib.sha1(cls.rsa_host_key.asbytes()).hexdigest()
+        cls.password_host_key_sha256_fingerprint = (
+            base64.b64encode(hashlib.sha256(cls.rsa_host_key.asbytes()).digest()).decode("ascii").rstrip("=")
+        )
 
         write_known_host(cls.password_known_hosts, "127.0.0.1", cls.password_server.port, cls.rsa_host_key)
         write_known_host(cls.delayed_auth_known_hosts, "127.0.0.1", cls.delayed_auth_server.port, cls.rsa_host_key)
@@ -1040,6 +1044,25 @@ class SFTPInteractionTests(unittest.TestCase):
             f"SSH host key fingerprint mismatch for '127.0.0.1:{self.password_server.port}'",
         )
 
+    def test_host_key_fingerprint_unsupported_format_error(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET bad_fingerprint_format (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                HOST_KEY_FINGERPRINT 'not-a-fingerprint',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(result, "Unsupported SSH host key fingerprint format")
+
     def test_host_key_fingerprint_only_success(self) -> None:
         sql = textwrap.dedent(
             f"""
@@ -1059,11 +1082,55 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.output)
         self.assertNumericOutput(result, ["5"])
 
-    def test_url_username_mismatch_error(self) -> None:
+    def test_host_key_sha256_fingerprint_accepts_padding_and_case_insensitive_prefix(self) -> None:
         sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            CREATE OR REPLACE TEMPORARY SECRET mismatch_username (
+            CREATE OR REPLACE TEMPORARY SECRET fingerprint_sha256 (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                HOST_KEY_FINGERPRINT 'sha256:{self.password_host_key_sha256_fingerprint}=',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertNumericOutput(result, ["5"])
+
+    def test_host_key_sha256_fingerprint_mismatch_error(self) -> None:
+        wrong_fingerprint = (
+            "B" if self.password_host_key_sha256_fingerprint[0] != "B" else "A"
+        ) + self.password_host_key_sha256_fingerprint[1:]
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET wrong_sha256_fingerprint (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                HOST_KEY_FINGERPRINT 'SHA256:{wrong_fingerprint}',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_ls('sftp://127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertNotEqual(result.returncode, 0, msg=result.output)
+        self.assertOutputContains(
+            result,
+            f"SSH host key fingerprint mismatch for '127.0.0.1:{self.password_server.port}'",
+        )
+
+    def test_url_userinfo_is_rejected(self) -> None:
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            CREATE OR REPLACE TEMPORARY SECRET userinfo_rejected (
                 TYPE sftp,
                 SCOPE 'sftp://',
                 USERNAME 'h5db',
@@ -1071,12 +1138,12 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.password_known_hosts}',
                 PORT {self.password_server.port}
             );
-            SELECT COUNT(*) FROM h5_ls('sftp://other-user@127.0.0.1:{self.password_server.port}/simple.h5', '/');
+            SELECT COUNT(*) FROM h5_ls('sftp://h5db:secret@127.0.0.1:{self.password_server.port}/simple.h5', '/');
             """
         ).strip()
         result = self.run_sql(sql)
         self.assertNotEqual(result.returncode, 0, msg=result.output)
-        self.assertOutputContains(result, "does not match secret username 'h5db'")
+        self.assertOutputContains(result, "sftp URL must not contain username or password")
 
     def test_url_port_mismatch_error(self) -> None:
         sql = textwrap.dedent(

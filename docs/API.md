@@ -136,13 +136,13 @@ SELECT * FROM h5_read(
   `'ssh-ed25519,ecdsa-sha2-nistp256'`
 
 **Notes:**
-- `HOST_KEY_FINGERPRINT` is the lowercase hex SHA1 host-key fingerprint.
+- `HOST_KEY_FINGERPRINT` accepts OpenSSH-style SHA256 fingerprints (`SHA256:<base64>`) and SHA1 hex fingerprints.
 - Password auth via `PASSWORD` and explicit key-file auth via `KEY_PATH` with
   optional `KEY_PASSPHRASE` are also supported.
 - `USE_AGENT` uses libssh2's SSH agent support. On Unix-like systems this uses
   the agent exposed through `SSH_AUTH_SOCK`. On Windows, libssh2 uses its
   supported agent backends (for example Pageant/OpenSSH) when available.
-- If a username or port is embedded in the `sftp://` URL, it must match the selected secret.
+- `sftp://` URLs must not include usernames or passwords.
 
 ## Table Functions
 

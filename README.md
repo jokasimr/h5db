@@ -242,8 +242,7 @@ Optional SFTP secret fields:
 
 For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. For agent-based auth, use
 `USE_AGENT true`. On Unix-like systems libssh2 resolves the agent through `SSH_AUTH_SOCK`; on Windows it uses the
-supported agent backends available through libssh2. If you use `HOST_KEY_FINGERPRINT`, provide the lowercase hex SHA1
-host-key fingerprint. See [docs/API.md](docs/API.md) for the full SFTP secret reference.
+supported agent backends available through libssh2. See [docs/API.md](docs/API.md) for the full SFTP secret reference.
 
 ## Build From Source
 

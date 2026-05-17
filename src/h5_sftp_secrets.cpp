@@ -1,11 +1,27 @@
 #include "h5_functions.hpp"
 
+#include "duckdb/common/path.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/secret/secret.hpp"
 
 namespace duckdb {
 
+static bool SftpScopeContainsUserInfo(const string &scope) {
+	auto parsed = Path::FromString(scope);
+	if (StringUtil::Lower(parsed.GetScheme()) != "sftp://" || !parsed.HasAuthority()) {
+		return false;
+	}
+	return parsed.GetAuthority().find('@') != string::npos;
+}
+
 static unique_ptr<BaseSecret> CreateH5SftpSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto secret = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+
+	for (const auto &scope : input.scope) {
+		if (SftpScopeContainsUserInfo(scope)) {
+			throw InvalidInputException("sftp secret SCOPE must not contain username or password");
+		}
+	}
 
 	secret->TrySetValue("username", input);
 	secret->TrySetValue("password", input);
