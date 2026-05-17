@@ -123,126 +123,55 @@ FROM h5_tree(
 );
 ```
 
-## Remote Access
+## Multi-File Reads and Remote Access
 
-All file-opening h5db functions accept local paths or remote URLs as `filename`.
+h5db can read local files, remote files, and multi-file inputs through the same SQL functions. Multi-file
+`h5_read(...)` reads compatible datasets from each matched file and concatenates the rows file by file, so datasets
+split across many HDF5 files can be queried as one table.
 
-The table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` also accept:
-
-- a glob pattern
-- a `VARCHAR[]` of exact filenames/URLs and/or glob patterns
-
-Multi-file semantics:
-
-- a single glob expands to lexicographically sorted matches
-- list entries are expanded left-to-right
-- duplicate files are preserved and are processed more than once
-- `h5_read(...)` concatenates rows file by file
-- `h5_attributes(...)` returns one row per matched file
-- `h5_index()` is the outermost-dimension row index within each matched file, so it starts at `0` for each file
-- table `h5_tree(...)`, table `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden virtual
-  `filename` column; refer to it explicitly when you need file provenance
-- `h5_read(...)` requires compatible column definitions across all matched files
-- `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
-- scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand lists or glob patterns
-- output column names are checked using DuckDB's case-insensitive identifier matching; use `h5_alias(...)` when two
-  datasets or projected attributes would otherwise produce the same name
-
-For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's
-filesystem stack. For `sftp://` URLs, glob expansion is handled by h5db's SFTP
-backend. In both cases, h5db follows DuckDB's other multi-file reader
-semantics such as `read_parquet(...)`. In particular, recursive `**` does not
-traverse symlink directories. Globs support the usual `*`, `?`, and bracket
-classes, plus one recursive `**` segment per pattern. A pattern that matches
-no files raises an error.
-
-When you filter `h5_tree(...)` or table-valued `h5_ls(...)` by the virtual `filename` column, h5db can apply that
-filter before opening each expanded file:
+- Table-valued functions accept exact filenames, glob patterns, and `VARCHAR[]` lists of filenames or patterns.
+- Remote paths such as `https://`, `s3://`, `r2://`, `gcs://`, and `hf://` use DuckDB's filesystem stack.
+- `sftp://` paths use h5db's built-in SFTP backend and DuckDB secrets for authentication.
 
 ```sql
-SELECT path, type
-FROM h5_tree('runs/**/*.h5')
-WHERE filename LIKE '%/run_042.h5';
+-- Concatenate /counts from all matching files, showing which file each row came from
+SELECT filename, *
+FROM h5_read('runs/run_*.h5', '/counts');
 
-SELECT filename, path
-FROM h5_ls('runs/run_*.h5', '/entry')
-WHERE filename IN ('runs/run_001.h5', 'runs/run_002.h5');
-```
+-- Inspect metadata across matching files
+SELECT filename, *
+FROM h5_tree('runs/run_*.h5');
 
-This pruning applies to filename-only predicates and filename predicates inside `AND` filters that DuckDB pushes into
-the table function. Dynamic predicates from joins, semi-joins, or scalar subqueries may still open all expanded files.
-`h5_read(...)` and `h5_attributes(...)` do not currently use `filename` filters to avoid opening files.
-
-When several files contain the same HDF5 path, use `filename` to distinguish them:
-
-```sql
-SELECT filename, path
-FROM h5_tree('runs/**/*.h5')
+-- Limit the metadata listing to one path across files
+SELECT filename, *
+FROM h5_tree('runs/run_*.h5')
 WHERE path = '/entry/data';
 
+-- Mix exact files and patterns in one read
 SELECT filename, *
-FROM h5_read('runs/run_*.h5', '/entry/data');
-```
-
-- DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
-  `gs://`, and `hf://` use DuckDB's filesystem stack and benefit from DuckDB's remote caching features.
-- `sftp://` URLs are supported through h5db's built-in SFTP backend.
-- Remote opens are treated as immutable snapshots. `swmr := true` is accepted for API consistency, but remote paths do
-  not use `H5F_ACC_SWMR_READ`.
-
-To read over SFTP, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access.
-
-Available authentication methods are:
-
-- `USE_AGENT true`
-- `PASSWORD '...'`
-- `KEY_PATH '...'` with optional `KEY_PASSPHRASE '...'`
-
-Recommended default: if you already use an SSH agent / OS keychain integration, prefer `USE_AGENT true`. It avoids
-storing the SSH password or private-key passphrase in the DuckDB secret. Password and explicit key-file auth are also
-supported.
-
-Example:
-
-```sql
-CREATE OR REPLACE SECRET beamline_sftp (
-    TYPE sftp,
-    SCOPE 'sftp://beamline.example.org/',
-    USERNAME 'alice',
-    USE_AGENT true,
-    KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
-);
-```
-
-Then query the file normally:
-
-```sql
 FROM h5_read(
-    'sftp://beamline.example.org/data/run001.h5',
-    '/entry/data'
+    ['runs/calibration.h5', 'runs/run_*.h5'],
+    '/counts'
 );
 
+-- Use the same pattern with remote files
+SELECT filename, *
 FROM h5_read(
     'sftp://beamline.example.org/data/run_*.h5',
     '/entry/data'
 );
 ```
 
-SFTP secrets require:
+Use the user guide for practical examples:
 
-- `USERNAME`
-- exactly one of `PASSWORD`, `KEY_PATH`, or `USE_AGENT`
-- at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
+- [Read multiple files](docs/USER_GUIDE.md#read-multiple-files)
+- [Remote files](docs/USER_GUIDE.md#remote-files)
 
-Optional SFTP secret fields:
+Use the API reference for exact behavior and options:
 
-- `KEY_PASSPHRASE`
-- `PORT` (default `22`)
-- `HOST_KEY_ALGORITHMS` (libssh2 host-key algorithm list)
-
-For key-based auth, replace `PASSWORD` with `KEY_PATH` and optionally `KEY_PASSPHRASE`. For agent-based auth, use
-`USE_AGENT true`. On Unix-like systems libssh2 resolves the agent through `SSH_AUTH_SOCK`; on Windows it uses the
-supported agent backends available through libssh2. See [docs/API.md](docs/API.md) for the full SFTP secret reference.
+- [Remote access](docs/API.md#remote-access)
+- [Multi-file inputs and globbing](docs/API.md#multi-file-inputs-and-globbing)
+- [SFTP secrets](docs/API.md#sftp-secrets)
 
 ## Build From Source
 

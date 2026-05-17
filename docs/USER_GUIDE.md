@@ -191,8 +191,12 @@ DuckDB-backed remote schemes when the underlying DuckDB filesystem supports
 globbing:
 
 ```sql
+-- Read matching files as one table, including the hidden filename column.
+SELECT filename, *
 FROM h5_read('runs/run_*.h5', '/counts');
 
+-- Inspect matching file structures.
+SELECT filename, *
 FROM h5_tree('runs/**/*.h5');
 ```
 
@@ -328,6 +332,21 @@ ORDER BY path;
 
 This is especially useful in NeXus files, where `NX_class` tells you what a
 group means.
+
+### Rename projected attributes
+
+Use `h5_alias(...)` when the HDF5 attribute name is awkward as a SQL column name
+or would collide with another output column:
+
+```sql
+SELECT path, entry_class
+FROM h5_tree(
+    'data.h5',
+    h5_alias('entry_class', h5_attr('NX_class'))
+)
+WHERE entry_class IS NOT NULL
+ORDER BY path;
+```
 
 ### Project all attributes as one map
 

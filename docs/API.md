@@ -4,9 +4,6 @@ This document describes the public SQL functions provided by the h5db extension.
 
 ## Contents
 
-- [Remote Access](#remote-access)
-  - [Filename Patterns and Filename Lists](#filename-patterns-and-filename-lists)
-  - [SFTP Secrets](#sftp-secrets)
 - [Table Functions](#table-functions)
   - [`h5_tree(filename_or_filenames, projected_attributes...)`](#h5_treefilename_or_filenames-projected_attributes)
   - [`h5_ls(filename_or_filenames[, group_path], projected_attributes...)`](#h5_lsfilename_or_filenames-group_path-projected_attributes)
@@ -22,6 +19,12 @@ This document describes the public SQL functions provided by the h5db extension.
   - [`h5_alias(name, definition)`](#h5_aliasname-definition)
 - [Test Functions](#test-functions)
   - [`h5db_version(name)`](#h5db_versionname)
+- [Remote Access](#remote-access)
+  - [SFTP Secrets](#sftp-secrets)
+- [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing)
+  - [Expansion and Read Semantics](#expansion-and-read-semantics)
+  - [Filename Filter Pruning](#filename-filter-pruning)
+  - [Examples](#examples)
 - [Settings](#settings)
   - [`h5db_swmr_default` (BOOLEAN)](#h5db_swmr_default-boolean)
   - [`h5db_batch_size` (VARCHAR)](#h5db_batch_size-varchar)
@@ -32,148 +35,6 @@ This document describes the public SQL functions provided by the h5db extension.
 - [Performance Notes](#performance-notes)
 - [Limitations](#limitations)
 - [See Also](#see-also)
-
-## Remote Access
-
-The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
-parameter, but remote paths are opened as immutable snapshots, so `H5F_ACC_SWMR_READ` is not used there.
-
-All file-opening h5db functions accept local paths or remote URLs as `filename`.
-
-- DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
-  `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
-  when needed.
-- `sftp://` URLs are handled by h5db's built-in SFTP backend.
-- Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
-
-### Filename Patterns and Filename Lists
-
-The table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)`
-accept:
-
-- a single filename or URL (`VARCHAR`)
-- a glob pattern (`VARCHAR`)
-- a list of exact filenames/URLs and/or glob patterns (`VARCHAR[]`)
-
-Globbing is supported for local paths, for `sftp://` URLs, and for DuckDB-backed
-remote schemes when the underlying DuckDB filesystem supports globbing.
-
-**Glob syntax:**
-- `*`
-- `?`
-- bracket classes such as `[12]` or `[a-z]`
-- one recursive `**` segment per pattern
-
-**Multi-file semantics:**
-- A single glob expands to lexicographically sorted matches.
-- A `VARCHAR[]` input expands entries left-to-right.
-- Duplicate files are preserved and are processed more than once.
-- A pattern that matches no files raises an error.
-- `h5_read(...)` concatenates rows file by file.
-- `h5_attributes(...)` emits one row per matched file.
-- `h5_index()` is the outermost-dimension row index within each matched file.
-- Table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden
-  virtual `filename` column that can be referenced explicitly.
-- `filename := true` adds `filename` to the visible output schema.
-- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
-  In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
-- All matched files in `h5_read(...)` must have compatible column definitions.
-- All matched files in `h5_attributes(...)` must expose the same attributes in the same order with the same names and
-  types.
-- Scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand filename lists or glob patterns.
-- For local paths and DuckDB-backed remote schemes, glob expansion uses
-  DuckDB's filesystem stack. For `sftp://` URLs, glob expansion is handled by
-  h5db's SFTP backend.
-- In both cases, glob expansion follows DuckDB's other multi-file reader
-  semantics such as `read_parquet(...)`. In particular, recursive `**` does not
-  traverse symlink directories.
-- On Windows, HDF5 1.14.6 with its native file driver fails to open a file
-  symlink when the symlink itself is passed as the filename. h5db does not
-  resolve those paths before calling HDF5, so final-component file symlink
-  paths are not supported there.
-
-**Filename filter pruning:**
-
-`h5_tree(...)` and table-valued `h5_ls(...)` can apply selective filters on the virtual `filename` column before
-opening each expanded file. This includes hidden `filename` filters and filters on the visible renamed column when
-using `filename := 'source_file'`.
-
-Useful shapes include simple comparisons, `IN`, `LIKE`, and filename predicates inside `AND` filters, as long as DuckDB
-pushes the filter into the table function and the predicate can be evaluated from the filename alone. Dynamic filters
-whose values come from joins, semi-joins, scalar subqueries, or later query blocks may still open all expanded files.
-
-This file-open pruning currently applies only to `h5_tree(...)` and table-valued `h5_ls(...)`. `h5_read(...)` and
-`h5_attributes(...)` do not use `filename` filters to avoid opening files.
-
-**Examples:**
-
-```sql
-SELECT * FROM h5_tree('runs/**/*.h5');
-
-SELECT * FROM h5_read(
-    ['runs/run_001.h5', 'runs/run_*.h5'],
-    '/counts'
-);
-
-SELECT * FROM h5_read(
-    'sftp://beamline.example.org/data/run_*.h5',
-    '/entry/data'
-);
-
-SELECT filename, units
-FROM h5_attributes('runs/run_*.h5', '/entry/data');
-
-SELECT path, type
-FROM h5_tree('runs/**/*.h5')
-WHERE filename LIKE '%/run_042.h5';
-
-SELECT source_file, path
-FROM h5_ls('runs/run_*.h5', '/entry', filename := 'source_file')
-WHERE source_file IN ('runs/run_001.h5', 'runs/run_002.h5');
-```
-
-### SFTP Secrets
-
-Before using `sftp://` URLs, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access.
-
-**Example:**
-
-```sql
-CREATE OR REPLACE SECRET beamline_sftp (
-    TYPE sftp,
-    SCOPE 'sftp://beamline.example.org/',
-    USERNAME 'alice',
-    USE_AGENT true,
-    KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
-);
-
-SELECT * FROM h5_read(
-    'sftp://beamline.example.org/data/run001.h5',
-    '/entry/data'
-);
-```
-
-**Required secret fields:**
-- `USERNAME`
-- exactly one of `PASSWORD`, `KEY_PATH`, or `USE_AGENT`
-- at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
-
-**Optional secret fields:**
-- `KEY_PASSPHRASE`: passphrase for an encrypted private key
-- `PORT`: default `22`
-- `HOST_KEY_ALGORITHMS`: comma-separated libssh2 host-key algorithms accepted during the SSH handshake, in preference
-  order. If omitted, matching entries in `KNOWN_HOSTS_PATH` are used to prefer known host-key algorithms; otherwise
-  libssh2 uses its default host-key algorithm list. Example:
-  `'ssh-ed25519,ecdsa-sha2-nistp256'`
-
-**Notes:**
-- `HOST_KEY_FINGERPRINT` accepts OpenSSH-style SHA256 fingerprints (`SHA256:<base64>`) and SHA1 hex fingerprints.
-- Password auth via `PASSWORD` and explicit key-file auth via `KEY_PATH` with
-  optional `KEY_PASSPHRASE` are also supported.
-- `USE_AGENT` uses libssh2's SSH agent support. On Unix-like systems this uses
-  the agent exposed through `SSH_AUTH_SOCK`. On Windows, libssh2 uses its
-  supported agent backends (for example Pageant/OpenSSH) when available.
-- `sftp://` URLs must not include usernames or passwords.
 
 ## Table Functions
 
@@ -186,7 +47,8 @@ as additional columns with `h5_attr(...)`.
 
 **Parameters:**
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
-  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
+  [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
   - `h5_attr()`
   - `h5_attr(name)`
@@ -287,7 +149,8 @@ the requested group.
 
 **Parameters:**
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
-  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
+  [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
 - `group_path` (VARCHAR, optional): Group path to list. Defaults to `/` in the table form.
 - `projected_attributes` (variadic, optional): Zero or more projected attribute markers:
   - `h5_attr()`
@@ -338,7 +201,8 @@ Reads data from one or more datasets in an HDF5 file.
 
 **Parameters:**
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
-  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
+  [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
 - `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
@@ -422,7 +286,8 @@ Reads attributes from an object or the file root.
 
 **Parameters:**
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
-  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+  pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
+  [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
 - `object_path` (VARCHAR): Path to the target object, or `/` for root
 - `filename` (BOOLEAN or VARCHAR, named, optional): Add a visible filename column. `true` uses the column name
   `filename`; a string uses the provided column name instead. Without this option, hidden virtual `filename`
@@ -484,7 +349,8 @@ while another part of the query still reads every matched file.
 
 **Parameters:**
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to an HDF5 file, a glob pattern, or a list
-  of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access).
+  of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
+  [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
 
 **Returns:** `VARCHAR`
 
@@ -741,6 +607,149 @@ These functions are provided for testing and verification purposes:
 
 ### `h5db_version(name)`
 Returns the HDF5 library version being used.
+
+---
+
+## Remote Access
+
+All h5db functions that open HDF5 files accept local paths or remote URLs as `filename`.
+
+- DuckDB-backed remote schemes such as `http://`, `https://`, `s3://`, `s3a://`, `s3n://`, `r2://`, `gcs://`,
+  `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
+  when needed.
+- `sftp://` URLs are handled by h5db's built-in SFTP backend.
+- Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
+- The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
+  parameter, but remote paths are opened as immutable snapshots, so `H5F_ACC_SWMR_READ` is not used there.
+- Remote reads use DuckDB's external file cache when `enable_external_file_cache` is enabled. HDF5 metadata reads and
+  other small reads are cached as reusable byte ranges. Large raw dataset reads are routed through cached reads only up
+  to a per-query budget, currently 200 MiB; after that h5db uses direct remote reads for the rest of the query.
+
+### SFTP Secrets
+
+Before using `sftp://` URLs, create a DuckDB secret of type `sftp` whose scope matches the URL you want to access.
+
+**Example:**
+
+```sql
+CREATE OR REPLACE SECRET beamline_sftp (
+    TYPE sftp,
+    SCOPE 'sftp://beamline.example.org/',
+    USERNAME 'alice',
+    USE_AGENT true,
+    KNOWN_HOSTS_PATH '/home/alice/.ssh/known_hosts'
+);
+
+SELECT * FROM h5_read(
+    'sftp://beamline.example.org/data/run001.h5',
+    '/entry/data'
+);
+```
+
+**Required secret fields:**
+- `USERNAME`
+- exactly one of `PASSWORD`, `KEY_PATH`, or `USE_AGENT`
+- at least one of `KNOWN_HOSTS_PATH` or `HOST_KEY_FINGERPRINT`
+
+**Optional secret fields:**
+- `KEY_PASSPHRASE`: passphrase for an encrypted private key
+- `PORT`: default `22`
+- `HOST_KEY_ALGORITHMS`: comma-separated libssh2 host-key algorithms accepted during the SSH handshake, in preference
+  order. If omitted, matching entries in `KNOWN_HOSTS_PATH` are used to prefer known host-key algorithms; otherwise
+  libssh2 uses its default host-key algorithm list. Example: `'ssh-ed25519,ecdsa-sha2-nistp256'`
+
+**Notes:**
+- `HOST_KEY_FINGERPRINT` accepts OpenSSH-style SHA256 fingerprints (`SHA256:<base64>`) and SHA1 hex fingerprints.
+- Password auth via `PASSWORD` and explicit key-file auth via `KEY_PATH` with optional `KEY_PASSPHRASE` are also
+  supported.
+- `USE_AGENT` uses libssh2's SSH agent support. On Unix-like systems this uses the agent exposed through
+  `SSH_AUTH_SOCK`. On Windows, libssh2 uses its supported agent backends (for example Pageant/OpenSSH) when available.
+- `sftp://` URLs must not include usernames or passwords.
+
+---
+
+## Multi-File Inputs and Globbing
+
+The table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept:
+
+- a single filename or URL (`VARCHAR`)
+- a glob pattern (`VARCHAR`)
+- a list of exact filenames/URLs and/or glob patterns (`VARCHAR[]`)
+
+Globbing is supported for local paths, for `sftp://` URLs, and for DuckDB-backed remote schemes when the underlying
+DuckDB filesystem supports globbing.
+
+**Glob syntax:**
+- `*`
+- `?`
+- bracket classes such as `[12]` or `[a-z]`
+- one recursive `**` segment per pattern
+
+### Expansion and Read Semantics
+
+- A single glob expands to lexicographically sorted matches.
+- A `VARCHAR[]` input expands entries left-to-right.
+- Duplicate files are preserved and are processed more than once.
+- A pattern that matches no files raises an error.
+- `h5_read(...)` concatenates rows file by file.
+- `h5_attributes(...)` emits one row per matched file.
+- `h5_index()` is the outermost-dimension row index within each matched file.
+- Table-valued `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` expose a hidden
+  virtual `filename` column that can be referenced explicitly.
+- `filename := true` adds `filename` to the visible output schema.
+- `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
+  In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
+- All matched files in `h5_read(...)` must have compatible column definitions.
+- All matched files in `h5_attributes(...)` must expose the same attributes in the same order with the same names and
+  types.
+- Scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand filename lists or glob patterns.
+- For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's filesystem stack. For `sftp://` URLs,
+  glob expansion is handled by h5db's SFTP backend.
+- In both cases, glob expansion follows DuckDB's other multi-file reader semantics such as `read_parquet(...)`. In
+  particular, recursive `**` does not traverse symlink directories.
+- On Windows, HDF5 1.14.6 with its native file driver fails to open a file symlink when the symlink itself is passed as
+  the filename. h5db does not resolve those paths before calling HDF5, so final-component file symlink paths are not
+  supported there.
+
+### Filename Filter Pruning
+
+`h5_tree(...)` and table-valued `h5_ls(...)` can apply selective filters on the virtual `filename` column before
+opening each expanded file. This includes hidden `filename` filters and filters on the visible renamed column when using
+`filename := 'source_file'`.
+
+Useful shapes include simple comparisons, `IN`, `LIKE`, and filename predicates inside `AND` filters, as long as DuckDB
+pushes the filter into the table function and the predicate can be evaluated from the filename alone. Dynamic filters
+whose values come from joins, semi-joins, scalar subqueries, or later query blocks may still open all expanded files.
+
+This file-open pruning currently applies only to `h5_tree(...)` and table-valued `h5_ls(...)`. `h5_read(...)` and
+`h5_attributes(...)` do not use `filename` filters to avoid opening files.
+
+### Examples
+
+```sql
+SELECT * FROM h5_tree('runs/**/*.h5');
+
+SELECT * FROM h5_read(
+    ['runs/run_001.h5', 'runs/run_*.h5'],
+    '/counts'
+);
+
+SELECT * FROM h5_read(
+    'sftp://beamline.example.org/data/run_*.h5',
+    '/entry/data'
+);
+
+SELECT filename, units
+FROM h5_attributes('runs/run_*.h5', '/entry/data');
+
+SELECT path, type
+FROM h5_tree('runs/**/*.h5')
+WHERE filename LIKE '%/run_042.h5';
+
+SELECT source_file, path
+FROM h5_ls('runs/run_*.h5', '/entry', filename := 'source_file')
+WHERE source_file IN ('runs/run_001.h5', 'runs/run_002.h5');
+```
 
 ---
 
