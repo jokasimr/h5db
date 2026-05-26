@@ -10,6 +10,7 @@ import numpy as np
 ROW_COUNTS = [1, 15, 16, 17, 31, 32, 33]
 INNER_SHAPE = (4, 4)
 CHUNK_ROWS = 16
+EARLY_STOP_ROWS = 70_000
 
 
 def make_data(rows: int, base: int) -> np.ndarray:
@@ -24,5 +25,8 @@ with h5py.File(output_path, "w") as f:
         grp = f.create_group(f"rows_{rows}")
         grp.create_dataset("contig", data=make_data(rows, 0))
         grp.create_dataset("chunked", data=make_data(rows, 10_000), chunks=(min(rows, CHUNK_ROWS),) + INNER_SHAPE)
+
+    early_stop = f.create_group("early_stop_parallel")
+    early_stop.create_dataset("value", data=np.arange(EARLY_STOP_ROWS, dtype=np.int64), chunks=(1024,))
 
 print(f"Created {output_path.name} successfully!")

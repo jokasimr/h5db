@@ -49,8 +49,6 @@ static T &GetStructChild(unique_ptr<T> &child) {
 	return *child;
 }
 
-static constexpr idx_t H5_READ_LOGICAL_PARTITION_MULTIPLIER = 10;
-static constexpr idx_t H5_READ_LOGICAL_PARTITION_SIZE = H5_READ_LOGICAL_PARTITION_MULTIPLIER * STANDARD_VECTOR_SIZE;
 static constexpr idx_t H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
 
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
@@ -271,7 +269,7 @@ struct H5ReadGlobalState {
 	vector<LocalColumnIdx> cache_refresh_order;  // Refreshable regular columns in file-friendly order
 
 	// Position tracking
-	// position is the next globally unclaimed logical partition start.
+	// position is the next globally unclaimed scan range start.
 	std::atomic<idx_t> position {0};
 	std::atomic<idx_t> position_done {0}; // All rows in [0, position_done) have been returned or filtered out
 
@@ -297,11 +295,6 @@ struct H5ReadGlobalState {
 	// No destructor needed - RAII wrappers handle all cleanup automatically
 };
 
-struct H5ReadLocalState {
-	idx_t position = 0;
-	idx_t position_end = 0;
-};
-
 struct H5ReadMultiFileGlobalState : public GlobalTableFunctionState {
 	vector<column_t> data_column_ids;
 	vector<idx_t> data_output_column_positions;
@@ -310,7 +303,6 @@ struct H5ReadMultiFileGlobalState : public GlobalTableFunctionState {
 	shared_ptr<H5ReadGlobalState> current_file;
 	idx_t current_file_idx = 0;
 	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
-	vector<idx_t> partition_bases;
 	std::mutex current_file_lock;
 
 	idx_t MaxThreads() const override {
@@ -319,10 +311,8 @@ struct H5ReadMultiFileGlobalState : public GlobalTableFunctionState {
 };
 
 struct H5ReadMultiFileLocalState : public LocalTableFunctionState {
-	unique_ptr<H5ReadLocalState> file_local_state;
 	shared_ptr<H5ReadGlobalState> file;
 	idx_t file_idx = 0;
-	idx_t partition_base = 0;
 };
 
 // =============================================================================
@@ -1918,10 +1908,6 @@ static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_range
 	return {false, 0, 0}; // no range after position
 }
 
-static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position, idx_t batch_size) {
-	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), batch_size);
-}
-
 static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_ranges, idx_t position) {
 	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), NumericLimits<idx_t>::Maximum());
 }
@@ -1934,45 +1920,14 @@ static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
 	return ChunkCache::MAX_CHUNKS;
 }
 
-static idx_t GetLogicalPartitionStart(idx_t position) {
-	return (position / H5_READ_LOGICAL_PARTITION_SIZE) * H5_READ_LOGICAL_PARTITION_SIZE;
-}
-
-static bool ClaimNextPartition(H5ReadGlobalState &gstate, H5ReadLocalState &lstate) {
+static RangeSelection ClaimNextRange(H5ReadGlobalState &gstate, idx_t num_rows) {
 	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
 	auto position = gstate.position.load();
-	auto next_range = NextRangeFrom(gstate.valid_row_ranges, position, 1);
-	if (!next_range.has_data) {
-		return false;
+	auto range = NextRangeFrom(gstate.valid_row_ranges, position, num_rows, gstate.scan_batch_size);
+	if (!range.has_data) {
+		return {false, 0, 0};
 	}
-
-	// gstate.position advances in logical partition units. lstate.position starts
-	// at the first valid row inside the claimed partition, while lstate.position_end
-	// remains the exclusive logical partition boundary.
-	auto partition_start = GetLogicalPartitionStart(next_range.position);
-	D_ASSERT(partition_start >= position);
-	lstate.position = next_range.position;
-	lstate.position_end = partition_start + H5_READ_LOGICAL_PARTITION_SIZE;
-	gstate.position.store(lstate.position_end);
-	return true;
-}
-
-// Helper function to determine the next data range to read
-static RangeSelection GetNextDataRange(H5ReadGlobalState &gstate, H5ReadLocalState &lstate, idx_t num_rows) {
-	if (lstate.position == lstate.position_end) {
-		if (!ClaimNextPartition(gstate, lstate)) {
-			return {false, 0, 0};
-		}
-	}
-
-	auto partition_end = MinValue<idx_t>(lstate.position_end, num_rows);
-	auto range = NextRangeFrom(gstate.valid_row_ranges, lstate.position, partition_end, gstate.scan_batch_size);
-	D_ASSERT(range.has_data);
-
-	lstate.position = range.position + range.to_read;
-	if (!NextRangeFrom(gstate.valid_row_ranges, lstate.position, partition_end, 1).has_data) {
-		lstate.position = lstate.position_end;
-	}
+	gstate.position.store(range.position + range.to_read);
 	return range;
 }
 
@@ -2259,7 +2214,7 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
-	// Non-cached path: fall back to direct HDF5 read
+	// Non-cached path: direct HDF5 read for uncached data types/layouts.
 	// Access RAII-wrapped handles from state
 	hid_t dataset_id = state.dataset.get();
 	hid_t file_space = state.file_space.get();
@@ -2324,11 +2279,10 @@ static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnSta
 }
 
 static void H5ReadSingleFileScan(ClientContext &context, const H5ReadSingleFileBindView &bind_data,
-                                 H5ReadGlobalState &gstate, H5ReadLocalState &lstate, DataChunk &output) {
+                                 H5ReadGlobalState &gstate, DataChunk &output) {
 	ThrowIfInterrupted(context);
 
-	// Step 2: Determine next data range to read
-	auto range_selection = GetNextDataRange(gstate, lstate, bind_data.num_rows);
+	auto range_selection = ClaimNextRange(gstate, bind_data.num_rows);
 	if (!range_selection.has_data) {
 		output.SetCardinality(0);
 		return;
@@ -2420,10 +2374,8 @@ static void SetCurrentH5ReadFile(ClientContext &context, const H5ReadBindData &b
 
 static void AttachLocalStateToCurrentFile(const H5ReadMultiFileGlobalState &gstate, H5ReadMultiFileLocalState &lstate) {
 	D_ASSERT(gstate.current_file);
-	lstate.file_local_state = make_uniq<H5ReadLocalState>();
 	lstate.file = gstate.current_file;
 	lstate.file_idx = gstate.current_file_idx;
-	lstate.partition_base = gstate.partition_bases[gstate.current_file_idx];
 }
 
 static void AdvanceCurrentH5ReadFile(ClientContext &context, const H5ReadBindData &bind_data,
@@ -2462,15 +2414,6 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	}
 	D_ASSERT(!bind_data.file_bind_data.empty());
 	SetCurrentH5ReadFile(context, bind_data, *result, 0);
-	result->partition_bases.resize(bind_data.file_bind_data.size());
-	idx_t next_partition_base = 0;
-	for (idx_t file_idx = 0; file_idx < bind_data.file_bind_data.size(); file_idx++) {
-		result->partition_bases[file_idx] = next_partition_base;
-		auto file_rows = bind_data.file_bind_data[file_idx].num_rows;
-		auto partition_count =
-		    MaxValue<idx_t>(1, (file_rows + H5_READ_LOGICAL_PARTITION_SIZE - 1) / H5_READ_LOGICAL_PARTITION_SIZE);
-		next_partition_base += partition_count;
-	}
 	return result;
 }
 
@@ -2513,11 +2456,11 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto &lstate = data.local_state->Cast<H5ReadMultiFileLocalState>();
 
 	// A local scan state stays attached to one file across repeated scan calls.
-	// When that local state reaches EOF, it advances the current file if
-	// nobody else has already done so. Other threads that still hold older file
-	// states can finish their claimed partitions while new threads move on.
+	// When that file reaches EOF, it advances the current file if nobody else
+	// has already done so. Other threads that still hold older file states can
+	// finish their claimed ranges while new threads move on.
 	while (true) {
-		if (!lstate.file_local_state) {
+		if (!lstate.file) {
 			std::lock_guard<std::mutex> lock(gstate.current_file_lock);
 			if (gstate.current_file_idx >= bind_data.file_bind_data.size()) {
 				output.SetCardinality(0);
@@ -2528,8 +2471,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 		auto file_idx = lstate.file_idx;
 		auto file = lstate.file;
-		H5ReadSingleFileScan(context, GetSingleFileBindView(bind_data, file_idx), *file, *lstate.file_local_state,
-		                     output);
+		H5ReadSingleFileScan(context, GetSingleFileBindView(bind_data, file_idx), *file, output);
 
 		if (output.size() > 0) {
 			H5ReadPopulateFilenameColumns(bind_data, file_idx, gstate, output);
@@ -2537,8 +2479,6 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 			return;
 		}
 
-		D_ASSERT(lstate.file_local_state);
-		lstate.file_local_state.reset();
 		lstate.file.reset();
 
 		{
@@ -2669,24 +2609,6 @@ static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, cons
 	return make_uniq<NodeStatistics>(bind_data.total_num_rows);
 }
 
-static OperatorPartitionData GetSingleFilePartitionData(const H5ReadLocalState &lstate) {
-	D_ASSERT(lstate.position_end >= H5_READ_LOGICAL_PARTITION_SIZE);
-	D_ASSERT(lstate.position_end % H5_READ_LOGICAL_PARTITION_SIZE == 0);
-	return OperatorPartitionData(lstate.position_end / H5_READ_LOGICAL_PARTITION_SIZE - 1);
-}
-
-static OperatorPartitionData H5ReadGetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input) {
-	if (input.partition_info.RequiresPartitionColumns()) {
-		throw InternalException("h5_read::GetPartitionData: partition columns not supported");
-	}
-	auto &lstate = input.local_state->Cast<H5ReadMultiFileLocalState>();
-	if (!lstate.file_local_state) {
-		throw InternalException("h5_read::GetPartitionData: missing local scan state for non-empty output chunk");
-	}
-	auto inner_partition = GetSingleFilePartitionData(*lstate.file_local_state);
-	return OperatorPartitionData(lstate.partition_base + inner_partition.batch_index);
-}
-
 static virtual_column_map_t H5ReadGetVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
 	virtual_column_map_t result;
 	if (!bind_data_p || !bind_data_p->Cast<H5ReadBindData>().visible_filename_idx.has_value()) {
@@ -2720,7 +2642,12 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// Set cardinality function for query optimizer
 	h5_read_function.cardinality = H5ReadCardinality;
 	h5_read_function.init_local = H5ReadInitLocal;
-	h5_read_function.get_partition_data = H5ReadGetPartitionData;
+	// Do not register get_partition_data for now. The previous implementation
+	// derived batch indexes from logical partitions owned by a local scan state
+	// across Scan() calls. That made early-stopping plans able to abandon a
+	// partition while still blocking shared cache progress for later ranges.
+	// Reintroduce this only with a design that does not make cache progress
+	// depend on a thread returning to Scan() after it has produced a chunk.
 	h5_read_function.get_virtual_columns = H5ReadGetVirtualColumns;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_read_function)));
 }

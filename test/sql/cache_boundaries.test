@@ -80,5 +80,45 @@ FROM cache_boundary_tmp;
 statement ok
 DROP TABLE cache_boundary_tmp;
 
+# Regression coverage for parallel scans that stop early. These used to spin in
+# the shared chunk-cache path when later workers claimed ranges beyond the two
+# cached windows before earlier ranges advanced position_done.
+statement ok
+PRAGMA threads=8;
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT value
+  FROM h5_read('test/data/cache_boundaries.h5', '/early_stop_parallel/value'), (SELECT 1 AS c)
+  LIMIT 5
+) t;
+----
+5
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT value
+  FROM h5_read('test/data/cache_boundaries.h5', '/early_stop_parallel/value')
+  WHERE value >= 0
+  LIMIT 5
+) t;
+----
+5
+
+statement ok
+SET preserve_insertion_order=false;
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT value
+  FROM h5_read('test/data/cache_boundaries.h5', '/early_stop_parallel/value')
+  LIMIT 5
+) t;
+----
+5
+
+statement ok
+RESET preserve_insertion_order;
+
 statement ok
 RESET h5db_batch_size;

@@ -1,5 +1,5 @@
 # name: test/sql/batch_index_plan.test
-# description: Planner regression tests for h5_read batch-index support
+# description: Planner regression tests for h5_read sink plans without table-function batch indexes
 # group: [sql]
 
 require h5db
@@ -14,7 +14,7 @@ query TT
 EXPLAIN CREATE TEMP TABLE tmp_h5 AS
 SELECT * FROM h5_read('test/data/simple.h5', '/integers');
 ----
-physical_plan	<REGEX>:.*BATCH_CREATE_TABLE_AS.*H5_READ.*
+physical_plan	<REGEX>:.*CREATE_TABLE_AS.*H5_READ.*
 
 statement ok
 CREATE TEMP TABLE tmp_insert(i INTEGER);
@@ -23,14 +23,14 @@ query TT
 EXPLAIN INSERT INTO tmp_insert
 SELECT integers FROM h5_read('test/data/simple.h5', '/integers');
 ----
-physical_plan	<REGEX>:.*BATCH_INSERT.*H5_READ.*
+physical_plan	<REGEX>:.*INSERT.*H5_READ.*
 
 query TT
 EXPLAIN COPY (
     SELECT * FROM h5_read('test/data/simple.h5', '/integers')
 ) TO 'tmp_h5_batch_index.csv';
 ----
-physical_plan	<REGEX>:.*BATCH_COPY_TO_FILE.*H5_READ.*
+physical_plan	<REGEX>:.*COPY_TO_FILE.*H5_READ.*
 
 statement ok
 CREATE TEMP TABLE tmp_h5_glob AS
