@@ -11,6 +11,7 @@ ROW_COUNTS = [1, 15, 16, 17, 31, 32, 33]
 INNER_SHAPE = (4, 4)
 CHUNK_ROWS = 16
 EARLY_STOP_ROWS = 70_000
+MIXED_WIDTH_ROWS = 40
 
 
 def make_data(rows: int, base: int) -> np.ndarray:
@@ -28,5 +29,13 @@ with h5py.File(output_path, "w") as f:
 
     early_stop = f.create_group("early_stop_parallel")
     early_stop.create_dataset("value", data=np.arange(EARLY_STOP_ROWS, dtype=np.int64), chunks=(1024,))
+
+    mixed_width = f.create_group("mixed_width")
+    mixed_width.create_dataset(
+        "wide",
+        data=make_data(MIXED_WIDTH_ROWS, 20_000),
+        chunks=(CHUNK_ROWS,) + INNER_SHAPE,
+    )
+    mixed_width.create_dataset("narrow", data=np.arange(MIXED_WIDTH_ROWS, dtype=np.int64), chunks=(CHUNK_ROWS,))
 
 print(f"Created {output_path.name} successfully!")

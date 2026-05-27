@@ -145,8 +145,8 @@ echo -e "${GREEN}[17/28] Generating cache_boundaries.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_cache_boundaries_test.py)
 
 echo ""
-echo -e "${GREEN}[18/28] Generating partition_ownership.h5${NC}"
-(cd test/data && "$PYTHON_BIN" create_partition_ownership_test.py)
+echo -e "${GREEN}[18/28] Generating cache_progress.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_cache_progress_test.py)
 
 echo ""
 echo -e "${GREEN}[19/28] Generating sparse_pushdown_cache.h5${NC}"
@@ -233,7 +233,7 @@ echo "    - names_edge_cases.h5     (dataset name edge cases)"
 echo "    - multidim_mismatch.h5    (multidim row-count mismatch)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"
 echo "    - cache_boundaries.h5     (regular cache row-count boundaries)"
-echo "    - partition_ownership.h5  (logical partition ownership boundaries)"
+echo "    - cache_progress.h5       (h5_read cache-progress boundaries)"
 echo "    - sparse_pushdown_cache.h5 (sparse pushdown cache coverage)"
 echo "    - sparse_partition_pushdown.h5 (sparse pushdown across logical partitions)"
 echo "    - wide_few_rows.h5        (wide-row cache/threading coverage)"

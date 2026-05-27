@@ -1,12 +1,141 @@
-# Larger Logical Partitions For `h5_read` Batch Indexing
+# Archived: Larger Logical Partitions For `h5_read` Batch Indexing
 
 ## Status
 
-Proposed design.
+Archived historical design note. This document does not describe the current
+`h5_read` implementation.
+
+`h5_read` previously registered DuckDB `get_partition_data` using logical
+partitions owned by local scan states. That implementation has been removed.
+The current implementation does not register `get_partition_data`, because the
+old ownership model could leave a thread outside `Scan()` while its abandoned
+partition still blocked shared cache progress for later ranges.
+
+The old `partition_ownership` regression tests were replaced by
+`cache_progress` tests that preserve useful boundary and ordered-sink coverage
+without asserting the removed batch-index behavior.
+
+Keep this file only as background for future work on a replacement design. Any
+new implementation must avoid coupling shared cache progress to a thread
+returning to `Scan()` after producing a chunk.
+
+The rest of this note is preserved mostly as written. Phrases such as "current
+implementation" below refer to the removed partition-based implementation, not
+to the current source tree.
+
+## Why the previous design was removed
+
+The failed design coupled two mechanisms that had different lifetime
+requirements:
+
+- DuckDB batch-index ownership: a local scan state claimed a logical partition
+  and `get_partition_data` kept reporting that partition until the local state
+  exhausted it.
+- h5_read cache progress: numeric regular columns used a small shared cache that
+  could only advance once all earlier claimed row ranges had been returned or
+  skipped.
+
+That coupling only works if DuckDB keeps calling `Scan()` on every local state
+until its owned partition is exhausted. DuckDB does not promise that. A plan may
+stop consuming a source after a scan call has returned a chunk, for example due
+to `LIMIT`, order-preserving collection, a cross product that already has enough
+rows, cancellation, or a downstream error.
+
+The failure sequence was:
+
+1. A thread claimed a logical partition and returned the first chunk from that
+   partition.
+2. The query stopped calling `Scan()` on that local state before the rest of the
+   partition was returned or skipped.
+3. The unvisited tail of the partition kept `position_done` behind the cache
+   refresh point.
+4. Other threads had already claimed later ranges and needed cache windows past
+   the current shared cache.
+5. Cache refresh could not advance, because the oldest incomplete range belonged
+   to a local state that might never re-enter `Scan()`.
+
+This was not primarily a lost wakeup in `someone_is_fetching`. Waiting threads
+could be notified correctly and still be stuck, because the condition required
+for shared cache progress had become impossible: the thread that owned the
+missing earlier work had left the scan path.
+
+## Alternatives considered
+
+### Add a direct-read fallback
+
+Another option was to let a thread bypass the shared cache and read directly
+when its requested range is outside the cache windows and cache progress is
+blocked.
+
+That would avoid some hangs, but it hides the broken ownership invariant rather
+than fixing it. It also risks duplicate reads, worse performance on remote or
+chunked inputs, and a more complex set of correctness paths: cached read,
+direct read, and transitions between them.
+
+### Make chunk buffers thread-local
+
+A larger refactor would give each local scan state its own chunk buffers. That
+removes most shared-cache coordination, and a thread that leaves `Scan()` no
+longer owns shared cache progress.
+
+The downside is bounded-memory behavior. With large HDF5 chunks and many DuckDB
+threads, one chunk buffer per thread per projected column can become expensive.
+It can also delay parallel startup: later threads may wait while earlier threads
+fetch their first chunks. A production version would likely need the buffers to
+be managed by DuckDB's buffer manager so memory pressure can evict or spill
+them. That is a larger design than was needed for the immediate correctness
+fix.
+
+### Add small per-thread caches backed by the shared cache
+
+We also considered giving each thread a small local cache, roughly one
+partition-sized window, and using the shared cache only to fill that local cache.
+That would avoid a thread holding a shared-cache partition after returning a
+chunk.
+
+The problem is that the shared cache can still be unable to provide the needed
+window unless there is a fallback path or a more general cache design. With
+fallbacks, the implementation again risks duplicate reads and multiple
+correctness paths. Without fallbacks, it can recreate the same no-progress
+condition in a different form.
+
+### Replace the two-window cache with a bounded keyed shared cache
+
+A more general shared cache could be keyed by dataset and row/chunk range, with
+bounded memory, waiters for in-flight fetches, and eviction independent of scan
+order. That is likely a better long-term direction if h5_read needs both maximum
+scan performance and strict memory bounds.
+
+The drawback is complexity. The implementation needs correct eviction,
+refcounting or pinning, duplicate-read prevention, and careful behavior under
+early stop, cancellation, and errors. If it still needs direct-read fallback
+under pressure, it inherits some drawbacks of the fallback approach.
+
+### Remove `get_partition_data` and logical partition ownership
+
+The chosen fix was to remove the `get_partition_data` registration and the
+logical partition ownership mechanism.
+
+This is the smallest robust fix because no local scan state owns a larger
+logical partition across `Scan()` calls. Once a scan call returns a chunk, the
+source no longer depends on that local state returning later to release a batch
+index or unblock cache progress. The shared cache still has coordination, but it
+is no longer coupled to abandoned logical partitions.
+
+The tradeoff is that ordered sinks no longer get h5_read-specific batch indexes,
+so some `CTAS`, `INSERT`, `COPY`, and order-preserving result paths may use less
+parallel ordered-sink machinery than the partitioned design intended. That is a
+performance tradeoff, not a correctness risk. The corresponding tests were
+renamed from `partition_ownership` to `cache_progress` to keep boundary and
+ordered-sink coverage without asserting removed batch-index behavior.
+
+This decision is intentionally conservative. A future `get_partition_data`
+implementation should be treated as a new design, not as a small restoration of
+the removed partition-ownership state machine.
 
 ## Summary
 
-`h5_read` currently implements DuckDB table-function `get_partition_data` by returning the start row of the most
+At the time this note was written, `h5_read` implemented DuckDB table-function `get_partition_data` by returning the start row of the most
 recent scan chunk. In practice that means one logical batch transition per output `DataChunk`, which is usually one
 transition per `STANDARD_VECTOR_SIZE` rows.
 

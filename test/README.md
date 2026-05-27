@@ -73,7 +73,7 @@ The harness repeatedly exercises:
 - index and RSE pushdown intersections
 - chunk-cache boundary cases
 - sparse pushdown on cached columns
-- logical partition ownership / batch-index plans
+- cache-progress boundaries after removing `get_partition_data`
 - large parallel `UNION ALL` scans
 - randomized query interrupts
 

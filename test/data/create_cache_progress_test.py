@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Create a fixture for logical partition ownership boundary tests."""
+"""Create a fixture for h5_read cache-progress boundary tests."""
 
 import h5py
 import numpy as np
 
 
-LOGICAL_PARTITION_SIZE = 10 * 2048
+CACHE_PROGRESS_BOUNDARY = 10 * 2048
 ROW_COUNTS = [
-    LOGICAL_PARTITION_SIZE - 1,
-    LOGICAL_PARTITION_SIZE,
-    LOGICAL_PARTITION_SIZE + 1,
-    2 * LOGICAL_PARTITION_SIZE,
-    2 * LOGICAL_PARTITION_SIZE + 1,
+    CACHE_PROGRESS_BOUNDARY - 1,
+    CACHE_PROGRESS_BOUNDARY,
+    CACHE_PROGRESS_BOUNDARY + 1,
+    2 * CACHE_PROGRESS_BOUNDARY,
+    2 * CACHE_PROGRESS_BOUNDARY + 1,
 ]
 
 
 def main() -> None:
-    with h5py.File("partition_ownership.h5", "w") as handle:
+    with h5py.File("cache_progress.h5", "w") as handle:
         for row_count in ROW_COUNTS:
             values = np.arange(row_count, dtype=np.int32)
             chunk_rows = min(row_count, 1024) if row_count > 0 else 1

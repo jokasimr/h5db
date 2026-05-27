@@ -582,8 +582,12 @@ h5db/
 ### Key Files
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
-- **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner
-- **`src/h5_read.cpp`** also owns `get_partition_data` for ordered batch sinks (`CTAS`, `INSERT`, `COPY`)
+- **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner, shared chunk-cache coordination, and
+  multi-file scan wrapper
+- **`src/h5_read.cpp`** intentionally does not currently register DuckDB `get_partition_data`. An earlier
+  partition-based implementation was removed because early-stopping plans could abandon a partition while still
+  blocking shared cache progress. Reintroduce it only with a design that does not make cache progress depend on a
+  local scan state returning after it has produced a chunk.
 - **`src/h5_remote_backend.cpp`**: DuckDB-backed remote access plus `sftp://` backend
 - **`src/h5_remote_vfd.cpp`**: HDF5 VFD integration for remote files
 - **`src/h5_sftp_secrets.cpp`**: registration and validation for DuckDB `TYPE sftp` secrets

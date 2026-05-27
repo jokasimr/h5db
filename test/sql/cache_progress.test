@@ -1,0 +1,182 @@
+# name: test/sql/cache_progress.test
+# description: h5_read cache-progress boundary and sink-plan regression coverage
+# group: [sql]
+
+require h5db
+
+# h5_read previously implemented get_partition_data with logical partition
+# ownership and table-function batch indexes. That path was removed because a
+# plan that stopped early could abandon a partition while still blocking shared
+# cache progress. These tests keep the useful boundary and sink-plan coverage
+# without asserting the old partition ownership or batch-index behavior.
+
+statement ok
+PRAGMA threads=8;
+
+statement ok
+SET preserve_insertion_order=true;
+
+query III
+SELECT COUNT(*), MIN(rows_20479), MAX(rows_20479)
+FROM h5_read('test/data/cache_progress.h5', '/rows_20479');
+----
+20479	0	20478
+
+query III
+SELECT COUNT(*), MIN(rows_20480), MAX(rows_20480)
+FROM h5_read('test/data/cache_progress.h5', '/rows_20480');
+----
+20480	0	20479
+
+query III
+SELECT COUNT(*), MIN(rows_20481), MAX(rows_20481)
+FROM h5_read('test/data/cache_progress.h5', '/rows_20481');
+----
+20481	0	20480
+
+query I
+SELECT rows_20481
+FROM h5_read('test/data/cache_progress.h5', '/rows_20481')
+ORDER BY rows_20481
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+query IIIII
+SELECT COUNT(*), MIN(index), MAX(index), MIN(rows_40961), MAX(rows_40961)
+FROM h5_read('test/data/cache_progress.h5', h5_index(), '/rows_40961')
+WHERE index >= 20478 AND index <= 20482;
+----
+5	20478	20482	20478	20482
+
+# Exact old failure shape: a relatively large h5_read scan cross joined with a
+# scalar h5_read scan, with LIMIT abandoning the large scan after the first
+# vector. The former partition-ownership path could leave a worker waiting for
+# cache progress after the scan was abandoned.
+query II
+SELECT v.rows_40961, s.scalar_int
+FROM h5_read('test/data/cache_progress.h5', '/rows_40961') v
+CROSS JOIN (
+    SELECT scalar_int
+    FROM h5_read('test/data/empty_scalar.h5', '/scalar_int')
+) s
+LIMIT 5;
+----
+0	7
+1	7
+2	7
+3	7
+4	7
+
+# Regression coverage for the plan shape that exposed the old cache-progress
+# bug: a large h5_read scan cross-produced with one-row table functions.
+query IIIII
+SELECT
+    COUNT(*),
+    MIN(v.rows_20481),
+    MAX(v.rows_20481),
+    MIN(s.scalar_int),
+    MAX(strlen(a.string_attr))
+FROM h5_read('test/data/cache_progress.h5', '/rows_20481') v,
+     (SELECT scalar_int FROM h5_read('test/data/empty_scalar.h5', '/scalar_int')) s,
+     (SELECT string_attr FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs')) a;
+----
+20481	0	20480	7	11
+
+# Keep a compact mixed plan-shape test with a CTE, a real join, cross joins,
+# ORDER BY, and LIMIT. This is aimed at source-lifecycle regressions rather
+# than value decoding.
+query III
+WITH events AS (
+    SELECT row_id, rows_40961
+    FROM h5_read(
+        'test/data/cache_progress.h5',
+        h5_alias('row_id', h5_index()),
+        '/rows_40961'
+    )
+),
+selected(row_id) AS (
+    VALUES (20478), (20479), (20480)
+),
+scalar_param AS (
+    SELECT scalar_int
+    FROM h5_read('test/data/empty_scalar.h5', '/scalar_int')
+),
+attr_param AS (
+    SELECT int32_attr
+    FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs')
+)
+SELECT
+    e.row_id,
+    e.rows_40961 + scalar_param.scalar_int,
+    attr_param.int32_attr
+FROM events e
+JOIN selected USING (row_id)
+CROSS JOIN scalar_param
+CROSS JOIN attr_param
+ORDER BY e.row_id
+LIMIT 3;
+----
+20478	20485	123456
+20479	20486	123456
+20480	20487	123456
+
+statement ok
+CREATE TEMP TABLE cache_progress_ctas AS
+SELECT * FROM h5_read('test/data/cache_progress.h5', '/rows_40961');
+
+query III
+SELECT COUNT(*), MIN(rows_40961), MAX(rows_40961)
+FROM cache_progress_ctas;
+----
+40961	0	40960
+
+query I
+SELECT rows_40961
+FROM cache_progress_ctas
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+statement ok
+DROP TABLE cache_progress_ctas;
+
+statement ok
+CREATE TEMP TABLE cache_progress_insert(val INTEGER);
+
+statement ok
+INSERT INTO cache_progress_insert
+SELECT rows_20481 FROM h5_read('test/data/cache_progress.h5', '/rows_20481');
+
+query III
+SELECT COUNT(*), MIN(val), MAX(val)
+FROM cache_progress_insert;
+----
+20481	0	20480
+
+query I
+SELECT val
+FROM cache_progress_insert
+LIMIT 3 OFFSET 20478;
+----
+20478
+20479
+20480
+
+statement ok
+DROP TABLE cache_progress_insert;
+
+statement ok
+COPY (
+    SELECT * FROM h5_read('test/data/cache_progress.h5', '/rows_20481')
+) TO 'tmp_cache_progress.csv' (FORMAT csv, HEADER false);
+
+query III
+SELECT COUNT(*), MIN(rows_20481), MAX(rows_20481)
+FROM read_csv('tmp_cache_progress.csv', columns={'rows_20481': 'INTEGER'}, header=false);
+----
+20481	0	20480

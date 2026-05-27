@@ -6,7 +6,7 @@ This script repeatedly exercises the higher-risk h5_read paths:
 - projection/filter mismatches
 - index + RSE pushdown range intersections
 - sparse pushdown over cached columns
-- logical partition ownership / batch-index paths
+- cache-progress boundaries after removing get_partition_data
 - large UNION ALL parallel scans
 - randomized query interrupts
 
@@ -200,19 +200,19 @@ def scenario_sparse_partition_copy(rng: random.Random, temp_dir: Path) -> str:
     """
 
 
-def scenario_partition_ownership(rng: random.Random, temp_dir: Path) -> str:
-    output_path = temp_dir / f"partition_ownership_{rng.randint(0, 1_000_000)}.csv"
+def scenario_cache_progress(rng: random.Random, temp_dir: Path) -> str:
+    output_path = temp_dir / f"cache_progress_{rng.randint(0, 1_000_000)}.csv"
     limit_offset = rng.choice([20478, 20479, 20480])
     return f"""
     {common_prelude(rng, preserve_order=True)}
 
     SELECT COUNT(*), MIN(index), MAX(index), MIN(rows_40961), MAX(rows_40961)
-    FROM h5_read('test/data/partition_ownership.h5', h5_index(), '/rows_40961')
+    FROM h5_read('test/data/cache_progress.h5', h5_index(), '/rows_40961')
     WHERE index >= 20478 AND index <= 20482;
 
     COPY (
         SELECT *
-        FROM h5_read('test/data/partition_ownership.h5', '/rows_20481')
+        FROM h5_read('test/data/cache_progress.h5', '/rows_20481')
         LIMIT 3 OFFSET {limit_offset}
     ) TO '{sql_escape(output_path)}' (FORMAT csv, HEADER false);
 
@@ -312,7 +312,7 @@ SCENARIOS = [
     Scenario("large_index_rse_intersection", scenario_large_index_rse_intersection, weight=3),
     Scenario("sparse_cached_pushdown", scenario_sparse_cached_pushdown, weight=2),
     Scenario("sparse_partition_copy", scenario_sparse_partition_copy, weight=2),
-    Scenario("partition_ownership", scenario_partition_ownership, weight=2),
+    Scenario("cache_progress", scenario_cache_progress, weight=2),
     Scenario("nd_cache_index_slice", scenario_nd_cache_index_slice, weight=3),
     Scenario("parallel_union_rse", scenario_parallel_union_rse, timeout_seconds=180.0, weight=2),
     Scenario(

@@ -80,6 +80,14 @@ FROM cache_boundary_tmp;
 statement ok
 DROP TABLE cache_boundary_tmp;
 
+# Mixed projected row widths make the scan batch size and the wide column's
+# cache chunk size different, so some scan ranges cross two cache windows.
+query III
+SELECT COUNT(*), SUM(wide[1][1]), SUM(narrow)
+FROM h5_read('test/data/cache_boundaries.h5', '/mixed_width/wide', '/mixed_width/narrow');
+----
+40	800780	780
+
 # Regression coverage for parallel scans that stop early. These used to spin in
 # the shared chunk-cache path when later workers claimed ranges beyond the two
 # cached windows before earlier ranges advanced position_done.

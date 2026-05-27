@@ -564,6 +564,47 @@ ORDER BY ALL;
 test/data/glob_order/order_1.h5
 test/data/glob_order/order_1.h5
 
+query II
+SELECT COUNT(*), SUM(values)
+FROM h5_read('test/data/glob_order/order_*.h5', '/values')
+WHERE filename = 'test/data/glob_order/order_10.h5';
+----
+1	10
+
+query II
+SELECT COUNT(*), SUM(values)
+FROM h5_read('test/data/glob_order/order_*.h5', '/values', filename=true)
+WHERE filename LIKE '%/order_1.h5';
+----
+1	1
+
+query II
+SELECT COUNT(*), SUM(values)
+FROM h5_read('test/data/glob_order/order_*.h5', '/values', filename='source')
+WHERE source IN ('test/data/glob_order/order_1.h5', 'test/data/glob_order/order_2.h5');
+----
+2	3
+
+query I
+SELECT COUNT(*)
+FROM h5_read('test/data/glob_order/order_*.h5', '/values', filename='source')
+WHERE source = 'test/data/glob_order/no_match.h5';
+----
+0
+
+# Unlike h5_tree/h5_ls, h5_read opens matched files during binding to derive
+# and validate the output schema. Filename filters can filter rows, but they
+# cannot skip a missing file before bind-time schema inspection.
+statement error
+SELECT COUNT(*)
+FROM h5_read([
+    'test/data/simple.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/integers')
+WHERE filename = 'test/data/simple.h5';
+----
+<REGEX>:.*Failed to open HDF5 file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)does_not_exist_filename_pushdown\.h5.*
+
 query III
 SELECT replace(filename, '\', '/') AS filename, idx, values
 FROM h5_read(

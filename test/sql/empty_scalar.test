@@ -64,6 +64,53 @@ SELECT COUNT(*) FROM h5_read('test/data/empty_scalar.h5', '/empty_2d');
 0
 
 # =============================================================================
+# Multi-file empty and scalar-only edge cases
+# =============================================================================
+
+query III
+SELECT COUNT(*), SUM(values), COUNT(DISTINCT filename)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/values');
+----
+5	63	2
+
+query TI
+SELECT replace(filename, '\', '/') AS filename, SUM(values)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/values')
+GROUP BY filename
+ORDER BY filename;
+----
+test/data/h5_read_multifile_empty_a.h5	3
+test/data/h5_read_multifile_empty_c.h5	60
+
+query I
+SELECT COUNT(*)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_b.h5'
+], '/values');
+----
+0
+
+query III
+SELECT COUNT(*), SUM(scalar), COUNT(DISTINCT filename)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/scalar');
+----
+3	60	3
+
+# =============================================================================
 # Row count uses minimum across datasets
 # =============================================================================
 

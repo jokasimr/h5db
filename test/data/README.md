@@ -40,14 +40,14 @@ To ensure test data exists (generate only if missing):
 | `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, enum, compound, float16, reference, opaque, bitfield) |
 | `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
 | `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling plus numeric/string array attrs, including empty arrays |
-| `empty_scalar.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets (row-count edge cases) |
+| `empty_scalar.h5`, `h5_read_multifile_empty_*.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets, including multi-file row-count edge cases |
 | `h5_read_string_edge_cases.h5` | `create_h5_read_string_edge_cases.py` | 13 KB | String padding and invalid-text dataset coverage for `h5_read` |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
 | `many_groups.h5` | `create_many_groups_test.py` | 135 MB | Large namespace listing and traversal coverage |
 | `nd_cache_test.h5` | `create_nd_cache_test.py` | 310 MB | N-D cache coverage with varied chunking |
 | `cache_boundaries.h5` | `create_cache_boundaries_test.py` | 8 KB | Regular cache row-count boundary coverage |
-| `partition_ownership.h5` | `create_partition_ownership_test.py` | 400 KB | Logical partition ownership boundary coverage |
+| `cache_progress.h5` | `create_cache_progress_test.py` | 400 KB | h5_read cache-progress boundary coverage after removing `get_partition_data` |
 | `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
 | `sparse_partition_pushdown.h5` | `create_sparse_partition_pushdown_test.py` | 1.5 MB | Sparse pushdown across logical partitions and empty partitions |
 | `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
@@ -91,14 +91,14 @@ test/data/
 ├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
 ├── create_invalid_string_array_attrs_test.py # Creates: invalid_string_array_attrs.h5
 ├── create_root_attrs_test.py          # Creates: root_attrs.h5
-├── create_empty_scalar_test.py        # Creates: empty_scalar.h5
+├── create_empty_scalar_test.py        # Creates: empty_scalar.h5, h5_read_multifile_empty_*.h5
 ├── create_h5_read_string_edge_cases.py # Creates: h5_read_string_edge_cases.h5
 ├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
 ├── create_many_groups_test.py         # Creates: many_groups.h5
 ├── create_nd_cache_test.py            # Creates: nd_cache_test.h5
 ├── create_cache_boundaries_test.py    # Creates: cache_boundaries.h5
-├── create_partition_ownership_test.py # Creates: partition_ownership.h5
+├── create_cache_progress_test.py      # Creates: cache_progress.h5
 ├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
 ├── create_sparse_partition_pushdown_test.py # Creates: sparse_partition_pushdown.h5
 ├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
@@ -115,7 +115,7 @@ test/data/
 ├── many_groups.h5
 ├── nd_cache_test.h5
 ├── cache_boundaries.h5
-├── partition_ownership.h5
+├── cache_progress.h5
 ├── sparse_pushdown_cache.h5
 ├── sparse_partition_pushdown.h5
 ├── wide_few_rows.h5
