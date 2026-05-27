@@ -567,21 +567,21 @@ test/data/glob_order/order_1.h5
 query II
 SELECT COUNT(*), SUM(values)
 FROM h5_read('test/data/glob_order/order_*.h5', '/values')
-WHERE filename = 'test/data/glob_order/order_10.h5';
+WHERE replace(filename, '\', '/') = 'test/data/glob_order/order_10.h5';
 ----
 1	10
 
 query II
 SELECT COUNT(*), SUM(values)
 FROM h5_read('test/data/glob_order/order_*.h5', '/values', filename=true)
-WHERE filename LIKE '%/order_1.h5';
+WHERE replace(filename, '\', '/') LIKE '%/order_1.h5';
 ----
 1	1
 
 query II
 SELECT COUNT(*), SUM(values)
 FROM h5_read('test/data/glob_order/order_*.h5', '/values', filename='source')
-WHERE source IN ('test/data/glob_order/order_1.h5', 'test/data/glob_order/order_2.h5');
+WHERE replace(source, '\', '/') IN ('test/data/glob_order/order_1.h5', 'test/data/glob_order/order_2.h5');
 ----
 2	3
 
