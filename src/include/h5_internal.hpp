@@ -2,6 +2,7 @@
 
 #include "duckdb.hpp"
 #include "h5_remote_vfd.hpp"
+#include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include <string>
 #include <mutex>
 #include <condition_variable>
@@ -46,6 +47,10 @@ idx_t ParseBatchSizeSetting(const Value &setting_value);
 
 // Resolve configured target batch size in bytes for h5_read chunk caching.
 idx_t ResolveBatchSizeOption(ClientContext &context);
+
+FunctionDescription H5FunctionDescription(vector<LogicalType> parameter_types, vector<string> parameter_names,
+                                          string description, vector<string> examples = {},
+                                          vector<string> categories = {"hdf5"});
 
 bool IsInterrupted(ClientContext &context);
 void ThrowIfInterrupted(ClientContext &context);

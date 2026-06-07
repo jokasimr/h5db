@@ -7,6 +7,8 @@
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -631,7 +633,12 @@ void RegisterH5AttrFunction(ExtensionLoader &loader) {
 	h5_attr_two.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	h5_attr.AddFunction(h5_attr_two);
 
-	loader.RegisterFunction(h5_attr);
+	CreateScalarFunctionInfo info(std::move(h5_attr));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription(
+	    {}, {"name", "default_value"}, "Creates a projected HDF5 attribute definition for h5_tree() and h5_ls().",
+	    {"FROM h5_tree('data.h5', h5_attr('NX_class'))"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterH5TreeFunction(ExtensionLoader &loader) {
@@ -644,7 +651,13 @@ void RegisterH5TreeFunction(ExtensionLoader &loader) {
 	h5_tree_function.projection_pushdown = true;
 	h5_tree_function.pushdown_complex_filter = H5TreePushdownComplexFilter;
 	h5_tree_function.get_virtual_columns = H5GetFilenameVirtualColumns;
-	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_tree_function)));
+	auto h5_tree_set = MultiFileReader::CreateFunctionSet(std::move(h5_tree_function));
+	CreateTableFunctionInfo info(std::move(h5_tree_set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription({LogicalType::ANY}, {"filename_or_filenames", "swmr", "filename"},
+	                                                  "Recursively lists entries in an HDF5 file.",
+	                                                  {"FROM h5_tree('data.h5')"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

@@ -5,6 +5,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #if __has_include("duckdb/common/vector/array_vector.hpp")
@@ -2530,7 +2532,13 @@ void RegisterH5RseFunction(ExtensionLoader &loader) {
 
 	auto h5_rse = ScalarFunction("h5_rse", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                             LogicalType::STRUCT(struct_children), H5RseFunction);
-	loader.RegisterFunction(h5_rse);
+	CreateScalarFunctionInfo info(std::move(h5_rse));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(
+	    H5FunctionDescription({LogicalType::VARCHAR, LogicalType::VARCHAR}, {"run_starts_path", "values_path"},
+	                          "Creates a run-start encoded column definition for h5_read().",
+	                          {"FROM h5_read('data.h5', '/time', h5_rse('/state_run_starts', '/state_values'))"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ==================== h5_alias Scalar Function ====================
@@ -2579,7 +2587,12 @@ void RegisterH5AliasFunction(ExtensionLoader &loader) {
 	                        H5AliasFunction, H5AliasBind);
 	h5_alias.serialize = VariableReturnBindData::Serialize;
 	h5_alias.deserialize = VariableReturnBindData::Deserialize;
-	loader.RegisterFunction(h5_alias);
+	CreateScalarFunctionInfo info(std::move(h5_alias));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::VARCHAR, LogicalType::ANY}, {"name", "definition"}, "Renames a column definition.",
+	    {"FROM h5_read('data.h5', h5_alias('temperature', '/entry/temp'))"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 // ==================== h5_index Scalar Function ====================
@@ -2600,7 +2613,12 @@ static void H5IndexFunction(DataChunk &args, ExpressionState &state, Vector &res
 void RegisterH5IndexFunction(ExtensionLoader &loader) {
 	child_list_t<LogicalType> struct_children = {{"tag", LogicalType::VARCHAR}};
 	auto h5_index = ScalarFunction("h5_index", {}, LogicalType::STRUCT(struct_children), H5IndexFunction);
-	loader.RegisterFunction(h5_index);
+	CreateScalarFunctionInfo info(std::move(h5_index));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription({}, {},
+	                                                  "Creates a virtual row-index column definition for h5_read().",
+	                                                  {"FROM h5_read('data.h5', h5_index(), '/measurements')"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 // Cardinality function - informs DuckDB's optimizer of exact row count
@@ -2649,7 +2667,13 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	// Reintroduce this only with a design that does not make cache progress
 	// depend on a thread returning to Scan() after it has produced a chunk.
 	h5_read_function.get_virtual_columns = H5ReadGetVirtualColumns;
-	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_read_function)));
+	auto h5_read_set = MultiFileReader::CreateFunctionSet(std::move(h5_read_function));
+	CreateTableFunctionInfo info(std::move(h5_read_set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::ANY, LogicalType::ANY}, {"filename_or_filenames", "dataset_or_definition", "swmr", "filename"},
+	    "Reads one or more HDF5 datasets as DuckDB columns.", {"FROM h5_read('data.h5', '/measurements')"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

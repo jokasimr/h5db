@@ -41,7 +41,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register HDF5 version check function
 	auto h5db_version_scalar_function =
 	    ScalarFunction("h5db_version", {LogicalType::VARCHAR}, LogicalType::VARCHAR, H5dbVersionScalarFun);
-	loader.RegisterFunction(h5db_version_scalar_function);
+	CreateScalarFunctionInfo h5db_version_info(std::move(h5db_version_scalar_function));
+	h5db_version_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	h5db_version_info.descriptions.push_back(
+	    H5FunctionDescription({LogicalType::VARCHAR}, {"name"}, "Returns the linked HDF5 library version used by h5db.",
+	                          {"SELECT h5db_version('h5db')"}));
+	loader.RegisterFunction(std::move(h5db_version_info));
 
 	// Extension settings
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());

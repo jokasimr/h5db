@@ -8,6 +8,8 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
@@ -537,19 +539,36 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	h5_ls_table_function.projection_pushdown = true;
 	h5_ls_table_function.pushdown_complex_filter = H5LsPushdownComplexFilter;
 	h5_ls_table_function.get_virtual_columns = H5GetFilenameVirtualColumns;
-	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_ls_table_function)));
+	auto h5_ls_table_set = MultiFileReader::CreateFunctionSet(std::move(h5_ls_table_function));
+	CreateTableFunctionInfo table_info(std::move(h5_ls_table_set));
+	table_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	table_info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::ANY}, {"filename_or_filenames", "swmr", "filename"},
+	    "Lists entries immediately under an HDF5 group as rows.", {"FROM h5_ls('data.h5', '/entry')"}));
+	loader.RegisterFunction(std::move(table_info));
 
 	ScalarFunction h5_ls_scalar("h5_ls", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalTypeId::MAP,
 	                            H5LsScalarFunction, H5LsScalarBind);
 	h5_ls_scalar.varargs = LogicalType::ANY;
 	h5_ls_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	loader.RegisterFunction(h5_ls_scalar);
+	CreateScalarFunctionInfo scalar_info(std::move(h5_ls_scalar));
+	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	scalar_info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR}, {"filename", "group_path"},
+	    "Lists entries immediately under an HDF5 group as a MAP.", {"SELECT h5_ls('data.h5', '/entry')"}));
+	loader.RegisterFunction(std::move(scalar_info));
 
 	ScalarFunction h5_ls_swmr_scalar("h5_ls_swmr", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalTypeId::MAP,
 	                                 H5LsScalarFunction, H5LsSwmrScalarBind);
 	h5_ls_swmr_scalar.varargs = LogicalType::ANY;
 	h5_ls_swmr_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	loader.RegisterFunction(h5_ls_swmr_scalar);
+	CreateScalarFunctionInfo swmr_info(std::move(h5_ls_swmr_scalar));
+	swmr_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	swmr_info.descriptions.push_back(
+	    H5FunctionDescription({LogicalType::VARCHAR, LogicalType::VARCHAR}, {"filename", "group_path"},
+	                          "Lists entries immediately under an HDF5 group as a MAP using SWMR read mode.",
+	                          {"SELECT h5_ls_swmr('data.h5', '/entry')"}));
+	loader.RegisterFunction(std::move(swmr_info));
 }
 
 } // namespace duckdb

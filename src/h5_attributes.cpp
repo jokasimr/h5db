@@ -3,6 +3,7 @@
 #include "h5_raii.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include <algorithm>
@@ -300,7 +301,13 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	h5_attributes.projection_pushdown = true;
 	h5_attributes.get_virtual_columns = H5AttributesGetVirtualColumns;
 
-	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(std::move(h5_attributes)));
+	auto h5_attributes_set = MultiFileReader::CreateFunctionSet(std::move(h5_attributes));
+	CreateTableFunctionInfo info(std::move(h5_attributes_set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::ANY, LogicalType::VARCHAR}, {"filename_or_filenames", "object_path", "swmr", "filename"},
+	    "Reads all attributes from an HDF5 object or file root.", {"FROM h5_attributes('data.h5', '/measurements')"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

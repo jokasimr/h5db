@@ -1,7 +1,9 @@
 #include "h5_functions.hpp"
+#include "h5_internal.hpp"
 
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 
@@ -64,7 +66,14 @@ void RegisterH5FirstFileFunction(ExtensionLoader &loader) {
 	ScalarFunctionSet h5_first_file("h5_first_file");
 	h5_first_file.AddFunction(CreateH5FirstFileFunction(LogicalType::VARCHAR));
 	h5_first_file.AddFunction(CreateH5FirstFileFunction(LogicalType::LIST(LogicalType::VARCHAR)));
-	loader.RegisterFunction(h5_first_file);
+	CreateScalarFunctionInfo info(std::move(h5_first_file));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(
+	    H5FunctionDescription({LogicalType::ANY}, {"filename_or_filenames"},
+	                          "Returns the first concrete HDF5 filename from an exact path, glob, or list for "
+	                          "planning-time use with h5_read().",
+	                          {"FROM h5_read(h5_first_file('runs/run_*.h5'), '/detector_geometry')"}));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

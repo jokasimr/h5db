@@ -91,6 +91,17 @@ H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &
 	return result;
 }
 
+FunctionDescription H5FunctionDescription(vector<LogicalType> parameter_types, vector<string> parameter_names,
+                                          string description, vector<string> examples, vector<string> categories) {
+	FunctionDescription result;
+	result.parameter_types = std::move(parameter_types);
+	result.parameter_names = std::move(parameter_names);
+	result.description = std::move(description);
+	result.examples = std::move(examples);
+	result.categories = std::move(categories);
+	return result;
+}
+
 H5ExpandedFileList H5ExpandFilePattern(ClientContext &context, const std::string &pattern) {
 	if (StringUtil::CIStartsWith(pattern, "sftp://")) {
 		return ExpandH5SftpFilePattern(context, pattern);
