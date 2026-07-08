@@ -25,7 +25,8 @@ stack or SFTP.
 
 - `h5_read(filename_or_filenames, datasets_or_definitions...)`
   Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
-  "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`).
+  "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`). The scalar form reads
+  one scalar dataset as a value.
 - `h5_tree(filename_or_filenames, projected_attributes...)`
   Recursively lists namespace entries with `path`, `type`, `dtype`, and `shape`. Output is path-oriented: if multiple
   paths resolve to the same object, each path appears as its own row.
@@ -100,6 +101,9 @@ SELECT h5_ls('data.h5', '/entry/instrument');
 
 -- Read attributes
 FROM h5_attributes('data.h5', '/measurements');
+
+-- Read a scalar dataset as one value
+SELECT h5_read('data.h5', '/entry/run_number');
 
 -- Read attributes as one scalar value
 SELECT h5_attributes('data.h5', '/measurements');

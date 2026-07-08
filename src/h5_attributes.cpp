@@ -341,8 +341,8 @@ public:
 		try {
 			return H5ReadAllAttributesMapValue(obj);
 		} catch (const std::exception &ex) {
-			throw IOException(FormatHDF5ObjectContextError(H5NormalizeExceptionMessage(ex.what()), filename,
-			                                               object_path));
+			throw IOException(
+			    FormatHDF5ObjectContextError(H5NormalizeExceptionMessage(ex.what()), filename, object_path));
 		}
 	}
 
@@ -489,10 +489,9 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	    "Reads all attributes from an HDF5 object or file root.", {"FROM h5_attributes('data.h5', '/measurements')"}));
 	loader.RegisterFunction(std::move(info));
 
-	ScalarFunction h5_attributes_scalar(
-	    "h5_attributes", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	    LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARIANT()), H5AttributesScalarFunction,
-	    H5AttributesScalarBind);
+	ScalarFunction h5_attributes_scalar("h5_attributes", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                    LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARIANT()),
+	                                    H5AttributesScalarFunction, H5AttributesScalarBind);
 	h5_attributes_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	CreateScalarFunctionInfo scalar_info(std::move(h5_attributes_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

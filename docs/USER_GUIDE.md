@@ -132,10 +132,13 @@ There is also a scalar form for queries that need one value per input row:
 ```sql
 SELECT h5_ls('data.h5', '/entry/instrument');
 
+SELECT h5_read('data.h5', '/entry/run_number');
+
 SELECT h5_attributes('data.h5', '/entry/instrument');
 ```
 
 Scalar `h5_ls(...)` returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
+Scalar `h5_read(...)` reads one scalar dataset and returns it as a `VARIANT`.
 Scalar `h5_attributes(...)` returns a `MAP(VARCHAR, VARIANT)` keyed by attribute
 name.
 
@@ -231,8 +234,8 @@ Useful mental models:
 - a pattern that matches no files raises an error
 - `h5_read(...)` requires compatible column definitions across all matched files
 - `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
-- scalar `h5_ls(...)` and scalar `h5_attributes(...)` accept one filename expression per row and do not expand
-  filename lists or glob patterns
+- scalar `h5_ls(...)`, scalar `h5_read(...)`, and scalar `h5_attributes(...)` accept one filename expression per row
+  and do not expand filename lists or glob patterns
 - for local paths and DuckDB-backed remote schemes, glob expansion uses
   DuckDB's filesystem stack
 - for `sftp://` URLs, glob expansion is handled by h5db's SFTP backend and

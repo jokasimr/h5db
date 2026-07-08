@@ -35,21 +35,6 @@ struct H5AttributeTypeResolution {
 	std::string unsupported_reason;
 };
 
-template <typename T>
-static Value CreateDuckDBValue(T value) {
-	if constexpr (std::is_same_v<T, uint8_t>) {
-		return Value::UTINYINT(value);
-	} else if constexpr (std::is_same_v<T, uint16_t>) {
-		return Value::USMALLINT(value);
-	} else if constexpr (std::is_same_v<T, uint32_t>) {
-		return Value::UINTEGER(value);
-	} else if constexpr (std::is_same_v<T, uint64_t>) {
-		return Value::UBIGINT(value);
-	} else {
-		return Value(value);
-	}
-}
-
 // Global mutex for all HDF5 operations (definition)
 std::recursive_mutex hdf5_global_mutex;
 
@@ -859,7 +844,7 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 				throw IOException("Failed to read array attribute: " + attribute_name);
 			}
 			for (auto &value : raw_values) {
-				values.push_back(CreateDuckDBValue(value));
+				values.push_back(H5CreateDuckDBValue(value));
 			}
 			return Value::LIST(child_type, std::move(values));
 		});
@@ -898,7 +883,7 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 		if (H5Aread(attr_id, h5_type_id, &value) < 0) {
 			throw IOException("Failed to read attribute: " + attribute_name);
 		}
-		return CreateDuckDBValue(value);
+		return H5CreateDuckDBValue(value);
 	});
 }
 

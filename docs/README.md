@@ -14,6 +14,7 @@ Contributor documentation:
 Internal design notes:
 
 - [internals/PARTITION_OWNERSHIP_DESIGN.md](internals/PARTITION_OWNERSHIP_DESIGN.md): archived historical note; `h5_read` does not currently register `get_partition_data`
+- [internals/SCALAR_VALUE_FUNCTIONS.md](internals/SCALAR_VALUE_FUNCTIONS.md)
 - [internals/H5_READ_ROW_ALIGNMENT.md](internals/H5_READ_ROW_ALIGNMENT.md)
 - [internals/REMOTE_METADATA_AND_INTERRUPTS.md](internals/REMOTE_METADATA_AND_INTERRUPTS.md)
 - [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md)

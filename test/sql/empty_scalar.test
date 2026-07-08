@@ -31,6 +31,89 @@ FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/scalar_str', '/long')
 ----
 5	7	hello
 
+query TITT
+SELECT
+    variant_typeof(h5_read('test/data/empty_scalar.h5', '/scalar_int')),
+    TRY_CAST(h5_read('test/data/empty_scalar.h5', '/scalar_int') AS INTEGER),
+    variant_typeof(h5_read('test/data/empty_scalar.h5', '/scalar_str')),
+    TRY_CAST(h5_read('test/data/empty_scalar.h5', '/scalar_str') AS VARCHAR);
+----
+INT32	7	VARCHAR	hello
+
+query TTT
+WITH paths(path) AS (
+    VALUES ('/scalar_int'), ('/scalar_str'), (NULL::VARCHAR)
+),
+values AS (
+    SELECT path, h5_read('test/data/empty_scalar.h5', path) AS value
+    FROM paths
+)
+SELECT
+    COALESCE(path, '<null>') AS path,
+    CASE WHEN value IS NULL THEN 'NULL' ELSE variant_typeof(value) END AS value_type,
+    TRY_CAST(value AS VARCHAR) AS value_text
+FROM values
+ORDER BY path;
+----
+/scalar_int	INT32	7
+/scalar_str	VARCHAR	hello
+<null>	NULL	NULL
+
+query TII
+WITH inputs(filename, path) AS (
+    VALUES
+        ('test/data/empty_scalar.h5', '/scalar_int'),
+        (NULL::VARCHAR, '/scalar_int')
+),
+values AS (
+    SELECT filename, h5_read(filename, path) AS value
+    FROM inputs
+)
+SELECT
+    COALESCE(filename, '<null>') AS filename,
+    CASE WHEN value IS NULL THEN 1 ELSE 0 END AS is_null,
+    TRY_CAST(value AS INTEGER) AS value_int
+FROM values
+ORDER BY filename;
+----
+<null>	1	NULL
+test/data/empty_scalar.h5	0	7
+
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/missing');
+----
+IO Error: Failed to open dataset: /missing in file: test/data/empty_scalar.h5
+
+statement error
+SELECT h5_read('nonexistent.h5', '/scalar_int');
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
+
+statement error
+SELECT h5_read('test/data/glob/no_such_*.h5', '/scalar_int');
+----
+IO Error: Failed to open HDF5 file: test/data/glob/no_such_*.h5
+
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/');
+----
+IO Error: Failed to open dataset: / in file: test/data/empty_scalar.h5
+
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/long');
+----
+IO Error: Scalar h5_read only supports scalar datasets: /long in file: test/data/empty_scalar.h5
+
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/scalar_int', swmr := true);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_read\(STRING_LITERAL, STRING_LITERAL, BOOLEAN\)'.*
+
+statement error
+SELECT h5_read(['test/data/empty_scalar.h5'], '/scalar_int');
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_read\(VARCHAR\[\], STRING_LITERAL\)'.*
+
 query I
 SELECT COUNT(*)
 FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/empty_1d');

@@ -24,6 +24,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/common/value_operations/value_operations.hpp"
@@ -255,6 +256,22 @@ struct H5ReadBindData : public TableFunctionData {
 
 	bool SupportStatementCache() const override {
 		return !had_glob;
+	}
+};
+
+struct H5ReadScalarBindData : public FunctionData {
+	bool swmr = false;
+
+	explicit H5ReadScalarBindData(bool swmr_p) : swmr(swmr_p) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<H5ReadScalarBindData>(swmr);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<H5ReadScalarBindData>();
+		return swmr == other.swmr;
 	}
 };
 
@@ -670,6 +687,55 @@ static void ReadHDF5Strings(hid_t dataset_id, hid_t h5_type, hid_t mem_space, hi
 			callback(i, ValidateHDF5StringValue(std::move(decoded), cset, filename, dataset_path));
 		}
 	}
+}
+
+static Value H5ReadCastScalarValueToVariant(Value value, const string &filename, const string &dataset_path) {
+	Value variant_value(LogicalType::VARIANT());
+	string error_message;
+	if (!value.DefaultTryCastAs(LogicalType::VARIANT(), variant_value, &error_message, false)) {
+		throw IOException(FormatDatasetError("Dataset value cannot be cast to VARIANT", filename, dataset_path));
+	}
+	return variant_value;
+}
+
+static Value H5ReadScalarDatasetValue(hid_t file, const string &filename, const string &dataset_path) {
+	auto [dataset, h5_type] = OpenDatasetAndGetType(file, filename, dataset_path);
+
+	H5DataspaceHandle space(dataset);
+	if (!space.is_valid()) {
+		throw IOException(FormatDatasetError("Failed to get dataspace for dataset", filename, dataset_path));
+	}
+	auto ndims = H5Sget_simple_extent_ndims(space);
+	if (ndims < 0) {
+		throw IOException(FormatDatasetError("Failed to get dataset dimensions", filename, dataset_path));
+	}
+	auto npoints = H5Sget_simple_extent_npoints(space);
+	if (npoints < 0) {
+		throw IOException(FormatDatasetError("Failed to get dataset element count", filename, dataset_path));
+	}
+	if (ndims != 0 || npoints != 1) {
+		throw IOException(FormatDatasetError("Scalar h5_read only supports scalar datasets", filename, dataset_path));
+	}
+
+	auto duckdb_type = H5TypeToDuckDBType(h5_type);
+	if (duckdb_type.id() == LogicalTypeId::VARCHAR) {
+		string value;
+		ReadHDF5Strings(dataset, h5_type, H5S_ALL, H5S_ALL, 1, filename, dataset_path,
+		                [&](idx_t, const string &str) { value = str; });
+		return H5ReadCastScalarValueToVariant(Value(std::move(value)), filename, dataset_path);
+	}
+
+	auto value = DispatchOnNumericType(duckdb_type, [&](auto type_tag) -> Value {
+		using T = typename decltype(type_tag)::type;
+		T raw_value {};
+		H5ErrorSuppressor suppress;
+		auto status = H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &raw_value);
+		if (status < 0) {
+			throw IOException(FormatRemoteDatasetReadError(filename, dataset_path));
+		}
+		return H5CreateDuckDBValue(raw_value);
+	});
+	return H5ReadCastScalarValueToVariant(std::move(value), filename, dataset_path);
 }
 
 //===--------------------------------------------------------------------===//
@@ -2621,6 +2687,148 @@ void RegisterH5IndexFunction(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(info));
 }
 
+class H5ReadScalarFileReader {
+public:
+	H5ReadScalarFileReader(ClientContext &context_p, string filename_p, bool swmr_p)
+	    : context(context_p), filename(std::move(filename_p)) {
+		H5ErrorSuppressor suppress;
+		file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr_p);
+		if (!file.is_valid()) {
+			throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", filename));
+		}
+	}
+
+	Value ReadDataset(const string_t &path_value) {
+		ThrowIfInterrupted(context);
+		auto dataset_path = path_value.GetString();
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+		return H5ReadScalarDatasetValue(file, filename, dataset_path);
+	}
+
+private:
+	ClientContext &context;
+	string filename;
+	H5FileHandle file;
+};
+
+struct H5ReadScalarFileRows {
+	string filename;
+	vector<idx_t> row_idxs;
+};
+
+static unique_ptr<FunctionData> H5ReadScalarBind(ClientContext &context, ScalarFunction &,
+                                                 vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() != 2) {
+		throw InvalidInputException("scalar h5_read requires exactly 2 arguments: filename and dataset path");
+	}
+	auto swmr = ResolveSwmrOption(context, named_parameter_map_t {});
+	return make_uniq<H5ReadScalarBindData>(swmr);
+}
+
+static void H5ReadScalarWriteFileRows(ClientContext &context, const H5ReadScalarFileRows &file_rows,
+                                      const UnifiedVectorFormat &path_data, const string_t *path_ptr, Vector &result,
+                                      const H5ReadScalarBindData &bind_data) {
+	if (file_rows.row_idxs.empty()) {
+		return;
+	}
+	ThrowIfInterrupted(context);
+	H5ReadScalarFileReader reader(context, file_rows.filename, bind_data.swmr);
+	for (auto row_idx : file_rows.row_idxs) {
+		auto path_idx = path_data.sel->get_index(row_idx);
+		result.SetValue(row_idx, reader.ReadDataset(path_ptr[path_idx]));
+	}
+}
+
+static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &bind_data = func_expr.bind_info->Cast<H5ReadScalarBindData>();
+	if (args.size() == 0) {
+		result.SetVectorType(VectorType::FLAT_VECTOR);
+		return;
+	}
+
+	auto &filename_vec = args.data[0];
+	auto &path_vec = args.data[1];
+	UnifiedVectorFormat filename_data;
+	UnifiedVectorFormat path_data;
+	filename_vec.ToUnifiedFormat(args.size(), filename_data);
+	path_vec.ToUnifiedFormat(args.size(), path_data);
+	auto filename_ptr = UnifiedVectorFormat::GetData<string_t>(filename_data);
+	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
+	auto &context = state.GetContext();
+	auto constant_filename = filename_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	auto constant_path = path_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
+
+	if (constant_filename && constant_path) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		auto filename_idx = filename_data.sel->get_index(0);
+		auto path_idx = path_data.sel->get_index(0);
+		if (!filename_data.validity.RowIsValid(filename_idx) || !path_data.validity.RowIsValid(path_idx)) {
+			ConstantVector::SetNull(result, true);
+			return;
+		}
+
+		auto filename = filename_ptr[filename_idx].GetString();
+		H5ReadScalarFileReader reader(context, filename, bind_data.swmr);
+		result.SetValue(0, reader.ReadDataset(path_ptr[path_idx]));
+		return;
+	}
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &validity = FlatVector::Validity(result);
+
+	if (constant_filename) {
+		auto filename_idx = filename_data.sel->get_index(0);
+		if (!filename_data.validity.RowIsValid(filename_idx)) {
+			for (idx_t i = 0; i < args.size(); i++) {
+				validity.SetInvalid(i);
+			}
+			return;
+		}
+
+		H5ReadScalarFileRows file_rows;
+		file_rows.filename = filename_ptr[filename_idx].GetString();
+		file_rows.row_idxs.reserve(args.size());
+		for (idx_t i = 0; i < args.size(); i++) {
+			auto path_idx = path_data.sel->get_index(i);
+			if (!path_data.validity.RowIsValid(path_idx)) {
+				validity.SetInvalid(i);
+				continue;
+			}
+			validity.SetValid(i);
+			file_rows.row_idxs.push_back(i);
+		}
+
+		H5ReadScalarWriteFileRows(context, file_rows, path_data, path_ptr, result, bind_data);
+		return;
+	}
+
+	std::unordered_map<string, idx_t> file_group_lookup;
+	vector<H5ReadScalarFileRows> file_groups;
+	file_group_lookup.reserve(args.size());
+	file_groups.reserve(args.size());
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto filename_idx = filename_data.sel->get_index(i);
+		auto path_idx = path_data.sel->get_index(i);
+		if (!filename_data.validity.RowIsValid(filename_idx) || !path_data.validity.RowIsValid(path_idx)) {
+			validity.SetInvalid(i);
+			continue;
+		}
+		validity.SetValid(i);
+		auto filename = filename_ptr[filename_idx].GetString();
+		auto inserted = file_group_lookup.emplace(filename, file_groups.size());
+		if (inserted.second) {
+			file_groups.emplace_back();
+			file_groups.back().filename = std::move(filename);
+		}
+		file_groups[inserted.first->second].row_idxs.push_back(i);
+	}
+
+	for (const auto &file_group : file_groups) {
+		H5ReadScalarWriteFileRows(context, file_group, path_data, path_ptr, result, bind_data);
+	}
+}
+
 // Cardinality function - informs DuckDB's optimizer of exact row count
 static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
@@ -2674,6 +2882,16 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	    {LogicalType::ANY, LogicalType::ANY}, {"filename_or_filenames", "dataset_or_definition", "swmr", "filename"},
 	    "Reads one or more HDF5 datasets as DuckDB columns.", {"FROM h5_read('data.h5', '/measurements')"}));
 	loader.RegisterFunction(std::move(info));
+
+	ScalarFunction h5_read_scalar("h5_read", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARIANT(),
+	                              H5ReadScalarFunction, H5ReadScalarBind);
+	h5_read_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	CreateScalarFunctionInfo scalar_info(std::move(h5_read_scalar));
+	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	scalar_info.descriptions.push_back(H5FunctionDescription(
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR}, {"filename", "dataset_path"},
+	    "Reads one scalar HDF5 dataset as a VARIANT.", {"SELECT h5_read('data.h5', '/entry/scalar')"}));
+	loader.RegisterFunction(std::move(scalar_info));
 }
 
 } // namespace duckdb

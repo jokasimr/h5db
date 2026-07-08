@@ -18,6 +18,14 @@ FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_spacepad_fixed')
 ----
 1	61
 
+query TTT
+SELECT
+    variant_typeof(h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_spacepad_fixed')),
+    TRY_CAST(h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_spacepad_fixed') AS VARCHAR),
+    hex(CAST(TRY_CAST(h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_spacepad_fixed') AS VARCHAR) AS BLOB));
+----
+VARCHAR	a	61
+
 query II
 SELECT strlen(nullterm_fixed), hex(CAST(nullterm_fixed AS BLOB))
 FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullterm_fixed')
@@ -96,6 +104,11 @@ SELECT scalar_invalid_utf8_var
 FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_invalid_utf8_var');
 ----
 <REGEX>:.*(Invalid unicode.*\/scalar_invalid_utf8_var|\/scalar_invalid_utf8_var.*Invalid unicode).*
+
+statement error
+SELECT h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_invalid_utf8_var');
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in dataset: /scalar_invalid_utf8_var in file: test/data/h5_read_string_edge_cases.h5
 
 statement error
 SELECT *

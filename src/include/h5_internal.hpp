@@ -130,6 +130,22 @@ auto DispatchOnNumericType(LogicalType logical_type, Func &&func) {
 	}
 }
 
+// DuckDB's generic Value constructors do not preserve unsigned integer width for all C++ unsigned types.
+template <typename T>
+Value H5CreateDuckDBValue(T value) {
+	if constexpr (std::is_same_v<T, uint8_t>) {
+		return Value::UTINYINT(value);
+	} else if constexpr (std::is_same_v<T, uint16_t>) {
+		return Value::USMALLINT(value);
+	} else if constexpr (std::is_same_v<T, uint32_t>) {
+		return Value::UINTEGER(value);
+	} else if constexpr (std::is_same_v<T, uint64_t>) {
+		return Value::UBIGINT(value);
+	} else {
+		return Value(value);
+	}
+}
+
 // Map C++ numeric type to native HDF5 memory type
 template <typename T>
 inline hid_t GetNativeH5Type() {

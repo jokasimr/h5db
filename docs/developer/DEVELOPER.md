@@ -594,7 +594,7 @@ h5db/
 ### Key Files
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
-- **`src/h5_read.cpp`**: Core HDF5 reading logic, RSE scanner, shared chunk-cache coordination, and
+- **`src/h5_read.cpp`**: Core HDF5 reading logic, scalar `h5_read`, RSE scanner, shared chunk-cache coordination, and
   multi-file scan wrapper
 - **`src/h5_read.cpp`** intentionally does not currently register DuckDB `get_partition_data`. An earlier
   partition-based implementation was removed because early-stopping plans could abandon a partition while still
