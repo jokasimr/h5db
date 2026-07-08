@@ -127,17 +127,33 @@ struct ScalarColumnSpec {
 	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
 };
 
-// Run-Start Encoded column specification
-struct RSEColumnSpec {
-	std::string run_starts_path;
+enum class RunEncodingKind : uint8_t { START, END };
+
+static const char *RunEncodingName(RunEncodingKind encoding) {
+	return encoding == RunEncodingKind::START ? "RSE" : "REE";
+}
+
+static const char *RunEncodingTag(RunEncodingKind encoding) {
+	return encoding == RunEncodingKind::START ? "rse" : "ree";
+}
+
+static const char *RunBoundaryName(RunEncodingKind encoding) {
+	return encoding == RunEncodingKind::START ? "run_starts" : "run_ends";
+}
+
+// Run-encoded column specification
+struct RunEncodedColumnSpec {
+	RunEncodingKind encoding = RunEncodingKind::START;
+	std::string boundaries_path;
 	std::string values_path;
 	std::string column_name;
 	LogicalType column_type;
 	std::optional<H5TypeHandle> values_string_h5_type; // Present only for string values datasets
 };
 
-static string FormatRSEDatasetPairError(const string &message, const string &filename, const RSEColumnSpec &spec) {
-	auto base_message = message + " for run_starts dataset: " + spec.run_starts_path +
+static string FormatRunEncodedDatasetPairError(const string &message, const string &filename,
+                                               const RunEncodedColumnSpec &spec) {
+	auto base_message = message + " for " + RunBoundaryName(spec.encoding) + " dataset: " + spec.boundaries_path +
 	                    ", values dataset: " + spec.values_path + " in file: " + filename;
 	return AppendRemoteError(base_message, filename);
 }
@@ -148,8 +164,8 @@ struct IndexColumnSpec {
 	LogicalType column_type;
 };
 
-// A column can be regular, RSE, or virtual index
-using ColumnSpec = std::variant<RegularColumnSpec, ScalarColumnSpec, RSEColumnSpec, IndexColumnSpec>;
+// A column can be regular, scalar, run-encoded, or virtual index
+using ColumnSpec = std::variant<RegularColumnSpec, ScalarColumnSpec, RunEncodedColumnSpec, IndexColumnSpec>;
 
 // Chunk cache data (separate struct to allow unique_ptr due to non-movable atomics)
 struct Chunk {
@@ -192,24 +208,25 @@ struct ScalarColumnState {
 	ScalarValue value;
 };
 
-// RSE column runtime state
-struct RSEColumnState {
+// Run-encoded column runtime state
+struct RunEncodedColumnState {
 	std::vector<idx_t> run_starts;
+	idx_t non_null_end = 0;
 
 	// Typed storage for values (eliminates Value object overhead)
-	using RSEValueStorage =
+	using RunEncodedValueStorage =
 	    std::variant<std::vector<int8_t>, std::vector<int16_t>, std::vector<int32_t>, std::vector<int64_t>,
 	                 std::vector<uint8_t>, std::vector<uint16_t>, std::vector<uint32_t>, std::vector<uint64_t>,
 	                 std::vector<float>, std::vector<double>, std::vector<string>>;
-	RSEValueStorage values;
+	RunEncodedValueStorage values;
 
-	// Note: No mutable state needed - ScanRSEColumn is now stateless (thread-safe)
+	// Note: No mutable state needed - ScanRunEncodedColumn is now stateless (thread-safe)
 };
 
 struct IndexColumnState {};
 
-// Runtime state for a column (regular, scalar, RSE, or index)
-using ColumnState = std::variant<RegularColumnState, ScalarColumnState, RSEColumnState, IndexColumnState>;
+// Runtime state for a column (regular, scalar, run-encoded, or index)
+using ColumnState = std::variant<RegularColumnState, ScalarColumnState, RunEncodedColumnState, IndexColumnState>;
 
 // Row range for filtering (defined here for use in bind data and global state)
 struct RowRange {
@@ -292,7 +309,7 @@ struct H5ReadGlobalState {
 	std::atomic<idx_t> position {0};
 	std::atomic<idx_t> position_done {0}; // All rows in [0, position_done) have been returned or filtered out
 
-	// Row range filtering (for predicate pushdown on RSE or index columns)
+	// Row range filtering (for predicate pushdown on run-encoded or index columns)
 	vector<RowRange> valid_row_ranges; // Sorted, non-overlapping ranges to scan
 	idx_t scan_batch_size = STANDARD_VECTOR_SIZE;
 
@@ -739,7 +756,7 @@ static Value H5ReadScalarDatasetValue(hid_t file, const string &filename, const 
 }
 
 //===--------------------------------------------------------------------===//
-// Predicate Pushdown Helpers (for RSE columns)
+// Predicate Pushdown Helpers (for run-encoded columns)
 //===--------------------------------------------------------------------===//
 
 static std::vector<RowRange>::const_iterator FindRangeForPosition(const std::vector<RowRange> &ranges, idx_t position) {
@@ -878,11 +895,13 @@ static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, Expres
 	return result ? H5ReadFilterEvalResult::TRUE : H5ReadFilterEvalResult::FALSE;
 }
 
-static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, const RSEColumnState &rse_state,
-                                                const vector<ClaimedFilter> &col_filters, hsize_t num_rows) {
-	return DispatchOnDuckDBType(rse_spec.column_type, [&](auto type_tag) -> vector<RowRange> {
+static vector<RowRange> BuildRangesForRunEncodedColumn(const RunEncodedColumnSpec &encoded_spec,
+                                                       const RunEncodedColumnState &encoded_state,
+                                                       const vector<ClaimedFilter> &col_filters) {
+	return DispatchOnDuckDBType(encoded_spec.column_type, [&](auto type_tag) -> vector<RowRange> {
 		using T = typename decltype(type_tag)::type;
-		auto &typed_values = std::get<std::vector<T>>(rse_state.values);
+		auto &typed_values = std::get<std::vector<T>>(encoded_state.values);
+		D_ASSERT(encoded_state.run_starts.size() == typed_values.size());
 
 		// Loop through runs, building ranges where ALL filters are satisfied
 		vector<RowRange> col_result;
@@ -890,14 +909,14 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 		bool in_range = false;
 
 		// Leading NULL segment (if any) never satisfies comparison filters.
-		if (!rse_state.run_starts.empty()) {
-			current_start = rse_state.run_starts[0];
+		if (!encoded_state.run_starts.empty()) {
+			current_start = encoded_state.run_starts[0];
 		}
 
 		for (size_t i = 0; i < typed_values.size(); i++) {
 			const T &value = typed_values[i];
 			Value run_value = Value::CreateValue(value);
-			idx_t run_start = rse_state.run_starts[i];
+			idx_t run_start = encoded_state.run_starts[i];
 
 			// Check if this run's value satisfies ALL filters
 			bool satisfies_all = true;
@@ -916,14 +935,16 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 				in_range = true;
 			} else if (!satisfies_all && in_range) {
 				// End current range
-				col_result.push_back({current_start, run_start});
+				if (current_start < run_start) {
+					col_result.push_back({current_start, run_start});
+				}
 				in_range = false;
 			}
 		}
 
-		// Close final range if still open
-		if (in_range) {
-			col_result.push_back({current_start, num_rows});
+		// Close final range if still open. Rows at or after non_null_end are NULLs.
+		if (in_range && current_start < encoded_state.non_null_end) {
+			col_result.push_back({current_start, encoded_state.non_null_end});
 		}
 
 		return col_result;
@@ -931,33 +952,60 @@ static vector<RowRange> BuildRangesForRSEColumn(const RSEColumnSpec &rse_spec, c
 }
 
 //===--------------------------------------------------------------------===//
-// RSE Helpers
+// Run-Encoding Helpers
 //===--------------------------------------------------------------------===//
 
-static vector<idx_t> LoadRunStarts(const string &filename, const RSEColumnSpec &spec, hid_t starts_ds, size_t num_runs,
-                                   hsize_t num_rows) {
-	vector<idx_t> run_starts(num_runs);
+static vector<idx_t> LoadRunBoundaries(const string &filename, const RunEncodedColumnSpec &spec, hid_t boundaries_ds,
+                                       size_t num_runs, hsize_t num_rows, idx_t &non_null_end) {
+	vector<idx_t> boundaries(num_runs);
 	H5ErrorSuppressor suppress;
-	herr_t status = H5Dread(starts_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, run_starts.data());
+	herr_t status = H5Dread(boundaries_ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, boundaries.data());
 	if (status < 0) {
-		throw IOException(FormatDatasetError("Failed to read run_starts from", filename, spec.run_starts_path));
+		throw IOException(FormatDatasetError(string("Failed to read ") + RunBoundaryName(spec.encoding) + " from",
+		                                     filename, spec.boundaries_path));
 	}
 
-	if (!std::is_sorted(run_starts.begin(), run_starts.end())) {
-		throw IOException(FormatDatasetError("RSE run_starts must be non-decreasing", filename, spec.run_starts_path));
-	}
-	if (num_runs > 0 && run_starts.back() > num_rows) {
-		throw IOException(FormatDatasetError("RSE run_starts contains index " + std::to_string(run_starts.back()) +
-		                                         " which exceeds dataset length " + std::to_string(num_rows),
-		                                     filename, spec.run_starts_path));
+	if (!std::is_sorted(boundaries.begin(), boundaries.end())) {
+		throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) + " " +
+		                                         RunBoundaryName(spec.encoding) + " must be non-decreasing",
+		                                     filename, spec.boundaries_path));
 	}
 
+	const auto row_count = static_cast<idx_t>(num_rows);
+	auto clamp_to_row_count = [row_count](idx_t boundary) {
+		return std::min(boundary, row_count);
+	};
+	auto exclusive_end_from_inclusive = [row_count](idx_t run_end) {
+		// Clamp before adding 1 to prevent hypothetical overflow.
+		if (run_end >= row_count) {
+			return row_count;
+		}
+		return run_end + 1;
+	};
+
+	if (spec.encoding == RunEncodingKind::START) {
+		non_null_end = row_count;
+		std::transform(boundaries.begin(), boundaries.end(), boundaries.begin(), clamp_to_row_count);
+		return boundaries;
+	}
+
+	non_null_end = 0;
+	if (num_runs == 0) {
+		return boundaries;
+	}
+
+	vector<idx_t> run_starts(num_runs);
+	run_starts[0] = 0;
+	for (size_t i = 1; i < num_runs; i++) {
+		run_starts[i] = exclusive_end_from_inclusive(boundaries[i - 1]);
+	}
+	non_null_end = exclusive_end_from_inclusive(boundaries.back());
 	return run_starts;
 }
 
-static RSEColumnState::RSEValueStorage LoadRSEValues(const string &filename, const RSEColumnSpec &spec, hid_t values_ds,
-                                                     size_t num_values) {
-	return DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) -> RSEColumnState::RSEValueStorage {
+static RunEncodedColumnState::RunEncodedValueStorage
+LoadRunEncodedValues(const string &filename, const RunEncodedColumnSpec &spec, hid_t values_ds, size_t num_values) {
+	return DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) -> RunEncodedColumnState::RunEncodedValueStorage {
 		using T = typename decltype(type_tag)::type;
 
 		if constexpr (std::is_same_v<T, string>) {
@@ -1063,15 +1111,15 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 	hsize_t min_rows = std::numeric_limits<hsize_t>::max();
 	size_t num_regular_columns = 0;
 	size_t non_scalar_regular_columns = 0;
-	bool has_rse_columns = false;
+	bool has_run_encoded_columns = false;
 
-	// Process each column (regular dataset, RSE, or index)
+	// Process each column (regular dataset, run-encoded, or index)
 	for (size_t i = 0; i < num_columns; i++) {
 		const auto &input_val = inputs[i + 1];
 		std::optional<std::string> alias_name;
 		Value column_val = UnwrapAliasSpec(input_val, alias_name);
 
-		// Check for virtual index or RSE column (STRUCT type)
+		// Check for virtual index or run-encoded column (STRUCT type)
 		if (column_val.type().id() == LogicalTypeId::STRUCT) {
 			auto &children = StructValue::GetChildren(column_val);
 
@@ -1088,47 +1136,54 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 				continue;
 			}
 
-			// RSE column - extract struct fields
+			// Run-encoded column - extract struct fields
 			if (children.size() != 3) {
-				throw InvalidInputException("Expected h5_rse() to return a struct with 3 fields");
+				throw InvalidInputException("Expected h5_rse() or h5_ree() to return a struct with 3 fields");
 			}
 
 			string encoding = children[0].GetValue<string>();
-			string run_starts = children[1].GetValue<string>();
+			string boundaries = children[1].GetValue<string>();
 			string values = children[2].GetValue<string>();
 
-			if (encoding != "rse") {
+			RunEncodingKind encoding_kind;
+			if (encoding == "rse") {
+				encoding_kind = RunEncodingKind::START;
+			} else if (encoding == "ree") {
+				encoding_kind = RunEncodingKind::END;
+			} else {
 				throw InvalidInputException("Unknown encoding: " + encoding);
 			}
 
-			RSEColumnSpec rse_spec;
-			rse_spec.run_starts_path = run_starts;
-			rse_spec.values_path = values;
-			rse_spec.column_name = alias_name ? *alias_name : GetColumnName(values);
-			has_rse_columns = true;
+			RunEncodedColumnSpec encoded_spec;
+			encoded_spec.encoding = encoding_kind;
+			encoded_spec.boundaries_path = boundaries;
+			encoded_spec.values_path = values;
+			encoded_spec.column_name = alias_name ? *alias_name : GetColumnName(values);
+			has_run_encoded_columns = true;
 
-			// Open run_starts dataset and get type
-			auto [starts_ds, starts_type] = OpenDatasetAndGetType(file, result.filename, run_starts);
-			if (H5Tget_class(starts_type) != H5T_INTEGER) {
-				throw IOException(
-				    FormatDatasetError("RSE run_starts must be integer type", result.filename, run_starts));
+			// Open boundary dataset and get type
+			auto [boundaries_ds, boundaries_type] = OpenDatasetAndGetType(file, result.filename, boundaries);
+			if (H5Tget_class(boundaries_type) != H5T_INTEGER) {
+				throw IOException(FormatDatasetError(string(RunEncodingName(encoding_kind)) + " " +
+				                                         RunBoundaryName(encoding_kind) + " must be integer type",
+				                                     result.filename, boundaries));
 			}
 
 			// Open values dataset and get type
 			auto [values_ds, values_type] = OpenDatasetAndGetType(file, result.filename, values);
 			// Determine DuckDB column type from values (before move)
-			rse_spec.column_type = H5TypeToDuckDBType(values_type);
+			encoded_spec.column_type = H5TypeToDuckDBType(values_type);
 			if (H5Tget_class(values_type) == H5T_STRING) {
-				rse_spec.values_string_h5_type = std::move(values_type);
+				encoded_spec.values_string_h5_type = std::move(values_type);
 			}
 
-			result.columns.push_back(std::move(rse_spec));
+			result.columns.push_back(std::move(encoded_spec));
 
 		} else {
 			// Regular column (may be scalar)
 			if (column_val.type().id() != LogicalTypeId::VARCHAR) {
-				throw InvalidInputException("h5_read dataset path arguments must be VARCHAR, h5_rse(), h5_index(), or "
-				                            "h5_alias(...)");
+				throw InvalidInputException("h5_read dataset path arguments must be VARCHAR, h5_rse(), h5_ree(), "
+				                            "h5_index(), or h5_alias(...)");
 			}
 			RegularColumnSpec ds_info;
 			ds_info.path = GetRequiredStringArgument(column_val, "h5_read", "dataset path");
@@ -1211,10 +1266,11 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 		throw IOException("h5_read requires at least one regular column");
 	}
 
-	// RSE requires a non-scalar regular column for row count
-	if (has_rse_columns && non_scalar_regular_columns == 0) {
+	// Run-encoded columns require a non-scalar regular column for row count.
+	if (has_run_encoded_columns && non_scalar_regular_columns == 0) {
 		throw IOException(
-		    "h5_read requires at least one non-scalar regular column when using RSE to determine row count");
+		    "h5_read requires at least one non-scalar regular column when using run-encoded columns to determine row "
+		    "count");
 	}
 
 	// Set the row count from non-scalar regular columns
@@ -1248,6 +1304,9 @@ static bool H5ReadSchemasMatch(const H5ReadSingleFileBindData &expected, const H
 			    if constexpr (std::is_same_v<ExpectedT, ActualT>) {
 				    matches = expected_spec.column_name == actual_spec.column_name &&
 				              expected_spec.column_type == actual_spec.column_type;
+				    if constexpr (std::is_same_v<ExpectedT, RunEncodedColumnSpec>) {
+					    matches = matches && expected_spec.encoding == actual_spec.encoding;
+				    }
 			    }
 		    },
 		    expected.columns[i], actual.columns[i]);
@@ -1341,11 +1400,11 @@ static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vect
 static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx, const vector<ClaimedFilter> &col_filters,
                                              const H5ReadSingleFileBindView &bind_data,
                                              const H5ReadGlobalState &gstate) {
-	if (std::holds_alternative<RSEColumnSpec>(bind_data.columns[global_idx])) {
+	if (std::holds_alternative<RunEncodedColumnSpec>(bind_data.columns[global_idx])) {
 		LocalColumnIdx local_idx = GlobalToLocal(gstate, global_idx);
-		auto &rse_spec = std::get<RSEColumnSpec>(bind_data.columns[global_idx]);
-		auto &rse_state = std::get<RSEColumnState>(gstate.column_states[local_idx]);
-		return BuildRangesForRSEColumn(rse_spec, rse_state, col_filters, bind_data.num_rows);
+		auto &encoded_spec = std::get<RunEncodedColumnSpec>(bind_data.columns[global_idx]);
+		auto &encoded_state = std::get<RunEncodedColumnState>(gstate.column_states[local_idx]);
+		return BuildRangesForRunEncodedColumn(encoded_spec, encoded_state, col_filters);
 	}
 	if (std::holds_alternative<IndexColumnSpec>(bind_data.columns[global_idx])) {
 		return BuildIndexRanges(col_filters, bind_data.num_rows);
@@ -1491,82 +1550,95 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    // Store in dense array with LOCAL indexing
 				    result->column_states.push_back(std::move(scalar_state));
 
-			    } else if constexpr (std::is_same_v<T, RSEColumnSpec>) {
-				    // RSE column - load run_starts and values using stored types from Bind
-				    RSEColumnState rse_col;
+			    } else if constexpr (std::is_same_v<T, RunEncodedColumnSpec>) {
+				    // Run-encoded column - load boundaries and values using stored types from Bind
+				    RunEncodedColumnState encoded_col;
 
 				    // Open datasets (types were inspected in Bind phase) - RAII handles cleanup
-				    H5DatasetHandle starts_ds;
+				    H5DatasetHandle boundaries_ds;
 				    H5DatasetHandle values_ds;
 				    {
 					    H5ErrorSuppressor suppress;
-					    starts_ds = H5DatasetHandle(result->file, spec.run_starts_path.c_str());
-					    if (!starts_ds.is_valid()) {
-						    throw IOException(FormatDatasetError("Failed to open RSE run_starts dataset",
-						                                         bind_data.filename, spec.run_starts_path));
+					    boundaries_ds = H5DatasetHandle(result->file, spec.boundaries_path.c_str());
+					    if (!boundaries_ds.is_valid()) {
+						    throw IOException(FormatDatasetError(string("Failed to open ") +
+						                                             RunEncodingName(spec.encoding) + " " +
+						                                             RunBoundaryName(spec.encoding) + " dataset",
+						                                         bind_data.filename, spec.boundaries_path));
 					    }
 
 					    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
 					    if (!values_ds.is_valid()) {
-						    throw IOException(FormatDatasetError("Failed to open RSE values dataset",
+						    throw IOException(FormatDatasetError(string("Failed to open ") +
+						                                             RunEncodingName(spec.encoding) + " values dataset",
 						                                         bind_data.filename, spec.values_path));
 					    }
 				    }
 
 				    // Get array sizes
-				    H5DataspaceHandle starts_space(starts_ds);
-				    int starts_ndims = H5Sget_simple_extent_ndims(starts_space);
-				    if (starts_ndims < 0) {
-					    throw IOException(FormatDatasetError("Failed to get dimensions for RSE run_starts dataset",
-					                                         bind_data.filename, spec.run_starts_path));
+				    H5DataspaceHandle boundaries_space(boundaries_ds);
+				    int boundaries_ndims = H5Sget_simple_extent_ndims(boundaries_space);
+				    if (boundaries_ndims < 0) {
+					    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
+					                                             RunEncodingName(spec.encoding) + " " +
+					                                             RunBoundaryName(spec.encoding) + " dataset",
+					                                         bind_data.filename, spec.boundaries_path));
 				    }
-				    if (starts_ndims != 1) {
-					    throw IOException(FormatDatasetError("RSE run_starts must be a 1-dimensional dataset",
-					                                         bind_data.filename, spec.run_starts_path));
+				    if (boundaries_ndims != 1) {
+					    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) + " " +
+					                                             RunBoundaryName(spec.encoding) +
+					                                             " must be a 1-dimensional dataset",
+					                                         bind_data.filename, spec.boundaries_path));
 				    }
-				    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(starts_space);
+				    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(boundaries_space);
 
 				    H5DataspaceHandle values_space(values_ds);
 				    int values_ndims = H5Sget_simple_extent_ndims(values_space);
 				    if (values_ndims < 0) {
-					    throw IOException(FormatDatasetError("Failed to get dimensions for RSE values dataset",
+					    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
+					                                             RunEncodingName(spec.encoding) + " values dataset",
 					                                         bind_data.filename, spec.values_path));
 				    }
 				    if (values_ndims != 1) {
-					    throw IOException(FormatDatasetError("RSE values must be a 1-dimensional dataset",
+					    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) +
+					                                             " values must be a 1-dimensional dataset",
 					                                         bind_data.filename, spec.values_path));
 				    }
 				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
 				    if (num_runs_hssize < 0) {
-					    throw IOException(FormatDatasetError("Failed to get dataset size for RSE run_starts dataset",
-					                                         bind_data.filename, spec.run_starts_path));
+					    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
+					                                             RunEncodingName(spec.encoding) + " " +
+					                                             RunBoundaryName(spec.encoding) + " dataset",
+					                                         bind_data.filename, spec.boundaries_path));
 				    }
 				    if (num_values_hssize < 0) {
-					    throw IOException(FormatDatasetError("Failed to get dataset size for RSE values dataset",
+					    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
+					                                             RunEncodingName(spec.encoding) + " values dataset",
 					                                         bind_data.filename, spec.values_path));
 				    }
 
 				    size_t num_runs = static_cast<size_t>(num_runs_hssize);
 				    size_t num_values = static_cast<size_t>(num_values_hssize);
 
-				    // Validate: run_starts and values must have same size
+				    // Validate: boundaries and values must have same size
 				    if (num_runs != num_values) {
-					    throw IOException(FormatRSEDatasetPairError(
-					        "RSE run_starts and values must have same size. Got " + std::to_string(num_runs) + " and " +
+					    throw IOException(FormatRunEncodedDatasetPairError(
+					        string(RunEncodingName(spec.encoding)) + " " + RunBoundaryName(spec.encoding) +
+					            " and values must have same size. Got " + std::to_string(num_runs) + " and " +
 					            std::to_string(num_values),
 					        bind_data.filename, spec));
 				    }
 
-				    rse_col.run_starts =
-				        LoadRunStarts(bind_data.filename, spec, starts_ds, num_runs, bind_data.num_rows);
-				    rse_col.values = LoadRSEValues(bind_data.filename, spec, values_ds, num_values);
+				    encoded_col.run_starts = LoadRunBoundaries(bind_data.filename, spec, boundaries_ds, num_runs,
+				                                               bind_data.num_rows, encoded_col.non_null_end);
+				    encoded_col.values = LoadRunEncodedValues(bind_data.filename, spec, values_ds, num_values);
 
-				    // Note: RSEColumnState is now stateless (thread-safe)
+				    // Note: encoded column state is stateless (thread-safe)
 				    // No runtime state initialization needed
 
 				    // Store in dense array with LOCAL indexing
-				    result->column_states.push_back(std::move(rse_col));
+				    result->column_states.push_back(std::move(encoded_col));
 			    } else if constexpr (std::is_same_v<T, IndexColumnSpec>) {
 				    // Virtual index column - no HDF5 state required
 				    result->column_states.push_back(IndexColumnState {});
@@ -1602,7 +1674,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 		filters_by_column[filter.column_index].push_back(filter);
 	}
 
-	// If we have filters on RSE or index columns, compute row ranges
+	// If we have filters on run-encoded or index columns, compute row ranges
 	if (!filters_by_column.empty()) {
 		vector<RowRange> ranges = {{0, bind_data.num_rows}};
 
@@ -1812,7 +1884,7 @@ static void H5ReadAddClaimedFilter(vector<ClaimedFilter> &claimed, idx_t column_
 	claimed.push_back(std::move(filter));
 }
 
-// Helper: Try to claim a filter on an RSE or index column
+// Helper: Try to claim a filter on a run-encoded or index column
 template <typename TableIndexT>
 static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const TableIndexT &table_index,
                                    const unordered_map<idx_t, idx_t> &get_to_bind_map,
@@ -1894,7 +1966,7 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 				return true; // Indicate we claimed something
 			}
 
-			// No RSE filters in this conjunction
+			// No run-encoded filters in this conjunction
 			return false;
 		}
 	}
@@ -1909,10 +1981,11 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
 	const auto &columns = GetCanonicalColumns(bind_data);
 
-	// Build set of pushdown-eligible column indices (RSE or index)
+	// Build set of pushdown-eligible column indices (run-encoded or index)
 	unordered_set<idx_t> pushdown_column_indices;
 	for (idx_t i = 0; i < columns.size(); i++) {
-		if (std::holds_alternative<RSEColumnSpec>(columns[i]) || std::holds_alternative<IndexColumnSpec>(columns[i])) {
+		if (std::holds_alternative<RunEncodedColumnSpec>(columns[i]) ||
+		    std::holds_alternative<IndexColumnSpec>(columns[i])) {
 			pushdown_column_indices.insert(i);
 		}
 	}
@@ -1996,17 +2069,23 @@ static RangeSelection ClaimNextRange(H5ReadGlobalState &gstate, idx_t num_rows) 
 	return range;
 }
 
-// Helper function to scan an RSE column
-static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vector &result_vector, idx_t position,
-                          idx_t to_read, hsize_t num_rows) {
+// Helper function to scan a run-encoded column
+static void ScanRunEncodedColumn(const RunEncodedColumnSpec &spec, RunEncodedColumnState &state, Vector &result_vector,
+                                 idx_t position, idx_t to_read) {
 	// Dispatch once per chunk, not per row
 	DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
 
 		// Access typed vector directly (no Value overhead)
 		const auto &typed_values = std::get<std::vector<T>>(state.values);
-		if (state.run_starts.empty() && typed_values.empty()) {
-			// Empty RSE encoding: emit NULLs for the requested rows
+		D_ASSERT(state.run_starts.size() == typed_values.size());
+		if (state.run_starts.empty()) {
+			// Empty run encoding: emit NULLs for the requested rows
+			result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(result_vector, true);
+			return;
+		}
+		if (position >= state.non_null_end) {
 			result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 			ConstantVector::SetNull(result_vector, true);
 			return;
@@ -2015,7 +2094,7 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 		idx_t result_offset = 0;
 
 		// Leading NULL segment if first run starts after 0
-		if (!state.run_starts.empty() && position < state.run_starts[0]) {
+		if (position < state.run_starts[0]) {
 			result_offset = std::min<idx_t>(to_read, state.run_starts[0] - position);
 			if (result_offset == to_read) {
 				result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -2025,16 +2104,30 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 			position += result_offset;
 			to_read -= result_offset;
 		}
+		if (position >= state.non_null_end) {
+			result_vector.SetVectorType(VectorType::FLAT_VECTOR);
+			for (idx_t i = 0; i < result_offset + to_read; i++) {
+				FlatVector::SetNull(result_vector, i, true);
+			}
+			return;
+		}
+
+		idx_t null_suffix = 0;
+		idx_t non_null_remaining = state.non_null_end - position;
+		if (to_read > non_null_remaining) {
+			null_suffix = to_read - non_null_remaining;
+			to_read = non_null_remaining;
+		}
 
 		auto it = std::upper_bound(state.run_starts.begin(), state.run_starts.end(), position);
 		idx_t current_run = (it - state.run_starts.begin()) - 1;
 		idx_t next_run_start =
-		    (current_run + 1 < state.run_starts.size()) ? state.run_starts[current_run + 1] : num_rows;
+		    (current_run + 1 < state.run_starts.size()) ? state.run_starts[current_run + 1] : state.non_null_end;
 
 		// OPTIMIZATION: Check if entire chunk belongs to single run
 		// With avg run length ~10k and chunk size 2048, this is true ~83% of the time!
 		idx_t rows_in_current_run = next_run_start - position;
-		if (result_offset == 0 && rows_in_current_run >= to_read) {
+		if (result_offset == 0 && null_suffix == 0 && rows_in_current_run >= to_read) {
 			// Entire chunk is one value - emit CONSTANT_VECTOR (no fill loop needed!)
 			result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 			const T &run_value = typed_values[current_run];
@@ -2088,9 +2181,12 @@ static void ScanRSEColumn(const RSEColumnSpec &spec, RSEColumnState &state, Vect
 			// If we've exhausted current run and there's more to read, advance to next run
 			if (i < to_read) {
 				current_run++;
-				next_run_start =
-				    (current_run + 1 < state.run_starts.size()) ? state.run_starts[current_run + 1] : num_rows;
+				next_run_start = (current_run + 1 < state.run_starts.size()) ? state.run_starts[current_run + 1]
+				                                                             : state.non_null_end;
 			}
+		}
+		for (idx_t j = 0; j < null_suffix; j++) {
+			FlatVector::SetNull(result_vector, result_offset + to_read + j, true);
 		}
 	});
 }
@@ -2372,9 +2468,10 @@ static void H5ReadSingleFileScan(ClientContext &context, const H5ReadSingleFileB
 			    using SpecT = std::decay_t<decltype(spec)>;
 			    using StateT = std::decay_t<decltype(state)>;
 
-			    if constexpr (std::is_same_v<SpecT, RSEColumnSpec> && std::is_same_v<StateT, RSEColumnState>) {
-				    // RSE column - call helper function
-				    ScanRSEColumn(spec, state, result_vector, position, to_read, bind_data.num_rows);
+			    if constexpr (std::is_same_v<SpecT, RunEncodedColumnSpec> &&
+			                  std::is_same_v<StateT, RunEncodedColumnState>) {
+				    // Run-encoded column - call helper function
+				    ScanRunEncodedColumn(spec, state, result_vector, position, to_read);
 
 			    } else if constexpr (std::is_same_v<SpecT, ScalarColumnSpec> &&
 			                         std::is_same_v<StateT, ScalarColumnState>) {
@@ -2553,33 +2650,34 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 	}
 }
 
-// ==================== h5_rse Scalar Function ====================
+// ==================== h5_rse/h5_ree Scalar Functions ====================
 
-static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &run_starts_vec = args.data[0];
+static void H5RunEncodingFunction(DataChunk &args, Vector &result, RunEncodingKind encoding) {
+	auto &boundaries_vec = args.data[0];
 	auto &values_vec = args.data[1];
 
-	UnifiedVectorFormat run_starts_data;
+	UnifiedVectorFormat boundaries_data;
 	UnifiedVectorFormat values_data;
-	run_starts_vec.ToUnifiedFormat(args.size(), run_starts_data);
+	boundaries_vec.ToUnifiedFormat(args.size(), boundaries_data);
 	values_vec.ToUnifiedFormat(args.size(), values_data);
 
-	auto run_starts_ptr = UnifiedVectorFormat::GetData<string_t>(run_starts_data);
+	auto boundaries_ptr = UnifiedVectorFormat::GetData<string_t>(boundaries_data);
 	auto values_ptr = UnifiedVectorFormat::GetData<string_t>(values_data);
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
 	auto &encoding_child = GetStructChild(children[0]);
-	auto &run_starts_child = GetStructChild(children[1]);
+	auto &boundaries_child = GetStructChild(children[1]);
 	auto &values_child = GetStructChild(children[2]);
 
 	for (idx_t i = 0; i < args.size(); i++) {
-		auto run_starts_idx = run_starts_data.sel->get_index(i);
+		auto boundaries_idx = boundaries_data.sel->get_index(i);
 		auto values_idx = values_data.sel->get_index(i);
 
-		FlatVector::GetData<string_t>(encoding_child)[i] = StringVector::AddString(encoding_child, "rse");
-		FlatVector::GetData<string_t>(run_starts_child)[i] =
-		    StringVector::AddString(run_starts_child, run_starts_ptr[run_starts_idx]);
+		FlatVector::GetData<string_t>(encoding_child)[i] =
+		    StringVector::AddString(encoding_child, RunEncodingTag(encoding));
+		FlatVector::GetData<string_t>(boundaries_child)[i] =
+		    StringVector::AddString(boundaries_child, boundaries_ptr[boundaries_idx]);
 		FlatVector::GetData<string_t>(values_child)[i] = StringVector::AddString(values_child, values_ptr[values_idx]);
 	}
 
@@ -2587,6 +2685,14 @@ static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	if (args.size() == 1) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	}
+}
+
+static void H5RseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	H5RunEncodingFunction(args, result, RunEncodingKind::START);
+}
+
+static void H5ReeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	H5RunEncodingFunction(args, result, RunEncodingKind::END);
 }
 
 void RegisterH5RseFunction(ExtensionLoader &loader) {
@@ -2601,6 +2707,21 @@ void RegisterH5RseFunction(ExtensionLoader &loader) {
 	    H5FunctionDescription({LogicalType::VARCHAR, LogicalType::VARCHAR}, {"run_starts_path", "values_path"},
 	                          "Creates a run-start encoded column definition for h5_read().",
 	                          {"FROM h5_read('data.h5', '/time', h5_rse('/state_run_starts', '/state_values'))"}));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterH5ReeFunction(ExtensionLoader &loader) {
+	child_list_t<LogicalType> struct_children = {
+	    {"encoding", LogicalType::VARCHAR}, {"run_ends", LogicalType::VARCHAR}, {"values", LogicalType::VARCHAR}};
+
+	auto h5_ree = ScalarFunction("h5_ree", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                             LogicalType::STRUCT(struct_children), H5ReeFunction);
+	CreateScalarFunctionInfo info(std::move(h5_ree));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(
+	    H5FunctionDescription({LogicalType::VARCHAR, LogicalType::VARCHAR}, {"run_ends_path", "values_path"},
+	                          "Creates a run-end encoded column definition for h5_read().",
+	                          {"FROM h5_read('data.h5', '/time', h5_ree('/state_run_ends', '/state_values'))"}));
 	loader.RegisterFunction(std::move(info));
 }
 
@@ -2843,21 +2964,21 @@ static virtual_column_map_t H5ReadGetVirtualColumns(ClientContext &, optional_pt
 }
 
 void RegisterH5ReadFunction(ExtensionLoader &loader) {
-	// First argument is filename (VARCHAR), then 1+ dataset paths (VARCHAR or STRUCT for RSE)
+	// First argument is filename (VARCHAR), then 1+ dataset paths (VARCHAR or STRUCT for encoded columns)
 	TableFunction h5_read_function("h5_read", {LogicalType::VARCHAR, LogicalType::ANY}, H5ReadScan, H5ReadBind,
 	                               H5ReadInit);
-	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse())
+	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse()/h5_ree())
 	h5_read_function.varargs = LogicalType::ANY;
 	h5_read_function.named_parameters["filename"] = LogicalType::ANY;
 	h5_read_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
 
 	// Predicate pushdown: claim filters in bind, build row ranges in init,
-	// and scan only matching RSE/index ranges while keeping DuckDB's post-scan verification.
+	// and scan only matching run-encoded/index ranges while keeping DuckDB's post-scan verification.
 
 	// Enable projection pushdown - only read columns that are actually needed
 	h5_read_function.projection_pushdown = true;
 
-	// Enable predicate pushdown for RSE and index columns.
+	// Enable predicate pushdown for run-encoded and index columns.
 	// We claim filters for I/O optimization but keep them for post-scan verification.
 	// DuckDB applies all filters post-scan (defensive, ensures correctness)
 	h5_read_function.pushdown_complex_filter = H5ReadPushdownComplexFilter;

@@ -72,6 +72,9 @@ void RegisterH5ReadFunction(ExtensionLoader &loader);
 // Scalar function for creating RSE (run-start encoded) column specs
 void RegisterH5RseFunction(ExtensionLoader &loader);
 
+// Scalar function for creating REE (run-end encoded) column specs
+void RegisterH5ReeFunction(ExtensionLoader &loader);
+
 // Scalar function for aliasing column specs with custom names
 void RegisterH5AliasFunction(ExtensionLoader &loader);
 

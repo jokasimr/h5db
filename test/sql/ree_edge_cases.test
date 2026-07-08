@@ -1,0 +1,299 @@
+# name: test/sql/ree_edge_cases.test
+# description: Edge case tests for REE (Run-End Encoding) scanner
+# group: [sql]
+
+require h5db
+
+# =============================================================================
+# Inclusive run-end semantics
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/basic/index',
+    h5_ree('/basic/run_ends', '/basic/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	20
+3	20
+4	30
+5	30
+
+# =============================================================================
+# Trailing NULLs
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/trailing_nulls/index',
+    h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	10
+3	20
+4	20
+5	NULL
+
+query III
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values = 20)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/trailing_nulls/index',
+    h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values')
+);
+----
+6	1	2
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/trailing_nulls/index',
+    h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values')
+)
+WHERE values = 20;
+----
+2	3	4
+
+# =============================================================================
+# Empty runs
+# =============================================================================
+
+query II
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/empty_runs/index',
+    h5_ree('/empty_runs/run_ends', '/empty_runs/values')
+);
+----
+5	5
+
+# =============================================================================
+# Boundary and zero-length runs
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/single_row_first_end/index',
+    h5_ree('/single_row_first_end/run_ends', '/single_row_first_end/values')
+)
+ORDER BY index;
+----
+0	10
+1	20
+2	20
+3	20
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_ree('/zero_length_middle/run_ends', '/zero_length_middle/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	10
+3	30
+4	30
+5	NULL
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values = 30)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_ree('/zero_length_middle/run_ends', '/zero_length_middle/values')
+);
+----
+0	2
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_ree('/zero_length_middle/run_ends', '/zero_length_middle/values')
+)
+WHERE values = 20;
+----
+0
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 99),
+       COUNT(*) FILTER (WHERE values = 20)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/zero_length_end/index',
+    h5_ree('/zero_length_end/run_ends', '/zero_length_end/values')
+);
+----
+0	2
+
+query III
+SELECT COUNT(*) FILTER (WHERE values IN (30, 40)),
+       COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/zero_length_repeated/index',
+    h5_ree('/zero_length_repeated/run_ends', '/zero_length_repeated/values')
+);
+----
+0	2	2
+
+# =============================================================================
+# String values
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/string_trailing_nulls/index',
+    h5_ree('/string_trailing_nulls/run_ends', '/string_trailing_nulls/values')
+)
+ORDER BY index;
+----
+0	alpha
+1	alpha
+2	beta
+3	beta
+4	NULL
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 'unused'),
+       COUNT(*) FILTER (WHERE values = 'beta')
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/string_trailing_nulls/index',
+    h5_ree('/string_trailing_nulls/run_ends', '/string_trailing_nulls/values')
+);
+----
+0	2
+
+# =============================================================================
+# Mixed RSE and REE pushdown
+# =============================================================================
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/mixed_pushdown/index',
+    h5_alias('rse_values', h5_rse('/mixed_pushdown/rse_starts', '/mixed_pushdown/rse_values')),
+    h5_alias('ree_values', h5_ree('/mixed_pushdown/ree_ends', '/mixed_pushdown/ree_values'))
+)
+WHERE rse_values = 2 AND ree_values = 20;
+----
+2	4	5
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/mixed_pushdown/index',
+    h5_alias('ree_values', h5_ree('/mixed_pushdown/ree_ends', '/mixed_pushdown/ree_values'))
+)
+WHERE ree_values = 30;
+----
+3
+
+# =============================================================================
+# Ends beyond the row count extend through the visible rows
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_ree('/overlong_tail/run_ends', '/overlong_tail/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	20
+3	20
+4	20
+
+query III
+SELECT COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values = 99),
+       COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_ree('/overlong_tail/run_ends', '/overlong_tail/values')
+);
+----
+3	0	0
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_ree('/overlong_tail/run_ends', '/overlong_tail/values')
+)
+WHERE values = 99;
+----
+0
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_ree('/overlong_tail/run_ends', '/overlong_tail/values')
+)
+WHERE values = 20;
+----
+3	2	4
+
+query III
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_only/index',
+    h5_ree('/overlong_only/run_ends', '/overlong_only/values')
+);
+----
+5	5	0
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/ree_edge_cases.h5',
+    '/overlong_uint64_max/index',
+    h5_ree('/overlong_uint64_max/run_ends', '/overlong_uint64_max/values')
+)
+ORDER BY index;
+----
+0	10
+1	20
+2	20
+3	20
+4	20

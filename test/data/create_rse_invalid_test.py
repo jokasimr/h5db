@@ -18,10 +18,6 @@ with h5py.File("rse_invalid.h5", "w") as f:
     grp = f.create_group("decreasing")
     create_case(grp, [0, 5, 4], [100, 200, 300], np.uint64, np.int32)
 
-    # run_starts contains index beyond dataset length.
-    grp = f.create_group("exceeds_length")
-    create_case(grp, [0, 11], [100, 200], np.uint64, np.int32)
-
     # run_starts and values size mismatch.
     grp = f.create_group("size_mismatch")
     grp.create_dataset("run_starts", data=np.array([0, 5], dtype=np.uint64))

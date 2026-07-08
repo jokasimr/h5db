@@ -18,6 +18,8 @@ required_files=(
   "$PROJECT_ROOT/test/data/pushdown_test.h5"
   "$PROJECT_ROOT/test/data/rse_edge_cases.h5"
   "$PROJECT_ROOT/test/data/rse_invalid.h5"
+  "$PROJECT_ROOT/test/data/ree_edge_cases.h5"
+  "$PROJECT_ROOT/test/data/ree_invalid.h5"
   "$PROJECT_ROOT/test/data/unsupported_types.h5"
   "$PROJECT_ROOT/test/data/attrs_edge_cases.h5"
   "$PROJECT_ROOT/test/data/invalid_string_array_attrs.h5"

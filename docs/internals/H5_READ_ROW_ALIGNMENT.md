@@ -66,7 +66,7 @@ That invariant keeps the scan path straightforward:
 - HDF5 hyperslab reads never cross the dataset's first-dimension extent
 - the numeric chunk cache can use the table row count as the column row count
 - `h5_index()` is always a valid row index for every non-scalar regular dataset
-- RSE validation can use the same derived row count
+- run-encoded validation can use the same derived row count
 
 It also avoids producing unexpectedly large result sets when a small dataset is
 selected with a much larger one.
@@ -228,30 +228,31 @@ Care is needed for zero-row readable prefixes:
   dataset extent
 - mark only the trailing suffix null when the chunk straddles the dataset end
 
-### RSE Columns
+### Run-Encoded Columns
 
-RSE columns currently require at least one non-scalar regular dataset to
+RSE and REE columns currently require at least one non-scalar regular dataset to
 determine total row count. That requirement would remain.
 
-Under max-row semantics, RSE validation and scan output would use the max
+Under max-row semantics, run-encoded validation and scan output would use the max
 regular row count. This means:
 
-- `run_starts.back() >= max_rows` remains invalid
 - an empty RSE still emits `NULL` for every aligned row
 - if the last RSE run starts before `max_rows`, it extends to `max_rows`
+- an empty REE emits `NULL` for every aligned row
+- if the last REE run ends before `max_rows - 1`, rows after that end are `NULL`
 
 This is internally consistent but semantically more visible than today: a long
-regular dataset can extend the logical duration of an RSE column.
+regular dataset can extend the logical duration of a run-encoded column.
 
 ### Filter Pushdown And Row Ranges
 
 The current pushed row-range logic is primarily relevant for `h5_index()` and
-RSE filters. Those ranges are built against `bind_data.num_rows`.
+run-encoded filters. Those ranges are built against `bind_data.num_rows`.
 
 With max-row semantics:
 
 - index filters naturally use the aligned max row count
-- RSE filters use the aligned max row count
+- run-encoded filters use the aligned max row count
 - regular-column filters are still applied by DuckDB after scanning
 - padded regular-column `NULL`s should therefore be filtered by normal DuckDB
   null semantics
@@ -326,10 +327,9 @@ New focused tests to add:
   - the readable prefix is returned and the suffix is null
 - all-padded numeric cache chunk:
   - a requested chunk starts after the shorter dataset end and does not hang
-- RSE with mismatched regular datasets:
-  - RSE uses max aligned row count
-  - empty RSE emits nulls across max aligned rows
-  - invalid `run_starts` are validated against max aligned rows
+- run-encoded columns with mismatched regular datasets:
+  - encoded columns use max aligned row count
+  - empty encodings emit nulls across max aligned rows
 - multi-file/glob:
   - each file aligns independently before concatenation
   - `filename` is present on padded rows
@@ -377,11 +377,11 @@ return 10 million rows.
 This is semantically consistent with outer positional alignment, but it can be a
 large practical change for interactive use and remote reads.
 
-### RSE Duration Ambiguity
+### Run-Encoding Duration Ambiguity
 
-RSE columns depend on a regular dataset to provide total row count. With max-row
-semantics, an unrelated long regular dataset can extend the final RSE run or the
-empty-RSE null region.
+Run-encoded columns depend on a regular dataset to provide total row count. With
+max-row semantics, an unrelated long regular dataset can extend the final RSE run,
+the REE trailing-null region, or the empty-encoding null region.
 
 That is consistent with the proposed rule but may be surprising.
 
@@ -408,9 +408,9 @@ matter if the change is reopened.
    The natural consequence of "any non-scalar controls row count" is zero rows,
    but this should be explicit in docs and tests.
 
-2. Should RSE get an explicit row-count source in the future? Today it derives
-   row count from selected regular datasets. Outer alignment would make that
-   dependency more visible.
+2. Should run-encoded columns get an explicit row-count source in the future?
+   Today they derive row count from selected regular datasets. Outer alignment
+   would make that dependency more visible.
 
 3. Should the docs call the future behavior "positional join semantics" or
    "outer positional alignment"? The latter is more precise because scalar

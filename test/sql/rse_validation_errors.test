@@ -18,16 +18,6 @@ SELECT * FROM h5_read(
 ----
 IO Error: RSE run_starts must be non-decreasing: /decreasing/run_starts in file: test/data/rse_invalid.h5
 
-# run_starts entries must be <= num_rows
-statement error
-SELECT * FROM h5_read(
-    'test/data/rse_invalid.h5',
-    '/regular',
-    h5_rse('/exceeds_length/run_starts', '/exceeds_length/values')
-);
-----
-IO Error: RSE run_starts contains index 11 which exceeds dataset length 10: /exceeds_length/run_starts in file: test/data/rse_invalid.h5
-
 # run_starts and values sizes must match
 statement error
 SELECT * FROM h5_read(

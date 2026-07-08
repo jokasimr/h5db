@@ -30,12 +30,14 @@ To ensure test data exists (generate only if missing):
 | `simple.h5` | `create_simple_types_multidim.py` | 12 KB | Basic datasets, groups, nested data |
 | `types.h5` | `create_simple_types_multidim.py` | 11 KB | Type system tests (int8/16/32/64, uint*, float32/64, strings) |
 | `multidim.h5` | `create_simple_types_multidim.py` | 4 KB | Multi-dimensional arrays (2D, 3D, 4D) |
-| `run_encoded.h5` | `create_run_encoded_test.py` | 33 KB | RSE (Run-Sequence Encoding) functionality |
+| `run_encoded.h5` | `create_run_encoded_test.py` | 33 KB | RSE (Run-Start Encoding) functionality |
 | `with_attrs.h5` | `create_attrs_test.py` | 8 KB | HDF5 attributes on datasets and groups |
 | `multithreading_test.h5` | `create_multithreading_test.py` | 112 KB | Parallel execution with 10 detectors |
 | `pushdown_test.h5` | `create_pushdown_test.py` | 24 KB | Predicate pushdown optimization |
 | `rse_edge_cases.h5` | `create_rse_edge_cases.py` | 168 KB | RSE edge cases (chunk boundaries, constants, etc.) |
 | `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
+| `ree_edge_cases.h5` | `create_ree_edge_cases.py` | 4 KB | REE edge cases (inclusive ends, trailing NULLs, duplicates) |
+| `ree_invalid.h5` | `create_ree_invalid_test.py` | 4 KB | REE validation errors (invalid run_ends, sizes) |
 | `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, float16, reference, non-string vlen, opaque, bitfield) |
 | `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, enum, compound, float16, reference, opaque, bitfield) |
 | `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
@@ -87,6 +89,8 @@ test/data/
 ├── create_pushdown_test.py            # Creates: pushdown_test.h5
 ├── create_rse_edge_cases.py           # Creates: rse_edge_cases.h5
 ├── create_rse_invalid_test.py         # Creates: rse_invalid.h5
+├── create_ree_edge_cases.py           # Creates: ree_edge_cases.h5
+├── create_ree_invalid_test.py         # Creates: ree_invalid.h5
 ├── create_unsupported_types_test.py   # Creates: unsupported_types.h5
 ├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
 ├── create_invalid_string_array_attrs_test.py # Creates: invalid_string_array_attrs.h5

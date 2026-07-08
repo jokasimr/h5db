@@ -1,6 +1,6 @@
 # Scalar Value Functions
 
-This note describes the intended implementation shape for scalar
+This note describes the implementation shape for scalar
 `h5_attributes(...)` and scalar `h5_read(...)`.
 
 ## Scalar `h5_attributes`

@@ -542,7 +542,7 @@ limitations before assuming the file is corrupt.
 Once you are comfortable with the basics, the next most useful topics are:
 
 - projected attributes with `h5_attr(...)` in `h5_tree(...)` and `h5_ls(...)`
-- run-start encoded columns with `h5_rse(...)`
+- run-encoded columns with `h5_rse(...)` or `h5_ree(...)`
 - remote access over HTTP/S3/SFTP
 - exact type and error behavior
 

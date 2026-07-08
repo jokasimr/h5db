@@ -1,0 +1,55 @@
+# name: test/sql/ree_validation_errors.test
+# description: REE validation errors (invalid run_ends/values)
+# group: [sql]
+
+require h5db
+
+# run_ends must be non-decreasing
+statement error
+SELECT * FROM h5_read(
+    'test/data/ree_invalid.h5',
+    '/regular',
+    h5_ree('/decreasing/run_ends', '/decreasing/values')
+);
+----
+IO Error: REE run_ends must be non-decreasing: /decreasing/run_ends in file: test/data/ree_invalid.h5
+
+# run_ends and values sizes must match
+statement error
+SELECT * FROM h5_read(
+    'test/data/ree_invalid.h5',
+    '/regular',
+    h5_ree('/size_mismatch/run_ends', '/size_mismatch/values')
+);
+----
+IO Error: REE run_ends and values must have same size. Got 2 and 1 for run_ends dataset: /size_mismatch/run_ends, values dataset: /size_mismatch/values in file: test/data/ree_invalid.h5
+
+# run_ends must be integer type
+statement error
+SELECT * FROM h5_read(
+    'test/data/ree_invalid.h5',
+    '/regular',
+    h5_ree('/non_integer_ends/run_ends', '/non_integer_ends/values')
+);
+----
+IO Error: REE run_ends must be integer type: /non_integer_ends/run_ends in file: test/data/ree_invalid.h5
+
+# run_ends must be 1-dimensional
+statement error
+SELECT * FROM h5_read(
+    'test/data/ree_invalid.h5',
+    '/regular',
+    h5_ree('/multidim_ends/run_ends', '/multidim_ends/values')
+);
+----
+IO Error: REE run_ends must be a 1-dimensional dataset: /multidim_ends/run_ends in file: test/data/ree_invalid.h5
+
+# values must be 1-dimensional
+statement error
+SELECT * FROM h5_read(
+    'test/data/ree_invalid.h5',
+    '/regular',
+    h5_ree('/multidim_values/run_ends', '/multidim_values/values')
+);
+----
+IO Error: REE values must be a 1-dimensional dataset: /multidim_values/values in file: test/data/ree_invalid.h5

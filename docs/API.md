@@ -16,6 +16,7 @@ This document describes the public SQL functions provided by the h5db extension.
   - [`h5_read(filename, dataset_path)`](#h5_readfilename-dataset_path)
   - [`h5_attributes(filename, object_path)`](#h5_attributesfilename-object_path)
   - [`h5_rse(run_starts_path, values_path)`](#h5_rserun_starts_path-values_path)
+  - [`h5_ree(run_ends_path, values_path)`](#h5_reerun_ends_path-values_path)
   - [`h5_index()`](#h5_index)
   - [`h5_attr([name[, default_value]])`](#h5_attrname-default_value)
   - [`h5_alias(name, definition)`](#h5_aliasname-definition)
@@ -205,7 +206,7 @@ Reads data from one or more datasets in an HDF5 file.
 - `filename_or_filenames` (VARCHAR or VARCHAR[]): Local path or remote URL to the HDF5 file, a glob
   pattern, or a list of exact filenames/URLs and/or glob patterns. See [Remote Access](#remote-access) and
   [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing).
-- `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` for run-start encoded columns
+- `dataset_path` (VARCHAR or STRUCT): Dataset path(s) to read. Use `h5_rse()` or `h5_ree()` for run-encoded columns
 - `h5_index()` can be provided to add a virtual index column named `index`
 - `h5_alias(name, definition)` can be used to rename a column definition
 - Additional dataset paths can be provided (variadic arguments)
@@ -544,7 +545,7 @@ Creates a run-start encoded (RSE) column specification for use with `h5_read()`.
 **Requirements:**
 - `run_starts` must be an integer dataset, non-decreasing
 - `run_starts` and `values` must have the same length
-- At least one non-scalar regular (non-RSE) column must be present in the `h5_read()` call to determine total row count
+- At least one non-scalar regular column must be present in the `h5_read()` call to determine total row count
 
 **Notes:**
 - If `run_starts[0] > 0`, rows before the first run start are returned as NULLs.
@@ -560,6 +561,37 @@ SELECT * FROM h5_read(
 ```
 
 For detailed information on run-start encoding, see [RSE_USAGE.md](RSE_USAGE.md).
+
+---
+
+### `h5_ree(run_ends_path, values_path)`
+
+Creates a run-end encoded (REE) column specification for use with `h5_read()`.
+
+**Parameters:**
+- `run_ends_path` (VARCHAR): Path to dataset containing inclusive run end indices
+- `values_path` (VARCHAR): Path to dataset containing values for each run
+
+**Returns:** STRUCT with fields `{encoding, run_ends, values}`
+
+**Requirements:**
+- `run_ends` must be an integer dataset, non-decreasing
+- `run_ends` and `values` must have the same length
+- At least one non-scalar regular column must be present in the `h5_read()` call to determine total row count
+
+**Notes:**
+- `run_ends` are inclusive: a run ending at `2` includes row `2`.
+- If the final run end is before the last row, later rows are returned as NULLs.
+- Duplicate ends are allowed and represent zero-length runs.
+
+**Example:**
+```sql
+SELECT * FROM h5_read(
+    'data.h5',
+    '/row_index',
+    h5_ree('/state_ends', '/state_vals')
+);
+```
 
 ---
 
@@ -663,7 +695,7 @@ definition when used with `h5_tree()` or `h5_ls()`.
 
 **Parameters:**
 - `name` (VARCHAR): Column name to use in the output
-- `definition` (VARCHAR or STRUCT): A dataset path, a column definition like `h5_rse()` or `h5_index()`, or a
+- `definition` (VARCHAR or STRUCT): A dataset path, a column definition like `h5_rse()`, `h5_ree()`, or `h5_index()`, or a
   projected attribute definition from `h5_attr()`
 
 **Returns:** STRUCT wrapper used by `h5_read()`, `h5_tree()`, and `h5_ls()`
@@ -907,7 +939,8 @@ All functions provide clear error messages for common issues:
 - **File not found**: "IO Error: Failed to open HDF5 file"
 - **Invalid path**: "IO Error: Failed to open dataset/object: ... in file: ..."
 - **Unsupported type**: "IO Error: Unsupported HDF5 type"
-- **Invalid RSE data**: "IO Error: RSE run_starts must be non-decreasing: ... in file: ..."
+- **Invalid run-encoded data**: "IO Error: RSE run_starts must be non-decreasing: ... in file: ..." or
+  "IO Error: REE run_ends must be non-decreasing: ... in file: ..."
 - **No attributes in table `h5_attributes()`**: "IO Error: Object has no attributes: ... in file: ..."
 
 ---
@@ -916,7 +949,7 @@ All functions provide clear error messages for common issues:
 
 - **`h5_read` projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely
   for significant performance gains
-- **`h5_read` predicate pushdown**: Range-like filters with static constants are applied during scan for RSE and `h5_index()` columns
+- **`h5_read` predicate pushdown**: Range-like filters with static constants are applied during scan for run-encoded and `h5_index()` columns
   to reduce I/O. Supported shapes include `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, bind-time-foldable RHS expressions, and
   comparison-cast forms that normalize to those operators. Unsupported boolean shapes such as `OR`, `!=`,
   `IS DISTINCT FROM`, or expressions like `index + 1 > 10` remain post-scan filters.
@@ -925,7 +958,7 @@ All functions provide clear error messages for common issues:
   `h5_ls(...)`, not to `h5_read(...)` or `h5_attributes(...)`.
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
-- **RSE optimization**: Run-start encoded data is expanded on-the-fly with O(1) amortized cost per row
+- **Run-encoding optimization**: Run-start and run-end encoded data is expanded on-the-fly with O(1) amortized cost per row
 - **Parallel scanning**: `h5_read` can scan different row ranges in parallel where the dataset layout and query allow it
 
 ---

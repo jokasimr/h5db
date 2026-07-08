@@ -903,6 +903,71 @@ FROM h5_read(
 0	2	1
 
 # =============================================================================
+# Test: Starts beyond the row count are zero-length runs
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_rse('/overlong_tail/run_starts', '/overlong_tail/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	20
+3	20
+4	20
+
+query III
+SELECT COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values IN (99, 100)),
+       COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_rse('/overlong_tail/run_starts', '/overlong_tail/values')
+);
+----
+3	0	0
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_rse('/overlong_tail/run_starts', '/overlong_tail/values')
+)
+WHERE values = 99;
+----
+0
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/overlong_tail/index',
+    h5_rse('/overlong_tail/run_starts', '/overlong_tail/values')
+)
+WHERE values = 20;
+----
+3	2	4
+
+query III
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values IN (99, 100))
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/overlong_first/index',
+    h5_rse('/overlong_first/run_starts', '/overlong_first/values')
+);
+----
+5	5	0
+
+# =============================================================================
 # Type Detection Tests
 # =============================================================================
 

@@ -60,6 +60,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterH5LsFunctions(loader);
 	RegisterH5ReadFunction(loader);
 	RegisterH5RseFunction(loader);
+	RegisterH5ReeFunction(loader);
 	RegisterH5AliasFunction(loader);
 	RegisterH5AttrFunction(loader);
 	RegisterH5IndexFunction(loader);

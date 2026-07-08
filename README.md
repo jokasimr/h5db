@@ -11,7 +11,7 @@ stack or SFTP.
 - Multiple datasets can be stacked horizontally to make a table.
 - Scalar datasets are treated as constant columns.
 - Supports projection pushdown in `h5_read(...)`.
-- Supports row-range predicate pushdown for `h5_index()` and run-start encoded columns.
+- Supports row-range predicate pushdown for `h5_index()` and run-encoded columns.
 - Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
   patterns, or `VARCHAR[]` filename inputs.
 - `h5_tree(...)` and table-valued `h5_ls(...)` can prune glob/list inputs from selective `filename` filters before
@@ -25,7 +25,7 @@ stack or SFTP.
 
 - `h5_read(filename_or_filenames, datasets_or_definitions...)`
   Reads one or more datasets as DuckDB columns. Supports regular datasets, special column encodings such as
-  "run start encoded" columns (see `h5_rse()`), and virtual index columns (see `h5_index()`). The scalar form reads
+  run-encoded columns (see `h5_rse()` and `h5_ree()`), and virtual index columns (see `h5_index()`). The scalar form reads
   one scalar dataset as a value.
 - `h5_tree(filename_or_filenames, projected_attributes...)`
   Recursively lists namespace entries with `path`, `type`, `dtype`, and `shape`. Output is path-oriented: if multiple
@@ -113,6 +113,13 @@ FROM h5_read(
     'experiment.h5',
     '/timestamp',
     h5_rse('/state_run_starts', '/state_values')
+);
+
+-- Read run-end encoded data
+FROM h5_read(
+    'experiment.h5',
+    '/timestamp',
+    h5_ree('/state_run_ends', '/state_values')
 );
 
 -- Rename a column definition

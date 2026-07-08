@@ -378,5 +378,28 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
         values=np.array([10, 20, 30, 40, 50], dtype=np.int32),
     )
 
+    # ==========================================================================
+    # Test 30: Starts beyond the row count are terminal zero-length runs
+    # Rows 0-1 -> 10, rows 2-4 -> 20. Values 99 and 100 have zero rows.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'overlong_tail',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([0, 2, 100, 101], dtype=np.uint64),
+        values=np.array([10, 20, 99, 100], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 31: If every start is beyond the row count, all rows are leading NULLs
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'overlong_first',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([100, 101], dtype=np.uint64),
+        values=np.array([99, 100], dtype=np.int32),
+    )
+
 print("Created rse_edge_cases.h5 successfully!")
 print(f"Chunk size used: {CHUNK_SIZE}")

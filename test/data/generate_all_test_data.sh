@@ -98,6 +98,14 @@ echo -e "${GREEN}[7/28] Generating rse_invalid.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_rse_invalid_test.py)
 
 echo ""
+echo -e "${GREEN}Generating ree_edge_cases.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_ree_edge_cases.py)
+
+echo ""
+echo -e "${GREEN}Generating ree_invalid.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_ree_invalid_test.py)
+
+echo ""
 echo -e "${GREEN}[8/28] Generating unsupported_types.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_unsupported_types_test.py)
 
@@ -223,6 +231,8 @@ echo "    - multithreading_test.h5  (parallel execution)"
 echo "    - pushdown_test.h5        (predicate pushdown)"
 echo "    - rse_edge_cases.h5       (RSE edge cases)"
 echo "    - rse_invalid.h5          (RSE validation errors)"
+echo "    - ree_edge_cases.h5       (REE edge cases)"
+echo "    - ree_invalid.h5          (REE validation errors)"
 echo "    - unsupported_types.h5    (unsupported HDF5 types)"
 echo "    - attrs_edge_cases.h5     (attribute edge cases)"
 echo "    - invalid_string_array_attrs.h5 (invalid string-array attribute edge cases)"

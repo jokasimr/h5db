@@ -47,7 +47,7 @@ SELECT * FROM h5_read(
 );
 ```
 
-**Important**: At least one non-scalar regular (non-RSE) column is required to determine the total row count.
+**Important**: At least one non-scalar regular column is required to determine the total row count.
 
 ## Complete Examples
 
@@ -245,7 +245,7 @@ All types supported by h5db:
 
 ### Memory Usage
 
-RSE data is **expanded in memory** during the initialization phase:
+RSE run metadata is loaded during the initialization phase:
 - **run_starts** and **values** are read into memory (typically small)
 - During scanning, values are emitted on-the-fly without creating a full expanded array
 - Memory usage: O(num_runs) not O(num_rows)
@@ -259,9 +259,9 @@ Typical compression ratios by use case:
 
 ### Query Performance
 
-- **Filtering** (`WHERE status = X`): Fast - DuckDB can process the expanded values efficiently
+- **Filtering** (`WHERE status = X`): Fast - simple comparisons can prune row ranges before scanning
 - **Aggregation** (`GROUP BY status`): Fast - benefits from data locality
-- **Sequential scan**: O(n) where n is the number of output rows
+- **Sequential scan**: O(n) where n is the number of candidate output rows
 - **Expansion overhead**: Single-pass O(1) amortized per row
 
 ### I/O Benefits
@@ -284,7 +284,7 @@ h5db automatically validates:
 
 **Error: No non-scalar regular columns**
 ```
-IO Error: h5_read requires at least one non-scalar regular column when using RSE to determine row count
+IO Error: h5_read requires at least one non-scalar regular column when using run-encoded columns to determine row count
 ```
 **Solution**: Include at least one non-scalar regular dataset path in `h5_read()`
 
@@ -400,8 +400,8 @@ assert all(run_starts[i] <= run_starts[i+1] for i in range(len(run_starts)-1))
 
 ## Limitations
 
-1. **At least one regular column required** - Cannot query RSE columns alone
-2. **No random access optimization** - Each query scans from the beginning
+1. **At least one non-scalar regular column required** - Cannot query RSE columns alone
+2. **Limited predicate pushdown** - Simple range-like filters can prune row ranges; other filters are applied after scan
 3. **Memory overhead** - run_starts and values loaded into memory
 4. **No compression in output** - DuckDB receives fully expanded data
 
@@ -411,7 +411,7 @@ Potential future improvements:
 - Automatic RSE detection based on naming conventions
 - Support for RSE-only queries (auto-generate index)
 - Integration with DuckDB's internal compression
-- Lazy evaluation for filtered queries
+- Broader predicate pushdown support
 
 ## Examples Repository
 

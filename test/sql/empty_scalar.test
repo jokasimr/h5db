@@ -241,7 +241,16 @@ SELECT * FROM h5_read(
     h5_rse('/rse_run_starts', '/rse_values')
 );
 ----
-IO Error: h5_read requires at least one non-scalar regular column when using RSE to determine row count
+IO Error: h5_read requires at least one non-scalar regular column when using run-encoded columns to determine row count
+
+statement error
+SELECT * FROM h5_read(
+    'test/data/empty_scalar.h5',
+    '/scalar_int',
+    h5_ree('/rse_run_starts', '/rse_values')
+);
+----
+IO Error: h5_read requires at least one non-scalar regular column when using run-encoded columns to determine row count
 
 statement error
 SELECT * FROM h5_read(
