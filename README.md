@@ -10,7 +10,7 @@ stack or SFTP.
 - Multiple datasets can be stacked horizontally to make a table.
 - Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
 - Scalar datasets are treated as constant columns.
-- Supports reading HDF5 attributes on objects and the file root.
+- Reads HDF5 attributes on objects and the file root with `h5_attributes(...)`.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
 - Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
