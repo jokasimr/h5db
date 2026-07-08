@@ -6,19 +6,20 @@ stack or SFTP.
 
 ## Highlights
 
-- Reads local or remote (`https://`, `s3://`, `sftp://`, ...) HDF5 files directly from SQL.
-- Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
+- Reads HDF5 datasets as DuckDB columns with `h5_read(...)`.
 - Multiple datasets can be stacked horizontally to make a table.
+- Maps numeric datasets, string datasets, and 1D-4D array datasets into DuckDB types.
 - Scalar datasets are treated as constant columns.
-- Supports projection pushdown in `h5_read(...)`.
-- Supports row-range predicate pushdown for `h5_index()` and run-encoded columns.
-- Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
-  patterns, or `VARCHAR[]` filename inputs.
-- `h5_tree(...)` and table-valued `h5_ls(...)` can prune glob/list inputs from selective `filename` filters before
-  opening files.
 - Supports reading HDF5 attributes on objects and the file root.
 - Supports path-complete namespace listing with `h5_tree(...)`.
 - Supports shallow group listing with table and scalar `h5_ls(...)`.
+- Table-valued `h5_tree(...)`, `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` accept single files, glob
+  patterns, or `VARCHAR[]` filename inputs.
+- Reads local or remote (`https://`, `s3://`, `sftp://`, ...) HDF5 files directly from SQL.
+- Supports projection pushdown in `h5_read(...)`.
+- Supports row-range predicate pushdown for `h5_index()` and run-encoded columns.
+- `h5_tree(...)` and table-valued `h5_ls(...)` can prune glob/list inputs from selective `filename` filters before
+  opening files.
 - Supports projecting selected HDF5 attributes as extra columns in `h5_tree(...)` and `h5_ls(...)`.
 
 ## Core Functions
