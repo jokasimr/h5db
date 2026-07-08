@@ -63,6 +63,7 @@ bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type);
 void H5TreeWriteProjectedValue(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
                                column_t column_id, Vector &vector, idx_t row_idx, idx_t &shape_offset,
                                uint64_t *shape_data);
+Value H5ReadAllAttributesMapValue(hid_t object_id);
 
 class H5TreeFileReader {
 public:

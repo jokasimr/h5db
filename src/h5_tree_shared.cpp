@@ -226,7 +226,7 @@ static herr_t H5TreeAllAttributesCallback(hid_t location_id, const char *attr_na
 	return 0;
 }
 
-static void H5TreePopulateAllAttributesValue(H5TreeProjectedAttributeValue &target, hid_t object_id) {
+Value H5ReadAllAttributesMapValue(hid_t object_id) {
 	vector<Value> keys;
 	vector<Value> values;
 
@@ -242,8 +242,12 @@ static void H5TreePopulateAllAttributesValue(H5TreeProjectedAttributeValue &targ
 		throw IOException("Failed to iterate attributes");
 	}
 
+	return Value::MAP(LogicalType::VARCHAR, LogicalType::VARIANT(), std::move(keys), std::move(values));
+}
+
+static void H5TreePopulateAllAttributesValue(H5TreeProjectedAttributeValue &target, hid_t object_id) {
 	target.present = true;
-	target.value = Value::MAP(LogicalType::VARCHAR, LogicalType::VARIANT(), std::move(keys), std::move(values));
+	target.value = H5ReadAllAttributesMapValue(object_id);
 }
 
 std::string H5TreeNormalizeObjectPath(std::string object_path) {

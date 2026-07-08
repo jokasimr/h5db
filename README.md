@@ -34,7 +34,7 @@ stack or SFTP.
   form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
 - `h5_attributes(filename_or_filenames, object_path)`
   Reads attributes from an object or the file root. Multi-file reads return one wide row per file and require the same
-  attribute names, types, and order in every matched file.
+  attribute names, types, and order in every matched file. The scalar form returns one attribute set per input row.
 
 For a practical guide to the main workflows, see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 For the full API, see [docs/API.md](docs/API.md).
@@ -100,6 +100,9 @@ SELECT h5_ls('data.h5', '/entry/instrument');
 
 -- Read attributes
 FROM h5_attributes('data.h5', '/measurements');
+
+-- Read attributes as one scalar value
+SELECT h5_attributes('data.h5', '/measurements');
 
 -- Read run-start encoded data
 FROM h5_read(

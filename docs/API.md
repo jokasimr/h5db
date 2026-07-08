@@ -13,6 +13,7 @@ This document describes the public SQL functions provided by the h5db extension.
   - [`h5_first_file(filename_or_filenames)`](#h5_first_filefilename_or_filenames)
   - [`h5_ls(filename, group_path[, projected_attributes...])`](#h5_lsfilename-group_path-projected_attributes)
   - [`h5_ls_swmr(filename, group_path[, projected_attributes...])`](#h5_ls_swmrfilename-group_path-projected_attributes)
+  - [`h5_attributes(filename, object_path)`](#h5_attributesfilename-object_path)
   - [`h5_rse(run_starts_path, values_path)`](#h5_rserun_starts_path-values_path)
   - [`h5_index()`](#h5_index)
   - [`h5_attr([name[, default_value]])`](#h5_attrname-default_value)
@@ -298,7 +299,7 @@ Reads attributes from an object or the file root.
 - Column names are the attribute names
 - Column types match the attribute types (numeric, string, or arrays)
 - If the target object has no attributes, the function raises `IO Error: Object has no attributes: ... in file: ...`
-- Invalid UTF-8 string attribute values raise an error in `h5_attributes()`
+- Invalid UTF-8 string attribute values raise an error in table-valued `h5_attributes()`
 - Multiple matched files must have the same attribute names, types, and order.
 - Attribute output names must be unique under DuckDB's case-insensitive identifier matching.
 - Hidden virtual column `filename` (VARCHAR), available by explicit reference.
@@ -444,6 +445,48 @@ Scalar variant of `h5_ls()` that forces `swmr = true`.
 **Example:**
 ```sql
 SELECT h5_ls_swmr('data.h5', '/entry/instrument');
+```
+
+### `h5_attributes(filename, object_path)`
+
+Returns all attributes on one object as a `MAP(VARCHAR, VARIANT)`.
+
+This is the scalar counterpart to table-valued `h5_attributes()`. Use it when
+the filename or object path comes from another query and you want one value per
+input row.
+
+**Parameters:**
+- `filename` (VARCHAR): File path or remote URL. May vary per row. See [Remote Access](#remote-access).
+- `object_path` (VARCHAR): Object path whose attributes should be read. May vary per row. `''` is treated as `/`.
+
+**Returns:** `MAP(VARCHAR, VARIANT)`
+
+**Semantics:**
+- attribute names are map keys
+- attribute values are stored as `VARIANT`
+- an object with no attributes returns `{}`
+- unsupported attribute values become `NULL` variant map entries
+- invalid UTF-8 string attributes may be represented as `BLOB` values inside the variant
+- `filename` is used as a path or URL per input row; lists and glob patterns are not expanded
+- `NULL` `filename` yields `NULL`
+- `NULL` `object_path` yields `NULL`
+- named parameters such as `swmr := true` or `filename := true` are not supported in the scalar form
+
+**Examples:**
+```sql
+SELECT h5_attributes('data.h5', '/entry');
+
+WITH objects(path) AS (
+    VALUES ('/entry'), ('/entry/instrument')
+)
+SELECT path, h5_attributes('data.h5', path)
+FROM objects;
+
+WITH files(filename) AS (
+    VALUES ('run_1.h5'), ('run_2.h5')
+)
+SELECT filename, h5_attributes(filename, '/entry')
+FROM files;
 ```
 
 ### `h5_rse(run_starts_path, values_path)`
@@ -703,7 +746,8 @@ DuckDB filesystem supports globbing.
 - All matched files in `h5_read(...)` must have compatible column definitions.
 - All matched files in `h5_attributes(...)` must expose the same attributes in the same order with the same names and
   types.
-- Scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand filename lists or glob patterns.
+- Scalar `h5_ls(...)` and scalar `h5_attributes(...)` accept one filename/URL expression per row and do not expand
+  filename lists or glob patterns.
 - For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's filesystem stack. For `sftp://` URLs,
   glob expansion is handled by h5db's SFTP backend and matches local globbing behavior.
 - Glob expansion follows DuckDB's other multi-file reader semantics such as `read_parquet(...)`. In particular,
@@ -821,7 +865,7 @@ All functions provide clear error messages for common issues:
 - **Invalid path**: "IO Error: Failed to open dataset/object: ... in file: ..."
 - **Unsupported type**: "IO Error: Unsupported HDF5 type"
 - **Invalid RSE data**: "IO Error: RSE run_starts must be strictly increasing: ... in file: ..."
-- **No attributes**: "IO Error: Object has no attributes: ... in file: ..."
+- **No attributes in table `h5_attributes()`**: "IO Error: Object has no attributes: ... in file: ..."
 
 ---
 

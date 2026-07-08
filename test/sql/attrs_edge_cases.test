@@ -23,6 +23,91 @@ SELECT * FROM h5_attributes('test/data/root_attrs.h5', NULL::VARCHAR);
 ----
 Invalid Input Error: h5_attributes path must not be NULL
 
+query TI
+SELECT typeof(h5_attributes('test/data/attrs_edge_cases.h5', '/empty_group')),
+       cardinality(h5_attributes('test/data/attrs_edge_cases.h5', '/empty_group'));
+----
+MAP(VARCHAR, VARIANT)	0
+
+query TTI
+SELECT
+    variant_typeof(map_extract_value(h5_attributes('test/data/root_attrs.h5', '/'), 'root_name')),
+    TRY_CAST(map_extract_value(h5_attributes('test/data/root_attrs.h5', '/'), 'root_name') AS VARCHAR),
+    TRY_CAST(map_extract_value(h5_attributes('test/data/root_attrs.h5', '/'), 'root_number') AS INTEGER);
+----
+VARCHAR	root	7
+
+query I
+SELECT cardinality(h5_attributes('test/data/root_attrs.h5', ''));
+----
+2
+
+query TII
+WITH paths(path) AS (
+    VALUES ('/string_attrs'), ('/empty_group'), (NULL::VARCHAR)
+),
+attrs AS (
+    SELECT path, h5_attributes('test/data/attrs_edge_cases.h5', path) AS value
+    FROM paths
+)
+SELECT
+    COALESCE(path, '<null>') AS path,
+    CASE WHEN value IS NULL THEN 1 ELSE 0 END AS is_null,
+    CASE WHEN value IS NULL THEN -1 ELSE cardinality(value) END AS attr_count
+FROM attrs
+ORDER BY path;
+----
+/empty_group	0	0
+/string_attrs	0	2
+<null>	1	-1
+
+query TII
+WITH inputs(filename, path) AS (
+    VALUES
+        ('test/data/root_attrs.h5', '/'),
+        ('test/data/attrs_edge_cases.h5', '/empty_group'),
+        (NULL::VARCHAR, '/')
+),
+attrs AS (
+    SELECT filename, h5_attributes(filename, path) AS value
+    FROM inputs
+)
+SELECT
+    COALESCE(filename, '<null>') AS filename,
+    CASE WHEN value IS NULL THEN 1 ELSE 0 END AS is_null,
+    CASE WHEN value IS NULL THEN -1 ELSE cardinality(value) END AS attr_count
+FROM attrs
+ORDER BY filename;
+----
+<null>	1	-1
+test/data/attrs_edge_cases.h5	0	0
+test/data/root_attrs.h5	0	2
+
+statement error
+SELECT h5_attributes('test/data/attrs_edge_cases.h5', '/does_not_exist');
+----
+IO Error: Failed to open object: /does_not_exist in file: test/data/attrs_edge_cases.h5
+
+statement error
+SELECT h5_attributes('nonexistent.h5', '/');
+----
+IO Error: Failed to open HDF5 file: nonexistent.h5
+
+statement error
+SELECT h5_attributes('test/data/glob/no_such_*.h5', '/');
+----
+IO Error: Failed to open HDF5 file: test/data/glob/no_such_*.h5
+
+statement error
+SELECT h5_attributes('test/data/root_attrs.h5', '/', swmr := true);
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_attributes\(STRING_LITERAL, STRING_LITERAL, BOOLEAN\)'.*
+
+statement error
+SELECT h5_attributes(['test/data/root_attrs.h5'], '/');
+----
+<REGEX>:.*No function matches the given name and argument types 'h5_attributes\(VARCHAR\[\], STRING_LITERAL\)'.*
+
 # =============================================================================
 # String attribute handling (vlen + fixed)
 # =============================================================================
@@ -68,6 +153,13 @@ statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_after_nul_attr_dataset');
 ----
 IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_after_nul_attr_dataset in file: test/data/attrs_edge_cases.h5
+
+query TT
+SELECT
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_attr_dataset'), 'invalid_utf8_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/invalid_utf8_fixed_attr_dataset'), 'invalid_utf8_fixed_attr'));
+----
+BLOB	BLOB
 
 # Root attributes should work for both '/' and ''.
 query TI
@@ -163,3 +255,15 @@ statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset');
 ----
 IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4 in object: /bitfield_attr_dataset in file: test/data/attrs_edge_cases.h5
+
+query TTTTTTT
+SELECT
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset'), 'attr_2d')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/enum_attr_dataset'), 'enum_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/compound_attr_dataset'), 'compound_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset'), 'float16_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/reference_attr_dataset'), 'ref_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/opaque_attr_dataset'), 'opaque_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset'), 'bitfield_attr'));
+----
+VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL
