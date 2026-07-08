@@ -208,9 +208,11 @@ with h5py.File('experiment.h5', 'w') as f:
 
 ### Indexing Rules
 
-- **Strictly increasing**: Each value must be greater than the previous
+- **Non-decreasing**: Each value must be greater than or equal to the previous
 - **Leading NULLs**: If `run_starts[0] > 0`, rows before the first run start are returned as NULLs
 - **Implicit end**: The last run extends to the end of the dataset
+- **Zero-length runs**: Duplicate starts are allowed. Earlier runs at the same start have zero rows; the last run at that
+  start is the visible value.
 
 ### Example
 
@@ -274,23 +276,23 @@ For remote files handled through DuckDB-backed schemes (HTTP/S, S3, R2, GCS, HF,
 
 h5db automatically validates:
 
-1. `run_starts` is strictly increasing
+1. `run_starts` is non-decreasing
 2. `run_starts.size() == values.size()`
-3. At least one regular column exists
+3. At least one non-scalar regular column exists
 
 ### Error Messages
 
-**Error: No regular columns**
+**Error: No non-scalar regular columns**
 ```
-IO Error: h5_read requires at least one regular (non-RSE) dataset to determine row count
+IO Error: h5_read requires at least one non-scalar regular column when using RSE to determine row count
 ```
-**Solution**: Include at least one regular dataset path in `h5_read()`
+**Solution**: Include at least one non-scalar regular dataset path in `h5_read()`
 
 **Error: Invalid run_starts**
 ```
-IO Error: RSE run_starts must be strictly increasing: /state_run_starts in file: file.h5
+IO Error: RSE run_starts must be non-decreasing: /state_run_starts in file: file.h5
 ```
-**Solution**: Ensure `run_starts` is strictly increasing
+**Solution**: Ensure `run_starts` is non-decreasing
 
 **Error: Size mismatch**
 ```
@@ -359,11 +361,11 @@ f['state_run_starts'].attrs['values_dataset'] = 'state_values'
 
 **Symptom**: Wrong values in output
 
-**Cause**: run_starts isn't strictly increasing
+**Cause**: run_starts decreases
 
 **Solution**: Validate run_starts array:
 ```python
-assert all(run_starts[i] < run_starts[i+1] for i in range(len(run_starts)-1))
+assert all(run_starts[i] <= run_starts[i+1] for i in range(len(run_starts)-1))
 ```
 
 ### Problem: Out of memory

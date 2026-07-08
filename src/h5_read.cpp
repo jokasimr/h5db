@@ -943,13 +943,10 @@ static vector<idx_t> LoadRunStarts(const string &filename, const RSEColumnSpec &
 		throw IOException(FormatDatasetError("Failed to read run_starts from", filename, spec.run_starts_path));
 	}
 
-	for (size_t i = 1; i < num_runs; i++) {
-		if (run_starts[i] <= run_starts[i - 1]) {
-			throw IOException(
-			    FormatDatasetError("RSE run_starts must be strictly increasing", filename, spec.run_starts_path));
-		}
+	if (!std::is_sorted(run_starts.begin(), run_starts.end())) {
+		throw IOException(FormatDatasetError("RSE run_starts must be non-decreasing", filename, spec.run_starts_path));
 	}
-	if (num_runs > 0 && run_starts.back() >= num_rows) {
+	if (num_runs > 0 && run_starts.back() > num_rows) {
 		throw IOException(FormatDatasetError("RSE run_starts contains index " + std::to_string(run_starts.back()) +
 		                                         " which exceeds dataset length " + std::to_string(num_rows),
 		                                     filename, spec.run_starts_path));

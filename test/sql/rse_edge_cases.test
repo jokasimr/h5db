@@ -764,6 +764,145 @@ WHERE values = 2;
 2200	2999
 
 # =============================================================================
+# Test: Zero-length runs
+# =============================================================================
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_rse('/zero_length_middle/run_starts', '/zero_length_middle/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	30
+3	30
+4	40
+5	40
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 20),
+       COUNT(*) FILTER (WHERE values = 30)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_rse('/zero_length_middle/run_starts', '/zero_length_middle/values')
+);
+----
+0	2
+
+query I
+SELECT COUNT(*)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_rse('/zero_length_middle/run_starts', '/zero_length_middle/values')
+)
+WHERE values = 20;
+----
+0
+
+query III
+SELECT COUNT(*), MIN(index), MAX(index)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_middle/index',
+    h5_rse('/zero_length_middle/run_starts', '/zero_length_middle/values')
+)
+WHERE values = 30;
+----
+2	2	3
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 99),
+       COUNT(*) FILTER (WHERE values = 10)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_start/index',
+    h5_rse('/zero_length_start/run_starts', '/zero_length_start/values')
+);
+----
+0	3
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 99),
+       COUNT(*) FILTER (WHERE values = 20)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_end/index',
+    h5_rse('/zero_length_end/run_starts', '/zero_length_end/values')
+);
+----
+0	2
+
+query III
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE values IS NULL),
+       COUNT(*) FILTER (WHERE values = 99)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_all_null/index',
+    h5_rse('/zero_length_all_null/run_starts', '/zero_length_all_null/values')
+);
+----
+5	5	0
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_string/index',
+    h5_rse('/zero_length_string/run_starts', '/zero_length_string/values')
+)
+ORDER BY index;
+----
+0	alpha
+1	alpha
+2	beta
+3	beta
+
+query II
+SELECT COUNT(*) FILTER (WHERE values = 'unused'),
+       COUNT(*) FILTER (WHERE values = 'beta')
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_string/index',
+    h5_rse('/zero_length_string/run_starts', '/zero_length_string/values')
+);
+----
+0	2
+
+query II
+SELECT index, values
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_repeated/index',
+    h5_rse('/zero_length_repeated/run_starts', '/zero_length_repeated/values')
+)
+ORDER BY index;
+----
+0	10
+1	10
+2	40
+3	40
+4	50
+
+query III
+SELECT COUNT(*) FILTER (WHERE values IN (20, 30)),
+       COUNT(*) FILTER (WHERE values = 40),
+       COUNT(*) FILTER (WHERE values = 50)
+FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/zero_length_repeated/index',
+    h5_rse('/zero_length_repeated/run_starts', '/zero_length_repeated/values')
+);
+----
+0	2	1
+
+# =============================================================================
 # Type Detection Tests
 # =============================================================================
 

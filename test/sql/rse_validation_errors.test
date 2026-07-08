@@ -8,17 +8,17 @@ require h5db
 # RSE validation errors
 # =============================================================================
 
-# run_starts must be strictly increasing
+# run_starts must be non-decreasing
 statement error
 SELECT * FROM h5_read(
     'test/data/rse_invalid.h5',
     '/regular',
-    h5_rse('/not_increasing/run_starts', '/not_increasing/values')
+    h5_rse('/decreasing/run_starts', '/decreasing/values')
 );
 ----
-IO Error: RSE run_starts must be strictly increasing: /not_increasing/run_starts in file: test/data/rse_invalid.h5
+IO Error: RSE run_starts must be non-decreasing: /decreasing/run_starts in file: test/data/rse_invalid.h5
 
-# run_starts entries must be < num_rows
+# run_starts entries must be <= num_rows
 statement error
 SELECT * FROM h5_read(
     'test/data/rse_invalid.h5',

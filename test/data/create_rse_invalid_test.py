@@ -14,9 +14,9 @@ with h5py.File("rse_invalid.h5", "w") as f:
     # Regular dataset for row count (10 rows).
     f.create_dataset("regular", data=np.arange(10, dtype=np.int32))
 
-    # run_starts not strictly increasing (duplicate).
-    grp = f.create_group("not_increasing")
-    create_case(grp, [0, 5, 5], [100, 200, 300], np.uint64, np.int32)
+    # run_starts must not decrease.
+    grp = f.create_group("decreasing")
+    create_case(grp, [0, 5, 4], [100, 200, 300], np.uint64, np.int32)
 
     # run_starts contains index beyond dataset length.
     grp = f.create_group("exceeds_length")

@@ -305,5 +305,78 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
         values=np.array([1, 2], dtype=np.int32),
     )
 
+    # ==========================================================================
+    # Test 24: Zero-length run in the middle
+    # Rows 0-1 -> 10, rows 2-3 -> 30. Value 20 has zero rows.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_middle',
+        index_data=np.arange(6, dtype=np.int32),
+        run_starts=np.array([0, 2, 2, 4], dtype=np.uint64),
+        values=np.array([10, 20, 30, 40], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 25: Zero-length run at the start
+    # Value 99 has zero rows; the second run at 0 is visible.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_start',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([0, 0, 3], dtype=np.uint64),
+        values=np.array([99, 10, 20], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 26: Zero-length run at the end
+    # run_start == row_count is allowed and has zero rows.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_end',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([0, 3, 5], dtype=np.uint64),
+        values=np.array([10, 20, 99], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 27: Only a terminal zero-length run
+    # Rows before the first start are NULL; the sole value has zero rows.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_all_null',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([5], dtype=np.uint64),
+        values=np.array([99], dtype=np.int32),
+    )
+
+    # ==========================================================================
+    # Test 28: Zero-length string run
+    # "unused" has zero rows; "beta" is visible from the duplicate start.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_string',
+        index_data=np.arange(4, dtype=np.int32),
+        run_starts=np.array([0, 2, 2], dtype=np.uint64),
+        values=np.array(['alpha', 'unused', 'beta'], dtype=h5py.string_dtype()),
+        dtype=h5py.string_dtype(),
+    )
+
+    # ==========================================================================
+    # Test 29: Multiple zero-length runs at the same start
+    # Values 20 and 30 have zero rows; value 40 is visible from the last duplicate.
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'zero_length_repeated',
+        index_data=np.arange(5, dtype=np.int32),
+        run_starts=np.array([0, 2, 2, 2, 4], dtype=np.uint64),
+        values=np.array([10, 20, 30, 40, 50], dtype=np.int32),
+    )
+
 print("Created rse_edge_cases.h5 successfully!")
 print(f"Chunk size used: {CHUNK_SIZE}")
