@@ -59,6 +59,18 @@ server, and by default runs `test/scripts/run_sftp_interaction_tests.py` for aut
 disconnect cases. The runner will use the repo venv when present and otherwise falls back to `python3`/`python`,
 installing `paramiko` if needed.
 
+Useful targeted runs:
+
+```bash
+# Run a subset of rewritten SQLLogicTests through the SFTP harness
+bash test/scripts/run_sftp_tests.sh --test-glob 'glob/*.test' --skip-interaction-tests
+
+# Run only selected interaction tests
+./venv/bin/python test/scripts/run_sftp_interaction_tests.py \
+  --duckdb-bin ./build/release/duckdb \
+  SFTPInteractionTests.test_sftp_glob_skips_unlistable_literal_directory_component
+```
+
 ## TSAN Stress Harness
 
 For race hunting beyond the normal SQLLogicTest coverage, use the dedicated TSAN stress runner:

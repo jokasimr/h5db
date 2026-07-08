@@ -148,7 +148,7 @@ public:
 			}
 
 			unsigned open_flags = flags;
-			// Remote URLs are served as immutable snapshots through duckdb/httpfs.
+			// Remote files are opened read-only through the remote VFD.
 			// SWMR coordination with live writers does not apply in this mode, and
 			// passing H5F_ACC_SWMR_READ can fail for the custom remote VFD path.
 			if (swmr && !is_remote) {

@@ -1,13 +1,14 @@
 # Remote VFD V2
 
-> Status: This is a design/implementation note, not a description of missing functionality. The current repository now
-> opens remote files through `CachingFileSystem::OpenFile(QueryContext(...), ...)`, uses `FILE_FLAGS_DIRECT_IO`, keeps a
-> VFD-managed small-read block cache, preserves remote error text, and has remote cache/failure tests. Treat the
-> remaining text as rationale plus remaining ideas rather than as a statement of the current repo being pre-V2.
+> Status: Implemented. This note records the design rationale and the current implementation shape. The VFD now routes
+> both DuckDB-backed remote paths and native SFTP paths through `H5RemoteBackend`, keeps a VFD-managed small-read block
+> cache, uses cached reads where useful, falls back to direct reads for large raw traffic after a per-query budget, and
+> preserves remote error text.
 
 ## Goal
 
-Improve remote HDF5 read performance while preserving correctness and integrating with DuckDB's `httpfs` and external file cache.
+Improve remote HDF5 read performance while preserving correctness and integrating with DuckDB's external file cache
+where the backing remote filesystem can use it.
 
 ## Key Findings
 
@@ -70,28 +71,33 @@ Implication:
 
 ### Summary
 
-V2 should use:
-- `CachingFileHandle` underneath the VFD
-- `DIRECT_IO` on the underlying `httpfs` handle
-- a VFD-managed block cache for all small reads, including `H5FD_MEM_DRAW`
-- exact reads for large requests
+The implemented V2 design uses:
 
-This keeps the good part of that architecture, coalescing tiny HDF5 reads, while moving the fetched bytes into
-DuckDB's shared external file cache.
+- `H5RemoteBackend` underneath the VFD
+- `FILE_FLAGS_DIRECT_IO` on underlying remote handles
+- a VFD-managed block cache for small reads, including small `H5FD_MEM_DRAW` reads
+- exact cached reads for large raw requests while a per-query budget remains
+- exact direct reads after that large-read cache budget is exhausted
+
+This coalesces tiny HDF5 reads without forcing all large raw dataset traffic through the external file cache.
 
 ### Open Path
 
-Open remote files through:
-- `CachingFileSystem::Get(context).OpenFile(QueryContext(context), OpenFileInfo(path), flags)`
+Open remote files through `OpenH5RemoteBackend(...)`:
 
-Flags:
+- DuckDB-backed remote paths use DuckDB's filesystem stack plus `CachingFileSystem::Get(context)`.
+- SFTP paths use h5db's native SFTP filesystem wrapped in DuckDB's `CachingFileSystem`.
+
+Underlying handles use:
+
 - `FILE_FLAGS_READ`
 - `FILE_FLAGS_DIRECT_IO`
 
 Reason:
-- `DIRECT_IO` disables `httpfs`'s per-handle read buffer
-- the VFD then fully controls coalescing behavior
-- all fetched bytes are visible to DuckDB's shared external file cache
+
+- `DIRECT_IO` avoids an extra per-handle read buffer below the VFD
+- the VFD controls small-read coalescing behavior
+- cached read paths can populate DuckDB's shared external file cache
 
 Do not use `FILE_FLAGS_NULL_IF_NOT_EXISTS` here.
 - In practice it caused `httpfs` open failures such as HTTP 503 to collapse into a null-handle path
@@ -99,36 +105,44 @@ Do not use `FILE_FLAGS_NULL_IF_NOT_EXISTS` here.
 
 ### Read Policy
 
-Use two paths:
+Use three paths:
 
 1. Small reads
-- applies to metadata reads
-- also applies to raw `H5FD_MEM_DRAW` reads smaller than a threshold
-- service them through aligned fixed-size blocks
+   - applies to metadata reads
+   - also applies to raw `H5FD_MEM_DRAW` reads smaller than the block size
+   - service them through aligned fixed-size blocks
 
-2. Large reads
-- applies to raw reads at or above the threshold
-- service them with exact `CachingFileHandle::Read`
+2. Large cached reads
+   - applies to raw reads at or above the block size while the per-query large-read cache budget remains
+   - service them with exact cached reads
+
+3. Large direct reads
+   - applies to raw reads after the per-query large-read cache budget is exhausted
+   - service them with exact direct reads
 
 ### Block Cache
 
 Maintain a per-open-file LRU of aligned blocks.
 
-Recommended initial values:
-- block size: `1MB`
-- max tracked blocks per open file: `128`
-- large-read threshold: `1MB`
+Current values:
+
+- block size: `30 KiB`
+- max tracked blocks per open file: `100`
+- large raw data cache budget: `200 MiB` per query
 
 Behavior:
-- small reads are satisfied from one or more aligned `1MB` blocks
-- block loads are performed through `CachingFileHandle::Read`
-- returned `BlockHandle`s are retained in the VFD LRU for fast reuse within the open file
-- because the underlying storage is the external file cache, those bytes are also reusable across queries
 
-Why this is the right default:
-- large enough to absorb tiny chunk reads
-- matches the metadata block size used by this design
-- still small enough to avoid pathological overfetch for scattered metadata
+- small reads are satisfied from one or more aligned `30 KiB` blocks
+- block loads are performed through cached reads
+- cached block handles are retained in the VFD LRU for fast reuse within the open file
+- large raw reads bypass the block cache; they use cached exact reads until the per-query budget is exhausted, then
+  direct exact reads
+
+Why this is the current default:
+
+- large enough to collapse very small HDF5 metadata and chunk reads
+- small enough to avoid excessive overfetch for scattered metadata
+- keeps large contiguous dataset reads coarse without letting one query fill the external file cache with all raw data
 
 ### Why not exact caching for all reads
 
@@ -143,9 +157,9 @@ Exact caching for those reads would produce too many network round trips.
 
 ### Error Propagation
 
-The VFD should preserve the underlying `httpfs` error text.
+The VFD preserves the underlying remote backend error text.
 
-Plan:
+Implemented approach:
 - store the last remote error in thread-local state inside the VFD
 - set it when open/read catches a DuckDB or standard exception
 - consume it at the higher HDF5 call site when `H5Fopen` or `H5Dread` fails
@@ -153,18 +167,19 @@ Plan:
 This should turn generic messages like:
 - `Failed to open HDF5 file`
 
-into messages that retain HTTP details such as:
+into messages that retain remote details such as:
 - status code
 - auth failure
 - timeout
 - range request failure
+- SFTP path operation failure
 
-## Implementation Plan
+## Implemented Changes
 
-1. Replace the raw remote file handle with `CachingFileHandle`
+1. Replace the raw remote file handle with `H5RemoteBackend`
 2. Generalize the existing metadata cache into a small-read block cache
 3. Route small `H5FD_MEM_DRAW` reads through the block cache
-4. Route large `H5FD_MEM_DRAW` reads through exact `CachingFileHandle::Read`
+4. Route large `H5FD_MEM_DRAW` reads through cached exact reads while budget remains, then direct exact reads
 5. Add thread-local remote error capture and higher-level error plumbing
 6. Remove direct `BufferManager::Allocate` ownership for remote blocks
 7. Add regression tests for:
@@ -187,7 +202,7 @@ For repeated remote reads of the same file:
 - the second query should show no repeated body GETs when the external file cache is enabled
 
 For chunked small-dataset probes:
-- the first query should perform block-sized GETs, not one network request per HDF5 chunk
+- the first query should perform block-sized remote reads, not one network request per HDF5 chunk
 
 For large contiguous datasets:
-- large reads should remain coarse, not be broken into many `1MB` requests
+- large reads should remain coarse and should switch to direct reads after the large-read cache budget is exhausted

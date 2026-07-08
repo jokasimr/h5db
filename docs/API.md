@@ -618,9 +618,10 @@ All h5db functions that open HDF5 files accept local paths or remote URLs as `fi
   `gs://`, and `hf://` are opened through DuckDB's filesystem stack. h5db auto-loads the required DuckDB extension
   when needed.
 - `sftp://` URLs are handled by h5db's built-in SFTP backend.
-- Remote opens are immutable snapshot reads. This applies to both DuckDB-backed remote paths and SFTP.
+- Remote reads assume the file does not change while it is being read. This applies to both DuckDB-backed remote paths
+  and SFTP.
 - The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
-  parameter, but remote paths are opened as immutable snapshots, so `H5F_ACC_SWMR_READ` is not used there.
+  parameter, but `H5F_ACC_SWMR_READ` is not used for remote paths.
 - Remote reads use DuckDB's external file cache when `enable_external_file_cache` is enabled. HDF5 metadata reads and
   other small reads are cached as reusable byte ranges. Large raw dataset reads are routed through cached reads only up
   to a per-query budget, currently 200 MiB; after that h5db uses direct remote reads for the rest of the query.
@@ -690,7 +691,7 @@ DuckDB filesystem supports globbing.
 - A single glob expands to lexicographically sorted matches.
 - A `VARCHAR[]` input expands entries left-to-right.
 - Duplicate files are preserved and are processed more than once.
-- A pattern that matches no files raises an error.
+- A pattern that matches no files raises an error, following DuckDB's normal multi-file reader behavior.
 - `h5_read(...)` concatenates rows file by file.
 - `h5_attributes(...)` emits one row per matched file.
 - `h5_index()` is the outermost-dimension row index within each matched file.
@@ -704,9 +705,9 @@ DuckDB filesystem supports globbing.
   types.
 - Scalar `h5_ls(...)` accepts one filename/URL expression per row and does not expand filename lists or glob patterns.
 - For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's filesystem stack. For `sftp://` URLs,
-  glob expansion is handled by h5db's SFTP backend.
-- In both cases, glob expansion follows DuckDB's other multi-file reader semantics such as `read_parquet(...)`. In
-  particular, recursive `**` does not traverse symlink directories.
+  glob expansion is handled by h5db's SFTP backend and matches local globbing behavior.
+- Glob expansion follows DuckDB's other multi-file reader semantics such as `read_parquet(...)`. In particular,
+  recursive `**` does not traverse symlink directories.
 - On Windows, HDF5 1.14.6 with its native file driver fails to open a file symlink when the symlink itself is passed as
   the filename. h5db does not resolve those paths before calling HDF5, so final-component file symlink paths are not
   supported there.

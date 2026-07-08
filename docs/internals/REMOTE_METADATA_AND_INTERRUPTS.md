@@ -4,9 +4,8 @@
 > implementation details have moved on:
 > - `h5_tree` now streams rows via a worker thread rather than doing all work in `Init`
 > - `h5_ls` now exists as the shallow-listing API discussed below
-> - the interruptibility discussion remains a design note; the current
->   repository intentionally keeps `WaitForFetchComplete(...)` as a blocking
->   wait in `src/h5_read.cpp`
+> - the interruptibility discussion remains a design note; transport details in
+>   DuckDB-backed remote filesystems may change across DuckDB versions
 
 ## Scope
 
@@ -19,7 +18,7 @@ The conclusions here are grounded in:
 
 - `h5_tree` implementation in [src/h5_tree.cpp](../../src/h5_tree.cpp)
 - current remote VFD implementation in [src/h5_remote_vfd.cpp](../../src/h5_remote_vfd.cpp)
-- DuckDB `httpfs` source in the public `duckdb-httpfs` repository
+- DuckDB's remote filesystem stack
 - direct HTTP tracing against a public S3-backed HDF5 object
 
 ## Investigated File
@@ -189,9 +188,9 @@ The remote `h5db` path then blocks inside synchronous HDF5 calls:
 - file open in [src/include/h5_raii.hpp](../../src/include/h5_raii.hpp)
 - dataset reads in [src/h5_read.cpp](../../src/h5_read.cpp)
 
-For remote files those HDF5 calls enter the VFD, then `httpfs`, which currently uses synchronous `curl_easy_perform()` without a cancellation callback.
-
-So an in-flight remote request does not observe the interrupt flag.
+For DuckDB-backed remote files those HDF5 calls enter the VFD, then DuckDB's remote filesystem stack. In-flight
+transport operations are generally synchronous from h5db's point of view, so h5db cannot reliably make them observe the
+query interrupt flag until control returns from the filesystem call.
 
 There is a second issue:
 
@@ -202,15 +201,10 @@ There is a second issue:
 
 ### Main recommendation
 
-The transport-layer cancellation fix belongs in `httpfs`, not in `h5db`.
+The transport-layer cancellation fix belongs in the underlying DuckDB remote filesystem, not in h5db.
 
-Use libcurl progress/cancel callbacks:
-
-- `CURLOPT_NOPROGRESS = 0`
-- `CURLOPT_XFERINFOFUNCTION`
-- `CURLOPT_XFERINFODATA`
-
-and have the callback observe the current query interrupt flag.
+Use whatever cancellation/progress mechanism that filesystem exposes and have it observe the current query interrupt
+flag while the request is in flight.
 
 ### Why this is the right layer
 
@@ -221,13 +215,15 @@ This is the only clean way to make a thread blocked in remote I/O become interru
 - relying on tiny timeouts
 - weakening correctness
 
-`httpfs` already has query-scoped state via `HTTPState`, and it is initialized while a `ClientContext` is available. That is the right place to carry a non-owning pointer to the current interrupt flag.
+DuckDB's remote filesystems are initialized while a `ClientContext` is available. That is the right layer to carry
+query-scoped cancellation state into transport requests.
 
 ### Important requirement
 
 A user interrupt must be non-retryable.
 
-If curl aborts because the query was cancelled, `httpfs` must not treat that as an ordinary retryable request failure.
+If a transport request aborts because the query was cancelled, the remote filesystem must not treat that as an ordinary
+retryable request failure.
 
 Practical options:
 
@@ -275,7 +271,7 @@ Reasonable solution:
 Reasonable solution:
 
 - yes
-- implement in-flight HTTP cancellation in `httpfs`
+- implement in-flight cancellation in the underlying DuckDB remote filesystem
 - mark user-cancelled requests as non-retryable
 - add a few cooperative interrupt checks in `h5db`
 

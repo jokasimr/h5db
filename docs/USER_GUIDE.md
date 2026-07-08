@@ -230,9 +230,10 @@ Useful mental models:
 - scalar `h5_ls(...)` accepts one filename expression per row and does not expand filename lists or glob patterns
 - for local paths and DuckDB-backed remote schemes, glob expansion uses
   DuckDB's filesystem stack
-- for `sftp://` URLs, glob expansion is handled by h5db's SFTP backend
-- in both cases, glob expansion follows the same semantics as DuckDB's other
-  multi-file readers such as `read_parquet(...)`
+- for `sftp://` URLs, glob expansion is handled by h5db's SFTP backend and
+  matches local globbing behavior
+- glob expansion follows the same semantics as DuckDB's other multi-file
+  readers such as `read_parquet(...)`
 - in particular, recursive `**` does not traverse symlink directories
 
 `h5_tree(...)` and table-valued `h5_ls(...)` can use selective filters on the virtual `filename` column to skip

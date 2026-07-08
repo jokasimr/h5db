@@ -294,6 +294,18 @@ This target rewrites the main SQL suite against `sftp://` URLs, starts the local
 dedicated interaction harness in `test/scripts/run_sftp_interaction_tests.py`. The runner will use the repo venv when
 present and otherwise falls back to `python3`/`python`, installing `paramiko` if needed.
 
+For targeted SFTP work, run the harness scripts directly:
+
+```bash
+# Run a subset of rewritten SQLLogicTests through SFTP and skip the interaction harness
+bash test/scripts/run_sftp_tests.sh --test-glob 'glob/*.test' --skip-interaction-tests
+
+# Run selected interaction tests
+./venv/bin/python test/scripts/run_sftp_interaction_tests.py \
+  --duckdb-bin ./build/release/duckdb \
+  SFTPInteractionTests.test_sftp_glob_skips_unlistable_literal_directory_component
+```
+
 ### SFTP Interrupt and Cleanup Behavior
 
 The native SFTP backend keeps libssh2 sessions in nonblocking mode. Remote SSH/SFTP operations wait in short slices and
