@@ -478,9 +478,8 @@ static bool H5SftpStatusIndicatesMissingPath(unsigned long status) {
 	return status == LIBSSH2_FX_NO_SUCH_FILE || status == LIBSSH2_FX_NO_SUCH_PATH;
 }
 
-static bool H5SftpStatusIndicatesIgnorableGlobDirectoryFailure(unsigned long status) {
-	return H5SftpStatusIndicatesMissingPath(status) || status == LIBSSH2_FX_PERMISSION_DENIED ||
-	       status == LIBSSH2_FX_FAILURE;
+static bool H5SftpStatusIndicatesIgnorableGlobProbeFailure(unsigned long status) {
+	return !H5SftpStatusIndicatesRemoteConnectionUnreliable(status);
 }
 
 using H5SftpCleanupDeadline = std::optional<std::chrono::steady_clock::time_point>;
@@ -1369,7 +1368,7 @@ static H5SftpRemotePattern ParseSftpRemotePattern(const std::string &remote_path
 	return result;
 }
 
-enum class H5SftpStatMode : uint8_t { DEFAULT, EXACT_GLOB_FALLBACK };
+enum class H5SftpStatMode : uint8_t { DEFAULT, GLOB_EXISTENCE_PROBE };
 
 static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, const std::string &path, int stat_type,
                               LIBSSH2_SFTP_ATTRIBUTES &attrs, H5SftpStatMode mode = H5SftpStatMode::DEFAULT) {
@@ -1385,8 +1384,9 @@ static bool H5SftpTryStatPath(const shared_ptr<H5SftpConnection> &connection, co
 			continue;
 		}
 		auto sftp_error = connection->GetSftpStatusError(rc);
-		if (sftp_error && (H5SftpStatusIndicatesMissingPath(*sftp_error) ||
-		                   (mode == H5SftpStatMode::EXACT_GLOB_FALLBACK && *sftp_error == LIBSSH2_FX_FAILURE))) {
+		if (sftp_error &&
+		    (mode == H5SftpStatMode::GLOB_EXISTENCE_PROBE ? H5SftpStatusIndicatesIgnorableGlobProbeFailure(*sftp_error)
+		                                                  : H5SftpStatusIndicatesMissingPath(*sftp_error))) {
 			return false;
 		}
 		connection->ThrowSftpPathOperationError("Failed to stat SFTP path", path, rc);
@@ -1397,13 +1397,13 @@ static bool H5SftpPathAttrsAreDirectory(const LIBSSH2_SFTP_ATTRIBUTES &attrs) {
 	return (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) && LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
 }
 
-static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+static LIBSSH2_SFTP_HANDLE *H5SftpTryOpenDirectory(const shared_ptr<H5SftpConnection> &connection,
+                                                   const std::string &path) {
 	connection->ThrowIfRemoteConnectionUnreliable();
 	while (true) {
 		auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
 		if (dir_handle) {
-			connection->CloseSftpHandleForCleanup(dir_handle);
-			return true;
+			return dir_handle;
 		}
 		auto last_error = libssh2_session_last_errno(connection->GetSession());
 		if (last_error == LIBSSH2_ERROR_EAGAIN) {
@@ -1411,17 +1411,28 @@ static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connectio
 			continue;
 		}
 		auto sftp_error = connection->GetSftpStatusError(last_error);
-		if (sftp_error && !H5SftpStatusIndicatesRemoteConnectionUnreliable(*sftp_error)) {
-			return false;
+		if (sftp_error && H5SftpStatusIndicatesIgnorableGlobProbeFailure(*sftp_error)) {
+			// Directory probes used by glob expansion and exact glob fallback match
+			// DuckDB local semantics: non-connection failures are empty branches.
+			return nullptr;
 		}
 		connection->ThrowSftpPathOperationError("Failed to open SFTP directory", path, last_error);
 	}
 }
 
+static bool H5SftpCanOpenDirectory(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+	auto *dir_handle = H5SftpTryOpenDirectory(connection, path);
+	if (!dir_handle) {
+		return false;
+	}
+	connection->CloseSftpHandleForCleanup(dir_handle);
+	return true;
+}
+
 static bool H5SftpExactGlobFallbackNonDirectoryPathExists(const shared_ptr<H5SftpConnection> &connection,
                                                           const std::string &path) {
 	LIBSSH2_SFTP_ATTRIBUTES attrs {};
-	if (!H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs, H5SftpStatMode::EXACT_GLOB_FALLBACK)) {
+	if (!H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs, H5SftpStatMode::GLOB_EXISTENCE_PROBE)) {
 		return false;
 	}
 	if (H5SftpPathAttrsAreDirectory(attrs)) {
@@ -1431,6 +1442,11 @@ static bool H5SftpExactGlobFallbackNonDirectoryPathExists(const shared_ptr<H5Sft
 		return true;
 	}
 	return !H5SftpCanOpenDirectory(connection, path);
+}
+
+static bool H5SftpGlobLiteralPathExists(const shared_ptr<H5SftpConnection> &connection, const std::string &path) {
+	LIBSSH2_SFTP_ATTRIBUTES attrs {};
+	return H5SftpTryStatPath(connection, path, LIBSSH2_SFTP_STAT, attrs, H5SftpStatMode::GLOB_EXISTENCE_PROBE);
 }
 
 struct H5SftpListEntry {
@@ -1481,59 +1497,27 @@ private:
 
 	H5SftpPathKind TryGetPathKind(const std::string &path, int stat_type) const {
 		LIBSSH2_SFTP_ATTRIBUTES attrs {};
-		if (!TryStatPath(path, stat_type, attrs)) {
+		if (!TryStatPath(path, stat_type, attrs, H5SftpStatMode::GLOB_EXISTENCE_PROBE)) {
 			return H5SftpPathKind::UNKNOWN;
 		}
 		return PathKindFromAttrs(attrs);
 	}
 
-	LIBSSH2_SFTP_HANDLE *OpenDirectoryHandle(const std::string &path, bool allow_probe_failure = false) const {
-		connection->ThrowIfRemoteConnectionUnreliable();
-		while (true) {
-			auto *dir_handle = libssh2_sftp_opendir(connection->GetSftpSession(), path.c_str());
-			if (dir_handle) {
-				return dir_handle;
-			}
-			auto last_error = libssh2_session_last_errno(connection->GetSession());
-			if (last_error == LIBSSH2_ERROR_EAGAIN) {
-				connection->WaitForSessionIO();
-				continue;
-			}
-			auto sftp_error = connection->GetSftpStatusError(last_error);
-			if (allow_probe_failure && sftp_error && H5SftpStatusIndicatesIgnorableGlobDirectoryFailure(*sftp_error)) {
-				// During glob expansion, match DuckDB's local filesystem semantics:
-				// unreadable, missing, or non-directory paths are treated as simply not
-				// traversable instead of raising a glob error. Some servers report both
-				// "not a directory" and permission failures as a generic FX_FAILURE.
-				return nullptr;
-			}
-			connection->ThrowSftpPathOperationError("Failed to open SFTP directory", path, last_error);
-		}
-	}
-
-	bool CanOpenDirectory(const std::string &path) const {
-		auto *dir_handle = OpenDirectoryHandle(path, true);
-		if (!dir_handle) {
-			return false;
-		}
-		CloseDirectoryHandle(dir_handle);
-		return true;
-	}
-
-	bool TryStatPath(const std::string &path, int stat_type, LIBSSH2_SFTP_ATTRIBUTES &attrs) const {
-		return H5SftpTryStatPath(connection, path, stat_type, attrs);
+	bool TryStatPath(const std::string &path, int stat_type, LIBSSH2_SFTP_ATTRIBUTES &attrs,
+	                 H5SftpStatMode mode = H5SftpStatMode::DEFAULT) const {
+		return H5SftpTryStatPath(connection, path, stat_type, attrs, mode);
 	}
 
 	H5SftpPathKind TryGetResolvedPathKind(const std::string &path) const {
 		LIBSSH2_SFTP_ATTRIBUTES attrs {};
-		if (!TryStatPath(path, LIBSSH2_SFTP_STAT, attrs)) {
+		if (!TryStatPath(path, LIBSSH2_SFTP_STAT, attrs, H5SftpStatMode::GLOB_EXISTENCE_PROBE)) {
 			return H5SftpPathKind::UNKNOWN;
 		}
 		auto path_kind = PathKindFromAttrs(attrs);
 		if (path_kind != H5SftpPathKind::UNKNOWN) {
 			return path_kind;
 		}
-		return CanOpenDirectory(path) ? H5SftpPathKind::DIRECTORY : H5SftpPathKind::OTHER;
+		return H5SftpCanOpenDirectory(connection, path) ? H5SftpPathKind::DIRECTORY : H5SftpPathKind::OTHER;
 	}
 
 	std::optional<H5SftpListEntry> ClassifyListedPath(const std::string &directory_path, std::string name,
@@ -1573,7 +1557,7 @@ private:
 	}
 
 	vector<H5SftpListEntry> ListDirectory(const std::string &path) const {
-		LIBSSH2_SFTP_HANDLE *dir_handle = OpenDirectoryHandle(path, true);
+		LIBSSH2_SFTP_HANDLE *dir_handle = H5SftpTryOpenDirectory(connection, path);
 		if (!dir_handle) {
 			return {};
 		}
@@ -1626,13 +1610,11 @@ private:
 
 		if (!FileSystem::HasGlob(component)) {
 			auto next_path = JoinSftpPath(current_path, component);
-			auto path_kind = TryGetResolvedPathKind(next_path);
-			if (path_kind == H5SftpPathKind::UNKNOWN) {
-				return;
-			}
 			if (is_last_component) {
-				result.push_back(std::move(next_path));
-			} else if (path_kind == H5SftpPathKind::DIRECTORY) {
+				if (H5SftpGlobLiteralPathExists(connection, next_path)) {
+					result.push_back(std::move(next_path));
+				}
+			} else {
 				ExpandFrom(next_path, split_index + 1, result);
 			}
 			return;

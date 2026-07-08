@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         default="./build/release/duckdb",
         help="DuckDB binary to use (default: ./build/release/duckdb)",
     )
+    parser.add_argument(
+        "tests",
+        nargs="*",
+        help="Optional unittest test names to run, e.g. SFTPInteractionTests.test_exact_case",
+    )
     return parser.parse_args()
 
 
@@ -1513,6 +1518,153 @@ class SFTPInteractionTests(unittest.TestCase):
         finally:
             self.password_server.config.fail_stat_paths.discard("/glob/no_such_*.h5")
 
+    def test_missing_sftp_glob_treats_permission_denied_exact_fallback_as_no_match(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX directory permission bits required")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root can bypass POSIX directory permission bits")
+
+        restricted_dir = self.mutable_root / "glob_no_access"
+        restricted_dir.mkdir()
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_1.h5", restricted_dir / "hidden.h5")
+        try:
+            os.chmod(restricted_dir, 0)
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET missing_glob_permission_denied_as_no_match (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.mutable_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
+                    PORT {self.mutable_server.port}
+                );
+                SELECT h5_first_file('sftp://127.0.0.1:{self.mutable_server.port}/glob_no_access/*.h5');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertNotEqual(result.returncode, 0, msg=result.output)
+            self.assertOutputContains(result, "No files found that match the pattern")
+            self.assertNotIn("Failed to stat SFTP path", result.output, msg=result.output)
+        finally:
+            os.chmod(restricted_dir, 0o700)
+            shutil.rmtree(restricted_dir)
+
+    def test_sftp_glob_skips_literal_directory_component_when_stat_fails(self) -> None:
+        pattern_root = self.mutable_root / "glob_literal_component"
+        good_raw = pattern_root / "good" / "raw"
+        bad_raw = pattern_root / "bad" / "raw"
+        good_raw.mkdir(parents=True)
+        bad_raw.mkdir(parents=True)
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_1.h5", good_raw / "good.hdf")
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_2.h5", bad_raw / "hidden.hdf")
+        self.mutable_server.config.fail_stat_paths.add("/glob_literal_component/bad/raw")
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET literal_component_stat_failure (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.mutable_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
+                    PORT {self.mutable_server.port}
+                );
+                SELECT COUNT(DISTINCT filename)
+                FROM h5_ls(
+                    'sftp://127.0.0.1:{self.mutable_server.port}/glob_literal_component/*/raw/*.hdf',
+                    '/',
+                    filename := true
+                );
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertCsvOutput(result, ["2"])
+        finally:
+            self.mutable_server.config.fail_stat_paths.discard("/glob_literal_component/bad/raw")
+            shutil.rmtree(pattern_root)
+
+    def test_sftp_glob_skips_final_literal_component_when_stat_fails(self) -> None:
+        pattern_root = self.mutable_root / "glob_final_literal_component"
+        good_raw = pattern_root / "good" / "raw"
+        bad_raw = pattern_root / "bad" / "raw"
+        good_raw.mkdir(parents=True)
+        bad_raw.mkdir(parents=True)
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_1.h5", good_raw / "sample.hdf")
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_2.h5", bad_raw / "sample.hdf")
+        self.mutable_server.config.fail_stat_paths.add("/glob_final_literal_component/bad/raw/sample.hdf")
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET final_literal_stat_failure (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.mutable_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
+                    PORT {self.mutable_server.port}
+                );
+                SELECT COUNT(DISTINCT filename)
+                FROM h5_ls(
+                    'sftp://127.0.0.1:{self.mutable_server.port}/glob_final_literal_component/*/raw/sample.hdf',
+                    '/',
+                    filename := true
+                );
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertCsvOutput(result, ["1"])
+            self.assertNotIn("Failed to stat SFTP path", result.output, msg=result.output)
+        finally:
+            self.mutable_server.config.fail_stat_paths.discard("/glob_final_literal_component/bad/raw/sample.hdf")
+            shutil.rmtree(pattern_root)
+
+    def test_sftp_glob_skips_unlistable_literal_directory_component(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX directory permission bits required")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root can bypass POSIX directory permission bits")
+
+        pattern_root = self.mutable_root / "glob_unlistable_literal_component"
+        good_raw = pattern_root / "good" / "raw"
+        bad_raw = pattern_root / "bad" / "raw"
+        good_raw.mkdir(parents=True)
+        bad_raw.mkdir(parents=True)
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_1.h5", good_raw / "good.hdf")
+        shutil.copyfile(Path(self.data_dir) / "glob" / "glob_same_2.h5", bad_raw / "hidden.hdf")
+        try:
+            os.chmod(bad_raw, 0)
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                CREATE OR REPLACE TEMPORARY SECRET unlistable_literal_component (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.mutable_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
+                    PORT {self.mutable_server.port}
+                );
+                SELECT COUNT(DISTINCT filename)
+                FROM h5_ls(
+                    'sftp://127.0.0.1:{self.mutable_server.port}/glob_unlistable_literal_component/*/raw/*.hdf',
+                    '/',
+                    filename := true
+                );
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertCsvOutput(result, ["1"])
+        finally:
+            os.chmod(bad_raw, 0o700)
+            shutil.rmtree(pattern_root)
+
     def test_sftp_glob_literal_directory_component_handles_missing_stat_permissions(self) -> None:
         self.password_server.config.stat_omit_permissions = True
         try:
@@ -1820,7 +1972,7 @@ class SFTPInteractionTests(unittest.TestCase):
         finally:
             self.password_server.config.fail_stat_calls = 0
 
-    def test_sftp_status_failure_during_glob_stat_closes_directory_handle(self) -> None:
+    def test_sftp_status_failure_during_glob_stat_skips_entry_and_closes_handles(self) -> None:
         self.password_server.config.list_folder_omit_permissions = True
         self.password_server.config.fail_stat_calls = 1
         try:
@@ -1839,13 +1991,14 @@ class SFTPInteractionTests(unittest.TestCase):
                 """
             ).strip()
             result = self.run_sql(sql)
-            self.assertNotEqual(result.returncode, 0, msg=result.output)
-            self.assertIn("Failed to stat SFTP path", result.output, msg=result.output)
-            handle_open_calls, _, handle_close_requests, current_open_handles, _ = (
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            self.assertCsvOutput(result, ["12"])
+            handle_open_calls, handle_close_calls, handle_close_requests, current_open_handles, _ = (
                 self.password_server.telemetry.handle_snapshot()
             )
-            self.assertEqual(handle_open_calls, 0)
-            self.assertGreater(handle_close_requests, 0)
+            self.assertGreater(handle_open_calls, 0)
+            self.assertEqual(handle_open_calls, handle_close_calls)
+            self.assertGreaterEqual(handle_close_requests, handle_open_calls)
             self.assertEqual(current_open_handles, 0)
         finally:
             self.password_server.config.list_folder_omit_permissions = False
@@ -2194,7 +2347,7 @@ class SFTPInteractionTests(unittest.TestCase):
 def main() -> None:
     global PARSED_ARGS
     PARSED_ARGS = parse_args()
-    unittest.main(argv=["run_sftp_interaction_tests.py"])
+    unittest.main(argv=["run_sftp_interaction_tests.py"] + PARSED_ARGS.tests)
 
 
 if __name__ == "__main__":
