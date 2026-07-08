@@ -625,7 +625,7 @@ GROUP BY category
 ORDER BY category;
 ----
 chunk	10	30	0	10
-other	14	42	3	14
+other	16	48	3	16
 typed	5	15	1	5
 
 query TIIII
@@ -665,7 +665,7 @@ GROUP BY roots.category
 ORDER BY roots.category;
 ----
 chunk	10	30	10	10
-other	14	42	14	14
+other	16	48	16	16
 typed	5	15	5	5
 
 query I
