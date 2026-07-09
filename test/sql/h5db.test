@@ -6,10 +6,13 @@
 require h5db
 
 # Test basic extension loading
-query I
-SELECT h5db_version('test') ILIKE 'H5db test, HDF5 version 1.%';
+query III
+SELECT
+    length(struct_extract(h5db_version(), 'h5db_version')) > 0,
+    struct_extract(h5db_version(), 'hdf5_version') LIKE '1.%',
+    length(struct_extract(h5db_version(), 'sftp_library_version')) > 0;
 ----
-true
+true	true	true
 
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR);

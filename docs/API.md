@@ -21,7 +21,7 @@ This document describes the public SQL functions provided by the h5db extension.
   - [`h5_attr([name[, default_value]])`](#h5_attrname-default_value)
   - [`h5_alias(name, definition)`](#h5_aliasname-definition)
 - [Test Functions](#test-functions)
-  - [`h5db_version(name)`](#h5db_versionname)
+  - [`h5db_version()`](#h5db_version)
 - [Remote Access](#remote-access)
   - [SFTP Secrets](#sftp-secrets)
 - [Multi-File Inputs and Globbing](#multi-file-inputs-and-globbing)
@@ -723,8 +723,18 @@ FROM h5_tree(
 
 These functions are provided for testing and verification purposes:
 
-### `h5db_version(name)`
-Returns the HDF5 library version being used.
+### `h5db_version()`
+Returns version metadata for h5db and linked libraries.
+
+**Returns:** STRUCT with fields:
+- `h5db_version` (VARCHAR): h5db extension version reported by the build
+- `hdf5_version` (VARCHAR): linked HDF5 library version
+- `sftp_library_version` (VARCHAR): linked libssh2 version string
+
+**Example:**
+```sql
+SELECT h5db_version();
+```
 
 ---
 
