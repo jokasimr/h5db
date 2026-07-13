@@ -6,9 +6,6 @@ import numpy as np
 
 
 with h5py.File("unsupported_types.h5", "w") as f:
-    # Float16 dataset (unsupported float size).
-    f.create_dataset("float16_values", data=np.array([1.5, 2.5], dtype=np.float16))
-
     # Enum dataset.
     enum_dtype = h5py.special_dtype(enum=("i1", {"RED": 1, "GREEN": 2, "BLUE": 3}))
     f.create_dataset("enum_values", data=np.array([1, 2, 3], dtype=np.int8), dtype=enum_dtype)

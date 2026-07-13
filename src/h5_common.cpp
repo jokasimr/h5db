@@ -716,6 +716,8 @@ LogicalType H5TypeToDuckDBType(hid_t type_id) {
 	}
 	case H5T_FLOAT:
 		switch (size) {
+		case 2:
+			return LogicalType::FLOAT;
 		case 4:
 			return LogicalType::FLOAT;
 		case 8:

@@ -59,6 +59,8 @@ def create_types_test_file(filename='types.h5'):
         f.create_dataset('uint64', data=np.array([18446744073709551615], dtype=np.uint64))
 
         # Floats
+        f.create_dataset('float16', data=np.array([1.5, 2.5, 3.5], dtype=np.float16))
+        f.create_dataset('scalar_float16', data=np.float16(4.5))
         f.create_dataset('float32', data=np.array([3.14, 2.71], dtype=np.float32))
         f.create_dataset('float64', data=np.array([3.141592653589793], dtype=np.float64))
 
@@ -81,6 +83,7 @@ def create_multidim_test_file(filename='multidim.h5'):
 
         # 2D
         f.create_dataset('array_2d', data=np.arange(20).reshape(5, 4))
+        f.create_dataset('array_2d_float16', data=(np.arange(12, dtype=np.float16).reshape(3, 4) / np.float16(2.0)))
 
         # 3D
         f.create_dataset('array_3d', data=np.arange(60).reshape(5, 4, 3))

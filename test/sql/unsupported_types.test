@@ -8,14 +8,13 @@ require h5db
 # h5_tree type reporting
 # =============================================================================
 
-query III
+query II
 SELECT
-    COUNT(*) FILTER (WHERE path = '/float16_values' AND dtype = 'float16'),
     COUNT(*) FILTER (WHERE path = '/enum_values' AND dtype = 'enum'),
     COUNT(*) FILTER (WHERE path = '/compound_values' AND dtype = 'compound')
 FROM h5_tree('test/data/unsupported_types.h5');
 ----
-1	1	1
+1	1
 
 query IIII
 SELECT
@@ -30,11 +29,6 @@ FROM h5_tree('test/data/unsupported_types.h5');
 # =============================================================================
 # h5_read should error on unsupported types
 # =============================================================================
-
-statement error
-SELECT * FROM h5_read('test/data/unsupported_types.h5', '/float16_values');
-----
-IO Error: Unsupported float size: 2
 
 statement error
 SELECT * FROM h5_read('test/data/unsupported_types.h5', '/enum_values');

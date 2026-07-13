@@ -4,6 +4,21 @@
 
 require h5db
 
+# Float16 projected attributes are widened to DuckDB FLOAT.
+query TRI
+SELECT
+    typeof(float16_attr),
+    float16_attr,
+    CASE WHEN float16_list_attr = [1.5, 2.5]::FLOAT[] THEN 1 ELSE 0 END
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('float16_attr', NULL::FLOAT),
+    h5_attr('float16_list_attr', NULL::FLOAT[])
+)
+WHERE path = '/float16_attr_dataset';
+----
+FLOAT	1.5	1
+
 # Numeric projected attributes are converted from file to native byte order.
 query III
 SELECT

@@ -28,7 +28,7 @@ To ensure test data exists (generate only if missing):
 | File | Generator | Size | Purpose |
 |------|-----------|------|---------|
 | `simple.h5` | `create_simple_types_multidim.py` | 12 KB | Basic datasets, groups, nested data |
-| `types.h5` | `create_simple_types_multidim.py` | 11 KB | Type system tests (int8/16/32/64, uint*, float32/64, strings) |
+| `types.h5` | `create_simple_types_multidim.py` | 11 KB | Type system tests (int8/16/32/64, uint*, float16/32/64, strings) |
 | `multidim.h5` | `create_simple_types_multidim.py` | 4 KB | Multi-dimensional arrays (2D, 3D, 4D) |
 | `run_encoded.h5` | `create_run_encoded_test.py` | 33 KB | RSE (Run-Start Encoding) functionality |
 | `with_attrs.h5` | `create_attrs_test.py` | 8 KB | HDF5 attributes on datasets and groups |
@@ -38,8 +38,8 @@ To ensure test data exists (generate only if missing):
 | `rse_invalid.h5` | `create_rse_invalid_test.py` | 4 KB | RSE validation errors (invalid run_starts, sizes) |
 | `ree_edge_cases.h5` | `create_ree_edge_cases.py` | 4 KB | REE edge cases (inclusive ends, trailing NULLs, duplicates) |
 | `ree_invalid.h5` | `create_ree_invalid_test.py` | 4 KB | REE validation errors (invalid run_ends, sizes) |
-| `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, float16, reference, non-string vlen, opaque, bitfield) |
-| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, enum, compound, float16, reference, opaque, bitfield) |
+| `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, reference, non-string vlen, opaque, bitfield) |
+| `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (float16, multidim dataspace, enum, compound, reference, opaque, bitfield) |
 | `endian_attrs.h5` | `create_endian_attrs_test.py` | 4 KB | Numeric scalar, list, and `H5T_ARRAY` attributes with explicit byte order |
 | `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
 | `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling plus numeric/string array attrs, including empty arrays |

@@ -265,10 +265,16 @@ SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/compound_attr_dat
 ----
 IO Error: Attribute 'compound_attr' has unsupported type: Unsupported HDF5 type class: 6 in object: /compound_attr_dataset in file: test/data/attrs_edge_cases.h5
 
-statement error
-SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset');
+# Float16 attributes are widened to DuckDB FLOAT.
+query TRTI
+SELECT
+    typeof(float16_attr),
+    float16_attr,
+    typeof(float16_list_attr),
+    CASE WHEN float16_list_attr = [1.5, 2.5]::FLOAT[] THEN 1 ELSE 0 END
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset');
 ----
-IO Error: Attribute 'float16_attr' has unsupported type: Unsupported float size: 2 in object: /float16_attr_dataset in file: test/data/attrs_edge_cases.h5
+FLOAT	1.5	FLOAT[]	1
 
 statement error
 SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/reference_attr_dataset');
@@ -285,14 +291,20 @@ SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dat
 ----
 IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4 in object: /bitfield_attr_dataset in file: test/data/attrs_edge_cases.h5
 
-query TTTTTTT
+query TTTTTT
 SELECT
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset'), 'attr_2d')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/enum_attr_dataset'), 'enum_attr')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/compound_attr_dataset'), 'compound_attr')),
-    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset'), 'float16_attr')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/reference_attr_dataset'), 'ref_attr')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/opaque_attr_dataset'), 'opaque_attr')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset'), 'bitfield_attr'));
 ----
-VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL
+VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL
+
+query TT
+SELECT
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset'), 'float16_attr')),
+    variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/float16_attr_dataset'), 'float16_list_attr'));
+----
+FLOAT	ARRAY(2)

@@ -47,9 +47,10 @@ with h5py.File("attrs_edge_cases.h5", "w") as f:
     compound_dtype = np.dtype([("a", np.int32), ("b", np.float32)])
     ds.attrs["compound_attr"] = np.array((1, 2.5), dtype=compound_dtype)
 
-    # Dataset with float16 attribute (unsupported float size).
+    # Dataset with float16 attributes (supported by widening to DuckDB FLOAT).
     ds = f.create_dataset("float16_attr_dataset", data=np.arange(2, dtype=np.int32))
     ds.attrs["float16_attr"] = np.float16(1.5)
+    ds.attrs["float16_list_attr"] = np.array([1.5, 2.5], dtype=np.float16)
 
     # Dataset with object reference attribute (unsupported type).
     target = f.create_dataset("reference_attr_target", data=np.arange(3, dtype=np.int32))

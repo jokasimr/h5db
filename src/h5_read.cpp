@@ -502,6 +502,13 @@ static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize
 	return result;
 }
 
+static idx_t H5ReadNumericOutputElementSize(const LogicalType &base_type) {
+	return DispatchOnNumericType(base_type, [&](auto type_tag) -> idx_t {
+		using T = typename decltype(type_tag)::type;
+		return sizeof(T);
+	});
+}
+
 // Helper: select hyperslab and create matching memory dataspace
 static H5DataspaceHandle CreateMemspaceAndSelect(hid_t file_space_id, const RegularColumnSpec &spec, idx_t position,
                                                  idx_t to_read) {
@@ -1255,8 +1262,10 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Map HDF5 type to DuckDB type
 			LogicalType base_type = H5TypeToDuckDBType(type);
 
-			// Calculate element size for multi-dimensional arrays (before move)
-			ds_info.element_size = H5Tget_size(type);
+			// Calculate output element size for multi-dimensional arrays.
+			// This intentionally uses the DuckDB/native memory size, not the file size:
+			// e.g. HDF5 float16 values are widened into DuckDB FLOAT values.
+			ds_info.element_size = ds_info.is_string ? 0 : H5ReadNumericOutputElementSize(base_type);
 			ds_info.elements_per_row = 1;
 			for (int j = 1; j < ds_info.ndims; j++) {
 				ds_info.element_size *= ds_info.dims[j];

@@ -142,7 +142,19 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 10: Different data types - float64
+    # Test 10: Different data types - float16
+    # ==========================================================================
+    create_rse_dataset(
+        f,
+        'type_float16',
+        index_data=np.arange(100, dtype=np.int32),
+        run_starts=np.array([0, 33, 67], dtype=np.uint64),
+        values=np.array([1.5, 2.5, 3.5], dtype=np.float16),
+        dtype=np.float16,
+    )
+
+    # ==========================================================================
+    # Test 11: Different data types - float64
     # ==========================================================================
     create_rse_dataset(
         f,
@@ -154,7 +166,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 11: Different data types - string
+    # Test 12: Different data types - string
     # ==========================================================================
     grp = f.create_group('type_string')
     grp.create_dataset('index', data=np.arange(50, dtype=np.int32))
@@ -162,7 +174,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     grp.create_dataset('values', data=np.array(['alpha', 'beta', 'gamma'], dtype=h5py.string_dtype()))
 
     # ==========================================================================
-    # Test 12: Exact chunk size (2048 rows, single run)
+    # Test 13: Exact chunk size (2048 rows, single run)
     # Tests CONSTANT_VECTOR optimization for exactly one chunk
     # ==========================================================================
     create_rse_dataset(
@@ -174,7 +186,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 13: Exactly 2 chunks (4096 rows, single run)
+    # Test 14: Exactly 2 chunks (4096 rows, single run)
     # ==========================================================================
     create_rse_dataset(
         f,
@@ -185,7 +197,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 14: Chunk + 1 row (2049 rows, single run)
+    # Test 15: Chunk + 1 row (2049 rows, single run)
     # First chunk is constant, second chunk has 1 row
     # ==========================================================================
     create_rse_dataset(
@@ -197,7 +209,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 15: Chunk - 1 row (2047 rows, single run)
+    # Test 16: Chunk - 1 row (2047 rows, single run)
     # Just under one chunk
     # ==========================================================================
     create_rse_dataset(
@@ -209,7 +221,7 @@ with h5py.File('rse_edge_cases.h5', 'w') as f:
     )
 
     # ==========================================================================
-    # Test 16: Multiple runs within first chunk
+    # Test 17: Multiple runs within first chunk
     # 5 runs of ~400 rows each within first chunk (total 2000 < 2048)
     # ==========================================================================
     create_rse_dataset(

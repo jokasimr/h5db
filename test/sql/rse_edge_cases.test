@@ -282,6 +282,25 @@ SELECT COUNT(DISTINCT ROUND(values::DOUBLE, 5)) FROM h5_read(
 ----
 3
 
+# FLOAT16
+query I
+SELECT COUNT(*) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float16/index',
+    h5_rse('/type_float16/run_starts', '/type_float16/values')
+);
+----
+100
+
+query I
+SELECT COUNT(DISTINCT ROUND(values::DOUBLE, 5)) FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float16/index',
+    h5_rse('/type_float16/run_starts', '/type_float16/values')
+);
+----
+3
+
 # FLOAT64
 query I
 SELECT COUNT(*) FROM h5_read(
@@ -996,6 +1015,16 @@ SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
     'test/data/rse_edge_cases.h5',
     '/type_float32/index',
     h5_rse('/type_float32/run_starts', '/type_float32/values')
+))
+WHERE column_name = 'values';
+----
+FLOAT
+
+query I
+SELECT column_type FROM (DESCRIBE SELECT * FROM h5_read(
+    'test/data/rse_edge_cases.h5',
+    '/type_float16/index',
+    h5_rse('/type_float16/run_starts', '/type_float16/values')
 ))
 WHERE column_name = 'values';
 ----

@@ -236,7 +236,7 @@ when two dataset paths or generated columns would otherwise collide.
 - All matched files must have compatible column definitions.
 
 **Type Support:**
-- Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64
+- Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float16, float32, float64
 - Strings: fixed-length and variable-length
 - Arrays: 1D-4D multi-dimensional arrays
 
@@ -923,12 +923,14 @@ SET h5db_batch_size = '4MB';
 | H5T_INTEGER (unsigned) | 2 bytes | USMALLINT |
 | H5T_INTEGER (unsigned) | 4 bytes | UINTEGER |
 | H5T_INTEGER (unsigned) | 8 bytes | UBIGINT |
+| H5T_FLOAT | 2 bytes | FLOAT |
 | H5T_FLOAT | 4 bytes | FLOAT |
 | H5T_FLOAT | 8 bytes | DOUBLE |
 | H5T_STRING | variable/fixed | VARCHAR |
 
 Numeric datasets and attributes are converted from their HDF5 file representation to the host-native memory
-representation before DuckDB values are constructed. This includes numeric attributes with an `H5T_ARRAY` datatype.
+representation before DuckDB values are constructed. This includes widening 16-bit HDF5 floats to DuckDB `FLOAT`
+and numeric attributes with an `H5T_ARRAY` datatype.
 
 ### Multi-Dimensional Arrays
 

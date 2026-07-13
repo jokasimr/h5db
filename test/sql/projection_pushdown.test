@@ -162,6 +162,12 @@ ORDER BY uint8;
 
 # Test with float types (float64 only has 1 row)
 query R
+SELECT float16 FROM h5_read('test/data/types.h5', '/float16', '/float32', '/float64')
+ORDER BY float16;
+----
+1.5
+
+query R
 SELECT float32 FROM h5_read('test/data/types.h5', '/float32', '/float64')
 ORDER BY float32;
 ----
