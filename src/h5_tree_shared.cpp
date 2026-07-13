@@ -86,7 +86,7 @@ static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5Tre
                                 uint64_t *shape_data) {
 	auto entries = ListVector::GetData(shape_vector);
 	auto &validity = FlatVector::Validity(shape_vector);
-	if (!row.has_shape) {
+	if (!row.shape) {
 		validity.SetInvalid(row_idx);
 		entries[row_idx].offset = 0;
 		entries[row_idx].length = 0;
@@ -94,8 +94,8 @@ static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5Tre
 	}
 	validity.SetValid(row_idx);
 	entries[row_idx].offset = shape_offset;
-	entries[row_idx].length = row.shape.size();
-	for (auto dim : row.shape) {
+	entries[row_idx].length = row.shape->size();
+	for (auto dim : *row.shape) {
 		shape_data[shape_offset++] = static_cast<uint64_t>(dim);
 	}
 }
@@ -443,7 +443,6 @@ void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEn
 		H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 		row.dtype = H5TypeToString(type);
 		row.shape = H5GetShape(object);
-		row.has_shape = true;
 	}
 
 	if (need_projected_attributes) {

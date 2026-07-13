@@ -43,10 +43,9 @@ struct H5AttributesBindData : public TableFunctionData {
 	std::string object_path;
 	bool swmr = false;
 	std::optional<idx_t> visible_filename_idx;
-	bool had_glob = false;
 
 	bool SupportStatementCache() const override {
-		return !had_glob;
+		return false;
 	}
 };
 
@@ -231,7 +230,6 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	result->attributes = std::move(attributes);
 	result->object_path = std::move(object_path);
 	result->swmr = swmr;
-	result->had_glob = expanded.had_glob;
 	if (filename_option.include) {
 		result->visible_filename_idx = names.size() - 1;
 	}
@@ -493,6 +491,7 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	                                    LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARIANT()),
 	                                    H5AttributesScalarFunction, H5AttributesScalarBind);
 	h5_attributes_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_attributes_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_attributes_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	scalar_info.descriptions.push_back(H5FunctionDescription(

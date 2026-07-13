@@ -41,8 +41,8 @@ static unique_ptr<BaseSecret> CreateH5SftpSecretFromConfig(ClientContext &, Crea
 	auto has_password = secret->TryGetValue("password", value);
 	auto has_key_path = secret->TryGetValue("key_path", value);
 	auto use_agent = secret->TryGetValue("use_agent", value) && value.GetValue<bool>();
-	auto auth_mode_count = UnsafeNumericCast<idx_t>(has_password) + UnsafeNumericCast<idx_t>(has_key_path) +
-	                       UnsafeNumericCast<idx_t>(use_agent);
+	auto auth_mode_count =
+	    static_cast<int>(has_password) + static_cast<int>(has_key_path) + static_cast<int>(use_agent);
 	if (auth_mode_count != 1) {
 		throw InvalidInputException("sftp secret requires exactly one of PASSWORD, KEY_PATH or USE_AGENT");
 	}

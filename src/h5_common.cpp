@@ -643,20 +643,36 @@ std::string H5TypeToString(hid_t type_id) {
 	}
 }
 
-// Get dataset shape as a list of dimensions
-std::vector<hsize_t> H5GetShape(hid_t dataset_id) {
+// Get dataset shape as a list of dimensions. H5S_NULL has no shape.
+std::optional<std::vector<hsize_t>> H5GetShape(hid_t dataset_id) {
 	H5DataspaceHandle space(dataset_id);
 	if (!space.is_valid()) {
-		return {};
+		throw IOException("Failed to get dataset dataspace");
+	}
+
+	auto space_class = H5Sget_simple_extent_type(space);
+	if (space_class == H5S_NO_CLASS) {
+		throw IOException("Failed to get dataset dataspace class");
+	}
+	if (space_class == H5S_NULL) {
+		return std::nullopt;
+	}
+	if (space_class == H5S_SCALAR) {
+		return std::vector<hsize_t> {};
+	}
+	if (space_class != H5S_SIMPLE) {
+		throw IOException("Unsupported dataset dataspace class");
 	}
 
 	int ndims = H5Sget_simple_extent_ndims(space);
-	if (ndims <= 0) {
-		return {};
+	if (ndims < 0) {
+		throw IOException("Failed to get dataset dimensions");
 	}
 
 	std::vector<hsize_t> dims(ndims);
-	H5Sget_simple_extent_dims(space, dims.data(), nullptr);
+	if (H5Sget_simple_extent_dims(space, dims.data(), nullptr) < 0) {
+		throw IOException("Failed to get dataset dimensions");
+	}
 	return dims;
 }
 
@@ -822,6 +838,34 @@ H5OpenedAttribute H5OpenAttribute(hid_t object_id, const std::string &attribute_
 	return result;
 }
 
+template <typename T>
+static hid_t H5GetNativeAttributeMemoryType(hid_t h5_type_id, const std::string &attribute_name,
+                                            H5TypeHandle &owned_memory_type) {
+	auto memory_type = GetNativeH5Type<T>();
+	auto type_class = H5Tget_class(h5_type_id);
+	if (type_class == H5T_NO_CLASS) {
+		throw IOException("Failed to inspect type for attribute: " + attribute_name);
+	}
+	if (type_class != H5T_ARRAY) {
+		return memory_type;
+	}
+
+	auto ndims = H5Tget_array_ndims(h5_type_id);
+	if (ndims < 0) {
+		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+	}
+	vector<hsize_t> dims(static_cast<idx_t>(ndims));
+	if (H5Tget_array_dims2(h5_type_id, dims.data()) < 0) {
+		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+	}
+	auto array_type_id = H5Tarray_create2(memory_type, static_cast<unsigned>(ndims), dims.data());
+	if (array_type_id < 0) {
+		throw IOException("Failed to create array memory type for attribute: " + attribute_name);
+	}
+	owned_memory_type = H5TypeHandle::TakeOwnershipOf(array_type_id);
+	return owned_memory_type.get();
+}
+
 Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, const LogicalType &resolved_type,
                            const std::string &attribute_name, H5StringDecodeMode string_decode_mode) {
 	if (resolved_type.id() == LogicalTypeId::LIST) {
@@ -834,13 +878,15 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 		if (array_size == 0) {
 			return Value::LIST(child_type, vector<Value>());
 		}
-		return DispatchOnDuckDBType(child_type, [&](auto type_tag) -> Value {
+		return DispatchOnNumericType(child_type, [&](auto type_tag) -> Value {
 			using T = typename decltype(type_tag)::type;
 			std::vector<Value> values;
 			values.reserve(array_size);
 			std::vector<T> raw_values(array_size);
+			H5TypeHandle owned_memory_type;
+			auto memory_type = H5GetNativeAttributeMemoryType<T>(h5_type_id, attribute_name, owned_memory_type);
 			H5ErrorSuppressor suppress;
-			if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
+			if (H5Aread(attr_id, memory_type, raw_values.data()) < 0) {
 				throw IOException("Failed to read array attribute: " + attribute_name);
 			}
 			for (auto &value : raw_values) {
@@ -876,11 +922,13 @@ Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, c
 		return H5DecodeFixedStringValue(buffer.data(), type_info, string_decode_mode);
 	}
 
-	return DispatchOnDuckDBType(resolved_type, [&](auto type_tag) -> Value {
+	return DispatchOnNumericType(resolved_type, [&](auto type_tag) -> Value {
 		using T = typename decltype(type_tag)::type;
 		T value;
+		H5TypeHandle owned_memory_type;
+		auto memory_type = H5GetNativeAttributeMemoryType<T>(h5_type_id, attribute_name, owned_memory_type);
 		H5ErrorSuppressor suppress;
-		if (H5Aread(attr_id, h5_type_id, &value) < 0) {
+		if (H5Aread(attr_id, memory_type, &value) < 0) {
 			throw IOException("Failed to read attribute: " + attribute_name);
 		}
 		return H5CreateDuckDBValue(value);

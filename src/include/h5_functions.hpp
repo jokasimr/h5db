@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "h5_raii.hpp"
 #include <hdf5.h>
+#include <optional>
 #include <vector>
 
 namespace duckdb {
@@ -29,8 +30,8 @@ std::string H5DecodeFixedLengthString(const char *raw_data, size_t raw_size, H5T
 // Helper function to get HDF5 type as string
 std::string H5TypeToString(hid_t type_id);
 
-// Helper function to get dataset dimensions as a list
-std::vector<hsize_t> H5GetShape(hid_t dataset_id);
+// Get dataset dimensions, or no value for an H5S_NULL dataspace.
+std::optional<std::vector<hsize_t>> H5GetShape(hid_t dataset_id);
 
 // Helper function to map HDF5 type to DuckDB LogicalType
 LogicalType H5TypeToDuckDBType(hid_t type_id);

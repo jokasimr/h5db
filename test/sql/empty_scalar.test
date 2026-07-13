@@ -8,13 +8,35 @@ require h5db
 # h5_tree reporting
 # =============================================================================
 
-query II
+query IIII
 SELECT
     COUNT(*) FILTER (WHERE path = '/scalar_int' AND dtype = 'int32' AND shape = []),
-    COUNT(*) FILTER (WHERE path = '/empty_1d' AND dtype = 'int32' AND shape = [0])
+    COUNT(*) FILTER (WHERE path = '/empty_1d' AND dtype = 'int32' AND shape = [0]),
+    COUNT(*) FILTER (WHERE path = '/null_int' AND type = 'dataset' AND dtype = 'int32' AND shape IS NULL),
+    COUNT(*) FILTER (WHERE path = '/null_str' AND type = 'dataset' AND dtype = 'string' AND shape IS NULL)
 FROM h5_tree('test/data/empty_scalar.h5');
 ----
-1	1
+1	1	1	1
+
+query III
+SELECT
+    COUNT(*) FILTER (WHERE path = '/scalar_int' AND shape = []),
+    COUNT(*) FILTER (WHERE path = '/null_int' AND shape IS NULL),
+    COUNT(*) FILTER (WHERE path = '/null_str' AND shape IS NULL)
+FROM h5_ls('test/data/empty_scalar.h5', '/');
+----
+1	1	1
+
+query III
+SELECT
+    CASE WHEN struct_extract(map_extract_value(children, 'scalar_int'), 'shape') = [] THEN 1 ELSE 0 END,
+    CASE WHEN struct_extract(map_extract_value(children, 'null_int'), 'shape') IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN struct_extract(map_extract_value(children, 'null_str'), 'shape') IS NULL THEN 1 ELSE 0 END
+FROM (
+    SELECT h5_ls('test/data/empty_scalar.h5', '/') AS children
+);
+----
+1	1	1
 
 # =============================================================================
 # Scalar datasets should be read and treated as constants
@@ -30,6 +52,49 @@ SELECT COUNT(*), MIN(scalar_int), MIN(scalar_str)
 FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', '/scalar_str', '/long');
 ----
 5	7	hello
+
+# Null dataspaces behave like scalar datasets whose value is SQL NULL.
+query II
+SELECT COUNT(*), COUNT(null_int)
+FROM h5_read('test/data/empty_scalar.h5', '/null_int');
+----
+1	0
+
+query IIII
+SELECT COUNT(*), COUNT(null_int), COUNT(null_str), MIN(scalar_int)
+FROM h5_read(
+    'test/data/empty_scalar.h5',
+    '/null_int',
+    '/null_str',
+    '/scalar_int'
+);
+----
+1	0	0	7
+
+query III
+SELECT COUNT(*), COUNT(null_int), COUNT(*) FILTER (WHERE null_int IS NULL)
+FROM h5_read('test/data/empty_scalar.h5', '/null_int', '/long');
+----
+5	0	5
+
+query TT
+SELECT typeof(null_int), typeof(null_str)
+FROM h5_read('test/data/empty_scalar.h5', '/null_int', '/null_str');
+----
+INTEGER	VARCHAR
+
+query II
+SELECT
+    CASE WHEN h5_read('test/data/empty_scalar.h5', '/null_int') IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN h5_read('test/data/empty_scalar.h5', '/null_str') IS NULL THEN 1 ELSE 0 END;
+----
+1	1
+
+query II
+SELECT index, CASE WHEN null_int IS NULL THEN 1 ELSE 0 END
+FROM h5_read('test/data/empty_scalar.h5', h5_index(), '/null_int');
+----
+0	1
 
 query TITT
 SELECT
@@ -192,6 +257,16 @@ FROM h5_read([
 ], '/scalar');
 ----
 3	60	3
+
+query IIII
+SELECT COUNT(*), COUNT(nullable_scalar), SUM(nullable_scalar), COUNT(DISTINCT filename)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/nullable_scalar');
+----
+3	2	40	3
 
 # =============================================================================
 # Row count uses minimum across datasets

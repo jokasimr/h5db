@@ -118,13 +118,13 @@ struct RegularColumnSpec {
 	size_t elements_per_row; // Element count per row (1D: 1, ND: product of inner dims)
 };
 
-// Scalar dataset specification (rank-0)
+// Scalar dataset specification (rank-0 value or null dataspace)
 struct ScalarColumnSpec {
 	std::string path;
 	std::string column_name;
 	LogicalType column_type;
-	bool is_string;
-	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
+	bool is_null_dataspace = false;
+	std::optional<H5TypeHandle> string_h5_type; // Present only for non-null string datasets
 };
 
 enum class RunEncodingKind : uint8_t { START, END };
@@ -203,8 +203,8 @@ struct RegularColumnState {
 
 // Scalar column runtime state (cached value)
 struct ScalarColumnState {
-	using ScalarValue =
-	    std::variant<int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, float, double, string>;
+	using ScalarValue = std::variant<std::monostate, int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t,
+	                                 uint64_t, float, double, string>;
 	ScalarValue value;
 };
 
@@ -269,10 +269,9 @@ struct H5ReadBindData : public TableFunctionData {
 	hsize_t total_num_rows = 0;            // Total row count across all matched files
 	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
 	std::optional<idx_t> visible_filename_idx;
-	bool had_glob = false;
 
 	bool SupportStatementCache() const override {
-		return !had_glob;
+		return false;
 	}
 };
 
@@ -722,19 +721,25 @@ static Value H5ReadScalarDatasetValue(hid_t file, const string &filename, const 
 	if (!space.is_valid()) {
 		throw IOException(FormatDatasetError("Failed to get dataspace for dataset", filename, dataset_path));
 	}
-	auto ndims = H5Sget_simple_extent_ndims(space);
-	if (ndims < 0) {
-		throw IOException(FormatDatasetError("Failed to get dataset dimensions", filename, dataset_path));
+	auto duckdb_type = H5TypeToDuckDBType(h5_type);
+	auto space_class = H5Sget_simple_extent_type(space);
+	if (space_class == H5S_NO_CLASS) {
+		throw IOException(FormatDatasetError("Failed to get dataset dataspace class", filename, dataset_path));
+	}
+	if (space_class == H5S_NULL) {
+		return Value(LogicalType::VARIANT());
+	}
+	if (space_class != H5S_SCALAR) {
+		throw IOException(FormatDatasetError("Scalar h5_read only supports scalar datasets", filename, dataset_path));
 	}
 	auto npoints = H5Sget_simple_extent_npoints(space);
 	if (npoints < 0) {
 		throw IOException(FormatDatasetError("Failed to get dataset element count", filename, dataset_path));
 	}
-	if (ndims != 0 || npoints != 1) {
+	if (npoints != 1) {
 		throw IOException(FormatDatasetError("Scalar h5_read only supports scalar datasets", filename, dataset_path));
 	}
 
-	auto duckdb_type = H5TypeToDuckDBType(h5_type);
 	if (duckdb_type.id() == LogicalTypeId::VARCHAR) {
 		string value;
 		ReadHDF5Strings(dataset, h5_type, H5S_ALL, H5S_ALL, 1, filename, dataset_path,
@@ -1202,6 +1207,32 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 				throw IOException(FormatDatasetError("Failed to get dataset dataspace", result.filename, ds_info.path));
 			}
 
+			auto space_class = H5Sget_simple_extent_type(space);
+			if (space_class == H5S_NO_CLASS) {
+				throw IOException(
+				    FormatDatasetError("Failed to get dataset dataspace class", result.filename, ds_info.path));
+			}
+
+			if (space_class == H5S_SCALAR || space_class == H5S_NULL) {
+				// Null dataspaces use scalar row and broadcast semantics with a NULL value.
+				ScalarColumnSpec scalar_info;
+				scalar_info.path = ds_info.path;
+				scalar_info.column_name = ds_info.column_name;
+				scalar_info.is_null_dataspace = space_class == H5S_NULL;
+
+				scalar_info.column_type = H5TypeToDuckDBType(type);
+				if (ds_info.is_string && !scalar_info.is_null_dataspace) {
+					scalar_info.string_h5_type = std::move(type);
+				}
+
+				result.columns.push_back(std::move(scalar_info));
+				continue;
+			}
+			if (space_class != H5S_SIMPLE) {
+				throw IOException(
+				    FormatDatasetError("Unsupported dataset dataspace class", result.filename, ds_info.path));
+			}
+
 			ds_info.ndims = H5Sget_simple_extent_ndims(space);
 			if (ds_info.ndims < 0) {
 				throw IOException(
@@ -1210,23 +1241,6 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			if (ds_info.is_string && ds_info.ndims > 1) {
 				throw IOException(FormatDatasetError("String datasets with more than 1 dimension are not supported",
 				                                     result.filename, ds_info.path));
-			}
-
-			if (ds_info.ndims == 0) {
-				// Scalar dataset - create ScalarColumnSpec and skip regular path
-				ScalarColumnSpec scalar_info;
-				scalar_info.path = ds_info.path;
-				scalar_info.column_name = ds_info.column_name;
-				scalar_info.is_string = ds_info.is_string;
-
-				LogicalType base_type = H5TypeToDuckDBType(type);
-				scalar_info.column_type = base_type;
-				if (scalar_info.is_string) {
-					scalar_info.string_h5_type = std::move(type);
-				}
-
-				result.columns.push_back(std::move(scalar_info));
-				continue;
 			}
 
 			ds_info.dims.resize(ds_info.ndims);
@@ -1354,7 +1368,6 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	if (filename_option.include) {
 		result->visible_filename_idx = names.size() - 1;
 	}
-	result->had_glob = expanded.had_glob;
 	result->file_bind_data.reserve(expanded.filenames.size());
 	result->total_num_rows = first_file_bind.num_rows;
 	result->file_bind_data.push_back(std::move(first_file_bind));
@@ -1514,6 +1527,11 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    result->column_states.push_back(std::move(state));
 
 			    } else if constexpr (std::is_same_v<T, ScalarColumnSpec>) {
+				    if (spec.is_null_dataspace) {
+					    result->column_states.push_back(ScalarColumnState {});
+					    return;
+				    }
+
 				    // Scalar column - open dataset and cache value once
 				    H5DatasetHandle dataset;
 				    {
@@ -1526,8 +1544,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    }
 
 				    ScalarColumnState scalar_state;
-				    if (spec.is_string) {
-					    D_ASSERT(spec.string_h5_type.has_value());
+				    if (spec.string_h5_type) {
 					    std::string value;
 					    ReadHDF5Strings(dataset, *spec.string_h5_type, H5S_ALL, H5S_ALL, 1, bind_data.filename,
 					                    spec.path, [&](idx_t, const std::string &str) { value = str; });
@@ -2413,27 +2430,21 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 }
 
 // Helper function to scan a scalar dataset column (broadcast cached value)
-static void ScanScalarColumn(const ScalarColumnSpec &spec, const ScalarColumnState &state, Vector &result_vector,
-                             idx_t to_read) {
+static void ScanScalarColumn(const ScalarColumnState &state, Vector &result_vector, idx_t to_read) {
 	if (to_read == 0) {
 		return;
 	}
 
-	if (spec.is_string) {
-		const auto &value = std::get<string>(state.value);
-		auto result_data = FlatVector::GetData<string_t>(result_vector);
-		result_data[0] = StringVector::AddString(result_vector, value);
-		result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
-		return;
-	}
-
+	result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 	std::visit(
-	    [&](auto &&val) {
-		    using T = std::decay_t<decltype(val)>;
-		    if constexpr (!std::is_same_v<T, string>) {
-			    auto result_data = FlatVector::GetData<T>(result_vector);
-			    result_data[0] = val;
-			    result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+	    [&](const auto &value) {
+		    using T = std::decay_t<decltype(value)>;
+		    if constexpr (std::is_same_v<T, std::monostate>) {
+			    ConstantVector::SetNull(result_vector, true);
+		    } else if constexpr (std::is_same_v<T, string>) {
+			    ConstantVector::GetData<string_t>(result_vector)[0] = StringVector::AddString(result_vector, value);
+		    } else {
+			    ConstantVector::GetData<T>(result_vector)[0] = value;
 		    }
 	    },
 	    state.value);
@@ -2476,7 +2487,7 @@ static void H5ReadSingleFileScan(ClientContext &context, const H5ReadSingleFileB
 			    } else if constexpr (std::is_same_v<SpecT, ScalarColumnSpec> &&
 			                         std::is_same_v<StateT, ScalarColumnState>) {
 				    // Scalar dataset - broadcast cached value
-				    ScanScalarColumn(spec, state, result_vector, to_read);
+				    ScanScalarColumn(state, result_vector, to_read);
 
 			    } else if constexpr (std::is_same_v<SpecT, RegularColumnSpec> &&
 			                         std::is_same_v<StateT, RegularColumnState>) {
@@ -3004,6 +3015,7 @@ void RegisterH5ReadFunction(ExtensionLoader &loader) {
 	ScalarFunction h5_read_scalar("h5_read", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARIANT(),
 	                              H5ReadScalarFunction, H5ReadScalarBind);
 	h5_read_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_read_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_read_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	scalar_info.descriptions.push_back(H5FunctionDescription(

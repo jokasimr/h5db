@@ -214,6 +214,35 @@ FROM h5_attributes('test/data/root_attrs.h5', '/h5t_array_attrs');
 INTEGER[]	3	1	VARCHAR[]	3	1
 
 # =============================================================================
+# Numeric attributes with explicit file byte order
+# =============================================================================
+
+query IIIIIIII
+SELECT
+    be_int32,
+    le_int32,
+    CASE WHEN be_float64 = 1234.5 THEN 1 ELSE 0 END,
+    CASE WHEN le_float64 = 1234.5 THEN 1 ELSE 0 END,
+    CASE WHEN be_int32_list = [1, 256, 65537]::INTEGER[] THEN 1 ELSE 0 END,
+    CASE WHEN le_int32_list = [1, 256, 65537]::INTEGER[] THEN 1 ELSE 0 END,
+    CASE WHEN be_int32_h5t_array = [1, 256, 65537]::INTEGER[] THEN 1 ELSE 0 END,
+    CASE WHEN le_int32_h5t_array = [1, 256, 65537]::INTEGER[] THEN 1 ELSE 0 END
+FROM h5_attributes('test/data/endian_attrs.h5', '/values');
+----
+16909060	16909060	1	1	1	1	1	1
+
+query III
+SELECT
+    TRY_CAST(map_extract_value(attrs, 'be_int32') AS INTEGER),
+    CASE WHEN TRY_CAST(map_extract_value(attrs, 'be_int32_list') AS INTEGER[]) = [1, 256, 65537] THEN 1 ELSE 0 END,
+    CASE WHEN TRY_CAST(map_extract_value(attrs, 'be_int32_h5t_array') AS INTEGER[]) = [1, 256, 65537] THEN 1 ELSE 0 END
+FROM (
+    SELECT h5_attributes('test/data/endian_attrs.h5', '/values') AS attrs
+);
+----
+16909060	1	1
+
+# =============================================================================
 # Unsupported multidimensional attribute
 # =============================================================================
 

@@ -10,6 +10,7 @@ __pycache__
 *.hdf5
 *.hdf
 *.h5
+test/data/statement_cache_*.h5.gz
 *.parquet
 *.csv
 .cache

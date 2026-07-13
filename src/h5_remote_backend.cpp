@@ -426,8 +426,8 @@ static H5SftpConfig ResolveSftpConfig(ClientContext &context, const H5SftpUrl &u
 		throw InvalidConfigurationException("sftp URL port '%d' does not match secret port '%d'", *url.port,
 		                                    config.port);
 	}
-	auto auth_mode_count = UnsafeNumericCast<idx_t>(config.password.has_value()) +
-	                       UnsafeNumericCast<idx_t>(config.key_path.has_value()) + UnsafeNumericCast<idx_t>(use_agent);
+	auto auth_mode_count = static_cast<int>(config.password.has_value()) +
+	                       static_cast<int>(config.key_path.has_value()) + static_cast<int>(use_agent);
 	if (auth_mode_count != 1) {
 		throw InvalidConfigurationException(
 		    "sftp secret for '%s' must contain exactly one of PASSWORD, KEY_PATH or USE_AGENT", url.original_url);

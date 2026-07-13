@@ -226,6 +226,7 @@ when two dataset paths or generated columns would otherwise collide.
 - If all selected datasets are scalar, `h5_read()` returns a single row.
 - If any non-scalar dataset is present, scalar columns are broadcast to the row count of the non-scalar datasets.
 - If multiple non-scalar regular datasets are selected, the output row count is the minimum outer dimension among them.
+- Datasets with an HDF5 null dataspace are read like scalar datasets with a `NULL` value.
 
 **Multi-file Semantics:**
 - Rows are concatenated file by file.
@@ -925,6 +926,9 @@ SET h5db_batch_size = '4MB';
 | H5T_FLOAT | 4 bytes | FLOAT |
 | H5T_FLOAT | 8 bytes | DOUBLE |
 | H5T_STRING | variable/fixed | VARCHAR |
+
+Numeric datasets and attributes are converted from their HDF5 file representation to the host-native memory
+representation before DuckDB values are constructed. This includes numeric attributes with an `H5T_ARRAY` datatype.
 
 ### Multi-Dimensional Arrays
 

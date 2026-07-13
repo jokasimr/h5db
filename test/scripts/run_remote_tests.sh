@@ -113,6 +113,7 @@ REWRITE_ARGS=(
   --output-root "$TMP_SQL"
   --base-url "$BASE_URL"
   --exclude-subdir glob
+  --exclude-subdir local
 )
 if [[ -n "$PREPEND_FILE" ]]; then
   REWRITE_ARGS+=(--prepend-file "$PREPEND_FILE")

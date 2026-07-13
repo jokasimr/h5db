@@ -508,8 +508,8 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 	auto shape_output_idx = gstate.output_layout.shape_output_idx;
 	if (shape_output_idx.has_value()) {
 		for (auto &row : rows) {
-			if (row.has_shape) {
-				total_shape_elems += row.shape.size();
+			if (row.shape) {
+				total_shape_elems += row.shape->size();
 			}
 		}
 		auto &shape_vector = output.data[*shape_output_idx];

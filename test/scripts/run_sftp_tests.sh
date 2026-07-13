@@ -180,6 +180,7 @@ fi
   --input-root "$PROJECT_ROOT/test/sql" \
   --output-root "$TMP_SQL" \
   --base-url "$BASE_URL" \
+  --exclude-subdir local \
   --exclude-subdir remote \
   --prepend-file "$PRELUDE" \
   --prepend-after-require

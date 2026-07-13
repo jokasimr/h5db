@@ -4,6 +4,22 @@
 
 require h5db
 
+# Numeric projected attributes are converted from file to native byte order.
+query III
+SELECT
+    TRY_CAST(be_int32 AS INTEGER),
+    CASE WHEN TRY_CAST(be_int32_list AS INTEGER[]) = [1, 256, 65537] THEN 1 ELSE 0 END,
+    CASE WHEN TRY_CAST(be_int32_h5t_array AS INTEGER[]) = [1, 256, 65537] THEN 1 ELSE 0 END
+FROM h5_tree(
+    'test/data/endian_attrs.h5',
+    h5_attr('be_int32'),
+    h5_attr('be_int32_list'),
+    h5_attr('be_int32_h5t_array')
+)
+WHERE path = '/values';
+----
+16909060	1	1
+
 # =============================================================================
 # Happy-path projected attributes
 # =============================================================================

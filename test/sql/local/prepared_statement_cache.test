@@ -1,0 +1,160 @@
+# name: test/sql/local/prepared_statement_cache.test
+# description: Prepared HDF5 table functions refresh file-derived state between executions
+# group: [local]
+
+require h5db
+
+# unzip replaces the file without restarting the connection that owns the prepared statements.
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_statement_cache.h5
+
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_statement_cache_glob_first.h5
+
+statement ok
+PREPARE read_file AS
+    SELECT COUNT(*), SUM(x), typeof(x)
+    FROM h5_read('__TEST_DIR__/h5db_statement_cache.h5', '/x')
+    GROUP BY ALL;
+
+statement ok
+PREPARE read_attributes AS
+    SELECT a, typeof(a)
+    FROM h5_attributes('__TEST_DIR__/h5db_statement_cache.h5', '/');
+
+statement ok
+PREPARE read_scalar_file AS
+    SELECT TRY_CAST(value AS VARCHAR), variant_typeof(value)
+    FROM (
+        SELECT h5_read('__TEST_DIR__/h5db_statement_cache.h5', '/s') AS value
+    );
+
+statement ok
+PREPARE read_scalar_attributes AS
+    SELECT
+        TRY_CAST(map_extract_value(attrs, 'a') AS VARCHAR),
+        variant_typeof(map_extract_value(attrs, 'a'))
+    FROM (
+        SELECT h5_attributes('__TEST_DIR__/h5db_statement_cache.h5', '/') AS attrs
+    );
+
+statement ok
+PREPARE tree_file AS
+    SELECT dtype, shape::VARCHAR
+    FROM h5_tree('__TEST_DIR__/h5db_statement_cache.h5')
+    WHERE path = '/x';
+
+statement ok
+PREPARE list_file AS
+    SELECT dtype, shape::VARCHAR
+    FROM h5_ls('__TEST_DIR__/h5db_statement_cache.h5', '/')
+    WHERE path = '/x';
+
+statement ok
+PREPARE list_scalar AS
+    SELECT struct_extract(entry, 'dtype'), struct_extract(entry, 'shape')::VARCHAR
+    FROM (
+        SELECT map_extract_value(h5_ls('__TEST_DIR__/h5db_statement_cache.h5', '/'), 'x') AS entry
+    );
+
+statement ok
+PREPARE tree_glob AS
+    SELECT COUNT(DISTINCT filename)
+    FROM h5_tree('__TEST_DIR__/h5db_statement_cache_glob_*.h5', filename = true);
+
+statement ok
+PREPARE list_glob AS
+    SELECT COUNT(DISTINCT filename)
+    FROM h5_ls('__TEST_DIR__/h5db_statement_cache_glob_*.h5', '/', filename = true);
+
+query IIT
+EXECUTE read_file;
+----
+3	6	INTEGER
+
+query IT
+EXECUTE read_attributes;
+----
+7	INTEGER
+
+query TT
+EXECUTE read_scalar_file;
+----
+7	INT32
+
+query TT
+EXECUTE read_scalar_attributes;
+----
+7	INT32
+
+query TT
+EXECUTE tree_file;
+----
+int32	[3]
+
+query TT
+EXECUTE list_file;
+----
+int32	[3]
+
+query TT
+EXECUTE list_scalar;
+----
+int32	[3]
+
+query I
+EXECUTE tree_glob;
+----
+1
+
+query I
+EXECUTE list_glob;
+----
+1
+
+unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_statement_cache.h5
+
+unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_statement_cache_glob_second.h5
+
+query IRT
+EXECUTE read_file;
+----
+5	152.5	DOUBLE
+
+query RT
+EXECUTE read_attributes;
+----
+10.5	FLOAT
+
+query TT
+EXECUTE read_scalar_file;
+----
+10.5	DOUBLE
+
+query TT
+EXECUTE read_scalar_attributes;
+----
+10.5	FLOAT
+
+query TT
+EXECUTE tree_file;
+----
+float64	[5]
+
+query TT
+EXECUTE list_file;
+----
+float64	[5]
+
+query TT
+EXECUTE list_scalar;
+----
+float64	[5]
+
+query I
+EXECUTE tree_glob;
+----
+2
+
+query I
+EXECUTE list_glob;
+----
+2

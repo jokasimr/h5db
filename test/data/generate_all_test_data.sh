@@ -114,6 +114,10 @@ echo -e "${GREEN}[9/28] Generating attrs_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_attrs_edge_cases.py)
 
 echo ""
+echo -e "${GREEN}[9b/28] Generating endian_attrs.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_endian_attrs_test.py)
+
+echo ""
 echo -e "${GREEN}[10/28] Generating invalid_string_array_attrs.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_invalid_string_array_attrs_test.py)
 
@@ -132,6 +136,10 @@ echo -e "${GREEN}[12b/28] Generating h5_read_string_edge_cases.h5${NC}"
 echo ""
 echo -e "${GREEN}[12c/28] Generating h5_read_refresh_order.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_h5_read_refresh_order_test.py)
+
+echo ""
+echo -e "${GREEN}[12d/28] Generating statement-cache fixtures${NC}"
+(cd test/data && "$PYTHON_BIN" create_statement_cache_test.py)
 
 echo ""
 echo -e "${GREEN}[13/28] Generating names_edge_cases.h5${NC}"
@@ -235,10 +243,12 @@ echo "    - ree_edge_cases.h5       (REE edge cases)"
 echo "    - ree_invalid.h5          (REE validation errors)"
 echo "    - unsupported_types.h5    (unsupported HDF5 types)"
 echo "    - attrs_edge_cases.h5     (attribute edge cases)"
+echo "    - endian_attrs.h5         (numeric attribute byte order)"
 echo "    - invalid_string_array_attrs.h5 (invalid string-array attribute edge cases)"
 echo "    - root_attrs.h5           (root attributes + 1D array attrs)"
 echo "    - empty_scalar.h5         (empty + scalar datasets)"
 echo "    - h5_read_string_edge_cases.h5 (string padding + invalid text edge cases)"
+echo "    - statement_cache_*.h5.gz (prepared-statement rebinding)"
 echo "    - names_edge_cases.h5     (dataset name edge cases)"
 echo "    - multidim_mismatch.h5    (multidim row-count mismatch)"
 echo "    - nd_cache_test.h5        (N-D cache coverage)"

@@ -191,10 +191,10 @@ static Value H5LsRowToStructValue(const H5TreeNamedRow &named_row, const vector<
 	child_values.emplace_back(names[1], named_row.row.type ? Value(*named_row.row.type) : Value(return_types[1]));
 	child_values.emplace_back(names[2], named_row.row.dtype ? Value(*named_row.row.dtype) : Value(return_types[2]));
 
-	if (named_row.row.has_shape) {
+	if (named_row.row.shape) {
 		vector<Value> dims;
-		dims.reserve(named_row.row.shape.size());
-		for (auto dim : named_row.row.shape) {
+		dims.reserve(named_row.row.shape->size());
+		for (auto dim : *named_row.row.shape) {
 			dims.emplace_back(Value::UBIGINT(static_cast<uint64_t>(dim)));
 		}
 		child_values.emplace_back(names[3], Value::LIST(LogicalType::UBIGINT, std::move(dims)));
@@ -325,8 +325,8 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	auto shape_output_idx = gstate.output_layout.shape_output_idx;
 	if (shape_output_idx.has_value()) {
 		for (idx_t i = 0; i < count; i++) {
-			if (rows[i].row.has_shape) {
-				total_shape_elems += rows[i].row.shape.size();
+			if (rows[i].row.shape) {
+				total_shape_elems += rows[i].row.shape->size();
 			}
 		}
 		auto &shape_vector = output.data[*shape_output_idx];
@@ -551,6 +551,7 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	                            H5LsScalarFunction, H5LsScalarBind);
 	h5_ls_scalar.varargs = LogicalType::ANY;
 	h5_ls_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_ls_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_ls_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	scalar_info.descriptions.push_back(H5FunctionDescription(
@@ -562,6 +563,7 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	                                 H5LsScalarFunction, H5LsSwmrScalarBind);
 	h5_ls_swmr_scalar.varargs = LogicalType::ANY;
 	h5_ls_swmr_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_ls_swmr_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo swmr_info(std::move(h5_ls_swmr_scalar));
 	swmr_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	swmr_info.descriptions.push_back(

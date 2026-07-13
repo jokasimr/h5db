@@ -35,8 +35,7 @@ struct H5TreeRow {
 	std::string path;
 	std::optional<std::string> type;
 	std::optional<std::string> dtype;
-	std::vector<hsize_t> shape;
-	bool has_shape = false;
+	std::optional<std::vector<hsize_t>> shape;
 	std::vector<H5TreeProjectedAttributeValue> projected_values;
 };
 

@@ -40,10 +40,12 @@ To ensure test data exists (generate only if missing):
 | `ree_invalid.h5` | `create_ree_invalid_test.py` | 4 KB | REE validation errors (invalid run_ends, sizes) |
 | `unsupported_types.h5` | `create_unsupported_types_test.py` | 4 KB | Unsupported dataset types (enum, compound, float16, reference, non-string vlen, opaque, bitfield) |
 | `attrs_edge_cases.h5` | `create_attrs_edge_cases.py` | 4 KB | Unsupported/edge-case attributes (multidim dataspace, enum, compound, float16, reference, opaque, bitfield) |
+| `endian_attrs.h5` | `create_endian_attrs_test.py` | 4 KB | Numeric scalar, list, and `H5T_ARRAY` attributes with explicit byte order |
 | `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
 | `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling plus numeric/string array attrs, including empty arrays |
 | `empty_scalar.h5`, `h5_read_multifile_empty_*.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets, including multi-file row-count edge cases |
 | `h5_read_string_edge_cases.h5` | `create_h5_read_string_edge_cases.py` | 13 KB | String padding and invalid-text dataset coverage for `h5_read` |
+| `statement_cache_*.h5.gz` | `create_statement_cache_test.py` | 1 KB | Compressed fixtures for prepared-statement rebinding tests |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |
 | `multidim_mismatch.h5` | `create_multidim_mismatch_test.py` | 3 KB | Multi-dimensional row-count mismatch |
 | `many_groups.h5` | `create_many_groups_test.py` | 135 MB | Large namespace listing and traversal coverage |
@@ -93,10 +95,12 @@ test/data/
 ├── create_ree_invalid_test.py         # Creates: ree_invalid.h5
 ├── create_unsupported_types_test.py   # Creates: unsupported_types.h5
 ├── create_attrs_edge_cases.py         # Creates: attrs_edge_cases.h5
+├── create_endian_attrs_test.py        # Creates: endian_attrs.h5
 ├── create_invalid_string_array_attrs_test.py # Creates: invalid_string_array_attrs.h5
 ├── create_root_attrs_test.py          # Creates: root_attrs.h5
 ├── create_empty_scalar_test.py        # Creates: empty_scalar.h5, h5_read_multifile_empty_*.h5
 ├── create_h5_read_string_edge_cases.py # Creates: h5_read_string_edge_cases.h5
+├── create_statement_cache_test.py    # Creates: statement_cache_*.h5.gz
 ├── create_names_edge_cases.py         # Creates: names_edge_cases.h5
 ├── create_multidim_mismatch_test.py   # Creates: multidim_mismatch.h5
 ├── create_many_groups_test.py         # Creates: many_groups.h5
