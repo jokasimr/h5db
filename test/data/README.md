@@ -54,7 +54,7 @@ To ensure test data exists (generate only if missing):
 | `cache_progress.h5` | `create_cache_progress_test.py` | 400 KB | h5_read cache-progress boundary coverage after removing `get_partition_data` |
 | `sparse_pushdown_cache.h5` | `create_sparse_pushdown_cache_test.py` | 9 KB | Sparse pushdown ranges over cached regular columns |
 | `sparse_partition_pushdown.h5` | `create_sparse_partition_pushdown_test.py` | 1.5 MB | Sparse pushdown across logical partitions and empty partitions |
-| `wide_few_rows.h5` | `create_wide_few_rows_test.py` | 650 KB | Wide-row few-row cache and threading regression coverage |
+| `wide_few_rows.h5`, `wide_shape_*.h5` | `create_wide_few_rows_test.py` | 13 MB | Wide-row fixed-array, nested-list fallback, cache-window limits, threading, and multi-file shape coverage |
 | `links.h5` | `create_links_test.py` | 7.5 KB | Hard/soft/external link behavior for `h5_tree`/`h5_ls` |
 | `links_external_target.h5` | `create_links_test.py` | 5.7 KB | External-link target for `links.h5` |
 | `complex_links.h5` | `create_complex_links_test.py` | 6 KB | Complicated hard/soft link graph for `h5_tree`/`h5_ls` reasoning |
@@ -109,7 +109,7 @@ test/data/
 ├── create_cache_progress_test.py      # Creates: cache_progress.h5
 ├── create_sparse_pushdown_cache_test.py # Creates: sparse_pushdown_cache.h5
 ├── create_sparse_partition_pushdown_test.py # Creates: sparse_partition_pushdown.h5
-├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5
+├── create_wide_few_rows_test.py       # Creates: wide_few_rows.h5, wide_shape_*.h5
 ├── create_links_test.py               # Creates: links.h5, links_external_target.h5
 ├── create_complex_links_test.py       # Creates: complex_links.h5
 ├── create_h5_tree_traversal_hint_bug.py # Creates: h5_tree_traversal_hint_bug.h5
@@ -127,6 +127,7 @@ test/data/
 ├── sparse_pushdown_cache.h5
 ├── sparse_partition_pushdown.h5
 ├── wide_few_rows.h5
+├── wide_shape_*.h5
 ├── links.h5
 ├── links_external_target.h5
 ├── swmr_enabled.h5

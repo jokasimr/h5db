@@ -896,10 +896,10 @@ SET h5db_swmr_default = true;
 ```
 
 ### `h5db_batch_size` (VARCHAR)
-Target batch size used by `h5_read` for numeric chunk caching and scan chunk sizing. Accepts DuckDB memory-size
+Target batch size used by `h5_read` for numeric caching and scan sizing. Accepts DuckDB memory-size
 strings such as `'1MB'`, `'8MB'`, `'512KB'`. Defaults to `'1MB'`. Values above `1GB` are clamped to `1GB`.
 
-This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` may align cache chunks upward to the
+This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` may align cache windows upward to the
 dataset's first-dimension HDF5 chunk size.
 
 **Example:**
@@ -934,7 +934,8 @@ and numeric attributes with an `H5T_ARRAY` datatype.
 
 ### Multi-Dimensional Arrays
 
-HDF5 arrays are mapped to DuckDB ARRAY types:
+Multi-dimensional HDF5 datasets normally map their inner dimensions to fixed
+DuckDB `ARRAY` types:
 
 | HDF5 Shape | DuckDB Type |
 |------------|-------------|
@@ -943,7 +944,16 @@ HDF5 arrays are mapped to DuckDB ARRAY types:
 | [N, M, P] | N rows of TYPE[P][M] |
 | [N, M, P, Q] | N rows of TYPE[Q][P][M] |
 
-Note: Arrays with more than 4 dimensions are not currently supported.
+When a dataset row is at least 64 KiB, `h5_read` instead maps every inner
+dimension to a nested `LIST`. For example, a wide dataset with shape
+`[N, 2048, 2048]` and type `SMALLINT` is returned as `SMALLINT[][]`. Each value
+remains rectangular with the HDF5 extents, but the extents are not encoded in
+the DuckDB type.
+
+This fallback prevents DuckDB from eagerly allocating 2,048 complete fixed
+arrays per output vector.
+
+Note: Datasets with more than 4 dimensions are not currently supported.
 Note: Multi-dimensional string datasets are not currently supported.
 
 ---

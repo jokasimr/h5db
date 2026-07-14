@@ -5,7 +5,6 @@
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include <string>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include <optional>
 
@@ -45,7 +44,7 @@ void H5ApplyFilenameFilterPushdown(ClientContext &context, LogicalGet &get,
 // Invalid inputs throw InvalidInputException.
 idx_t ParseBatchSizeSetting(const Value &setting_value);
 
-// Resolve configured target batch size in bytes for h5_read chunk caching.
+// Resolve the configured target size for h5_read scan batches and cache windows.
 idx_t ResolveBatchSizeOption(ClientContext &context);
 
 FunctionDescription H5FunctionDescription(vector<LogicalType> parameter_types, vector<string> parameter_names,

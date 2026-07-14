@@ -52,7 +52,9 @@ static T &GetStructChild(unique_ptr<T> &child) {
 	return *child;
 }
 
-static constexpr idx_t H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD = 64 * 1024;
+static constexpr idx_t H5_READ_WIDE_ROW_THRESHOLD_BYTES = 64 * 1024;
+// Bounds the combined storage of a column's one or two cache windows.
+static constexpr idx_t H5_READ_CACHE_LIMIT_BYTES = 128 * 1024 * 1024;
 
 static string FormatRemoteHDF5Error(const string &prefix, const string &filename) {
 	return FormatRemoteFileError(prefix, filename);
@@ -114,8 +116,8 @@ struct RegularColumnSpec {
 	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
 	int ndims;
 	std::vector<hsize_t> dims;
-	size_t element_size;     // Bytes per row (1D: size of element, ND: product of inner dims)
-	size_t elements_per_row; // Element count per row (1D: 1, ND: product of inner dims)
+	idx_t leaf_row_bytes;   // Numeric leaf storage per row
+	idx_t elements_per_row; // Numeric leaf elements per row
 };
 
 // Scalar dataset specification (rank-0 value or null dataspace)
@@ -167,38 +169,33 @@ struct IndexColumnSpec {
 // A column can be regular, scalar, run-encoded, or virtual index
 using ColumnSpec = std::variant<RegularColumnSpec, ScalarColumnSpec, RunEncodedColumnSpec, IndexColumnSpec>;
 
-// Chunk cache data (separate struct to allow unique_ptr due to non-movable atomics)
-struct Chunk {
-	idx_t chunk_size = 0; // Rows per chunk
-
-	// Typed storage - buffer with chunk_size * elements_per_row capacity
+// Logical row window stored by the extension cache.
+struct CacheWindow {
 	using CacheStorage =
-	    std::variant<std::monostate, // No cache (for non-cacheable columns)
+	    std::variant<std::monostate, // Uninitialized
 	                 std::vector<int8_t>, std::vector<int16_t>, std::vector<int32_t>, std::vector<int64_t>,
 	                 std::vector<uint8_t>, std::vector<uint16_t>, std::vector<uint32_t>, std::vector<uint64_t>,
 	                 std::vector<float>, std::vector<double>>;
-	CacheStorage cache; // Size: chunk_size * elements_per_row elements
+	CacheStorage cache;
 
-	// Chunk state tracking
-	// end_row is one past the logical cache window start plus chunk_size.
-	// This makes the cache window start recoverable as (end_row - chunk_size).
-	// Initialized to 0, which makes chunk appear stale (covers negative range).
+	// The owning cache's window size makes the start recoverable from end_row.
+	// Zero marks an uninitialized window as reusable.
 	std::atomic<idx_t> end_row {0};
 };
 
-struct ChunkCache {
-	static constexpr idx_t MAX_CHUNKS = 2;
+struct RegularColumnCache {
+	static constexpr idx_t MAX_WINDOWS = 2;
 
-	Chunk chunks[MAX_CHUNKS]; // Fixed size array (atomic members prevent std::vector usage)
+	idx_t window_rows = 0;
+	CacheWindow windows[MAX_WINDOWS]; // Atomic members prevent std::vector usage
 };
 
 // Regular column runtime state
 struct RegularColumnState {
 	H5DatasetHandle dataset;      // RAII wrapper - automatic cleanup
-	H5DataspaceHandle file_space; // Cached dataspace handle (reused across chunks)
+	H5DataspaceHandle file_space; // Cached dataspace handle (reused across reads)
 
-	// Chunk caching (unique_ptr because mutex/cv are non-movable)
-	std::unique_ptr<ChunkCache> chunk_cache;
+	std::unique_ptr<RegularColumnCache> cache;
 };
 
 // Scalar column runtime state (cached value)
@@ -305,7 +302,7 @@ struct H5ReadGlobalState {
 
 	// Position tracking
 	// position is the next globally unclaimed scan range start.
-	std::atomic<idx_t> position {0};
+	idx_t position = 0;                   // Protected by range_selection_mutex
 	std::atomic<idx_t> position_done {0}; // All rows in [0, position_done) have been returned or filtered out
 
 	// Row range filtering (for predicate pushdown on run-encoded or index columns)
@@ -320,12 +317,9 @@ struct H5ReadGlobalState {
 	// that couldn't be merged into position_done yet (due to gaps)
 	std::map<idx_t, idx_t> completed_ranges;
 
-	// Chunk loading coordination: only one thread loads chunks at a time
+	// Cache loading coordination: only one thread loads windows at a time
 	// Other threads proceed with scanning cached data (enables parallel processing)
 	std::atomic<bool> someone_is_fetching {false};
-	// Fallback for platforms without std::atomic::wait/notify.
-	std::mutex fetch_mutex;
-	std::condition_variable fetch_cv;
 
 	// No destructor needed - RAII wrappers handle all cleanup automatically
 };
@@ -394,23 +388,61 @@ struct CacheRefreshOrderEntry {
 	idx_t original_order = 0;
 };
 
-// Helper: get base (non-array) type from a possibly nested array type
+// Helper: get base type from a possibly nested collection type
 static LogicalType GetBaseType(LogicalType type) {
-	while (type.id() == LogicalTypeId::ARRAY) {
-		type = ArrayType::GetChildType(type);
+	while (type.id() == LogicalTypeId::ARRAY || type.id() == LogicalTypeId::LIST) {
+		if (type.id() == LogicalTypeId::ARRAY) {
+			type = ArrayType::GetChildType(type);
+		} else {
+			type = ListType::GetChildType(type);
+		}
 	}
 	return type;
 }
 
-// Helper: get innermost vector and base type for array columns
-static Vector &GetInnermostVector(Vector &vector, const LogicalType &type, LogicalType &base_type) {
+// Helper: get innermost vector for array columns
+static Vector &GetInnermostArrayVector(Vector &vector, const LogicalType &type) {
 	Vector *current_vector = &vector;
 	LogicalType current_type = type;
 	while (current_type.id() == LogicalTypeId::ARRAY) {
 		current_vector = &ArrayVector::GetEntry(*current_vector);
 		current_type = ArrayType::GetChildType(current_type);
 	}
-	base_type = current_type;
+	return *current_vector;
+}
+
+static idx_t CheckedDatasetSizeProduct(idx_t left, idx_t right, const string &filename, const string &dataset_path) {
+	if (right != 0 && left > NumericLimits<idx_t>::Maximum() / right) {
+		throw IOException(
+		    FormatDatasetError("Dataset dimensions exceed the supported in-memory size", filename, dataset_path));
+	}
+	return left * right;
+}
+
+static Vector &PrepareRegularResultVector(Vector &result_vector, const RegularColumnSpec &spec, idx_t row_count,
+                                          const string &filename) {
+	if (spec.column_type.id() != LogicalTypeId::LIST) {
+		return GetInnermostArrayVector(result_vector, spec.column_type);
+	}
+
+	Vector *current_vector = &result_vector;
+	idx_t parent_count = row_count;
+	for (int dimension_idx = 1; dimension_idx < spec.ndims; dimension_idx++) {
+		D_ASSERT(current_vector->GetType().id() == LogicalTypeId::LIST);
+		auto dimension = static_cast<idx_t>(spec.dims[dimension_idx]);
+		auto child_count = CheckedDatasetSizeProduct(parent_count, dimension, filename, spec.path);
+
+		ListVector::Reserve(*current_vector, child_count);
+		auto entries = ListVector::GetData(*current_vector);
+		for (idx_t parent_idx = 0; parent_idx < parent_count; parent_idx++) {
+			entries[parent_idx] = list_entry_t(parent_idx * dimension, dimension);
+		}
+		ListVector::SetListSize(*current_vector, child_count);
+
+		current_vector = &ListVector::GetEntry(*current_vector);
+		parent_count = child_count;
+	}
+
 	return *current_vector;
 }
 
@@ -479,13 +511,11 @@ static void BuildH5ReadProjectionLayout(const H5ReadBindData &bind_data, const v
 	}
 }
 
-// Helper function to build nested array types for multi-dimensional datasets
-static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims,
-                                  const string &filename, const string &dataset_path) {
-	if (ndims == 0) {
-		return base_type;
-	}
-	if (ndims == 1) {
+// Helper function to build collection types for multi-dimensional datasets.
+// Wide rows use LIST so DuckDB does not eagerly allocate STANDARD_VECTOR_SIZE full rows.
+static LogicalType BuildCollectionType(LogicalType base_type, const std::vector<hsize_t> &dims, int ndims,
+                                       bool uses_nested_lists, const string &filename, const string &dataset_path) {
+	if (ndims <= 1) {
 		return base_type;
 	}
 
@@ -494,10 +524,14 @@ static LogicalType BuildArrayType(LogicalType base_type, const std::vector<hsize
 		                                     filename, dataset_path));
 	}
 
-	// Build nested array types from innermost to outermost
+	// Build nested collection types from innermost to outermost.
 	LogicalType result = base_type;
 	for (int i = ndims - 1; i >= 1; i--) {
-		result = LogicalType::ARRAY(result, dims[i]);
+		if (uses_nested_lists) {
+			result = LogicalType::LIST(result);
+		} else {
+			result = LogicalType::ARRAY(result, dims[i]);
+		}
 	}
 	return result;
 }
@@ -540,8 +574,8 @@ static H5DataspaceHandle CreateMemspaceAndSelect(hid_t file_space_id, const Regu
 	return mem_space;
 }
 
-static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, idx_t target_batch_size_bytes,
-                              idx_t total_rows) {
+static idx_t ComputeCacheWindowRows(const RegularColumnSpec &spec, hid_t dataset_id, idx_t target_batch_size_bytes,
+                                    idx_t total_rows) {
 	idx_t chunk_rows = 0;
 	hid_t dcpl = H5Dget_create_plist(dataset_id);
 	if (dcpl >= 0) {
@@ -555,24 +589,36 @@ static idx_t ComputeChunkSize(const RegularColumnSpec &spec, hid_t dataset_id, i
 		H5Pclose(dcpl);
 	}
 
-	idx_t chunk_size;
+	idx_t window_rows;
 	if (chunk_rows > 0) {
-		auto row_bytes = MaxValue<idx_t>(spec.element_size, 1);
+		auto row_bytes = MaxValue<idx_t>(spec.leaf_row_bytes, 1);
 		idx_t target_rows = MaxValue<idx_t>(target_batch_size_bytes / row_bytes, 1);
 		target_rows = MaxValue<idx_t>(target_rows, chunk_rows);
 		idx_t remainder = target_rows % chunk_rows;
 		if (remainder != 0) {
 			target_rows += (chunk_rows - remainder);
 		}
-		chunk_size = target_rows;
-		D_ASSERT(chunk_size % chunk_rows == 0);
+		window_rows = target_rows;
+		D_ASSERT(window_rows % chunk_rows == 0);
 	} else {
-		chunk_size = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.element_size, 1), 1);
+		window_rows = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.leaf_row_bytes, 1), 1);
 	}
 	if (total_rows == 0) {
 		return 0;
 	}
-	return MinValue<idx_t>(chunk_size, total_rows);
+	return MinValue<idx_t>(window_rows, total_rows);
+}
+
+static idx_t ComputeCacheWindowCount(idx_t window_rows, idx_t total_rows) {
+	return window_rows < total_rows ? RegularColumnCache::MAX_WINDOWS : 1;
+}
+
+static bool H5ReadShouldCreateCache(const RegularColumnSpec &spec, idx_t window_rows, idx_t total_rows,
+                                    idx_t scan_batch_size) {
+	D_ASSERT(spec.leaf_row_bytes > 0);
+	auto window_count = ComputeCacheWindowCount(window_rows, total_rows);
+	auto max_window_rows = H5_READ_CACHE_LIMIT_BYTES / window_count / spec.leaf_row_bytes;
+	return window_rows > scan_batch_size && window_rows <= max_window_rows;
 }
 
 static std::optional<haddr_t> TryGetDatasetReadOrderAddress(const RegularColumnSpec &spec, hid_t dataset_id) {
@@ -595,10 +641,10 @@ static std::optional<haddr_t> TryGetDatasetReadOrderAddress(const RegularColumnS
 		std::vector<hsize_t> chunk_origin(spec.ndims, 0);
 		unsigned filter_mask = 0;
 		haddr_t chunk_address = HADDR_UNDEF;
-		hsize_t chunk_size = 0;
-		if (H5Dget_chunk_info_by_coord(dataset_id, chunk_origin.data(), &filter_mask, &chunk_address, &chunk_size) >=
-		        0 &&
-		    chunk_address != HADDR_UNDEF && chunk_size > 0) {
+		hsize_t physical_chunk_bytes = 0;
+		if (H5Dget_chunk_info_by_coord(dataset_id, chunk_origin.data(), &filter_mask, &chunk_address,
+		                               &physical_chunk_bytes) >= 0 &&
+		    chunk_address != HADDR_UNDEF && physical_chunk_bytes > 0) {
 			result = chunk_address;
 		}
 	}
@@ -1265,20 +1311,26 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Calculate output element size for multi-dimensional arrays.
 			// This intentionally uses the DuckDB/native memory size, not the file size:
 			// e.g. HDF5 float16 values are widened into DuckDB FLOAT values.
-			ds_info.element_size = ds_info.is_string ? 0 : H5ReadNumericOutputElementSize(base_type);
+			ds_info.leaf_row_bytes = ds_info.is_string ? 0 : H5ReadNumericOutputElementSize(base_type);
 			ds_info.elements_per_row = 1;
 			for (int j = 1; j < ds_info.ndims; j++) {
-				ds_info.element_size *= ds_info.dims[j];
-				ds_info.elements_per_row *= ds_info.dims[j];
+				auto dimension = static_cast<idx_t>(ds_info.dims[j]);
+				ds_info.leaf_row_bytes =
+				    CheckedDatasetSizeProduct(ds_info.leaf_row_bytes, dimension, result.filename, ds_info.path);
+				ds_info.elements_per_row =
+				    CheckedDatasetSizeProduct(ds_info.elements_per_row, dimension, result.filename, ds_info.path);
 			}
+			auto uses_nested_lists = ds_info.ndims > 1 && ds_info.leaf_row_bytes >= H5_READ_WIDE_ROW_THRESHOLD_BYTES;
 
 			if (ds_info.is_string) {
 				// Preserve file-local string metadata for runtime string decoding.
 				ds_info.string_h5_type = std::move(type);
 			}
 
-			// Build array type for multi-dimensional datasets
-			ds_info.column_type = BuildArrayType(base_type, ds_info.dims, ds_info.ndims, result.filename, ds_info.path);
+			// Fixed ARRAY vectors eagerly allocate STANDARD_VECTOR_SIZE rows. Use nested
+			// LIST vectors for wide rows so allocation follows the actual scan batch.
+			ds_info.column_type = BuildCollectionType(base_type, ds_info.dims, ds_info.ndims, uses_nested_lists,
+			                                          result.filename, ds_info.path);
 
 			result.columns.push_back(std::move(ds_info));
 		}
@@ -1327,6 +1379,15 @@ static bool H5ReadSchemasMatch(const H5ReadSingleFileBindData &expected, const H
 			    if constexpr (std::is_same_v<ExpectedT, ActualT>) {
 				    matches = expected_spec.column_name == actual_spec.column_name &&
 				              expected_spec.column_type == actual_spec.column_type;
+				    if constexpr (std::is_same_v<ExpectedT, RegularColumnSpec>) {
+					    // LIST types do not encode their extents. Preserve the previous
+					    // multi-file requirement that inner dataset shapes match.
+					    if (matches && expected_spec.column_type.id() == LogicalTypeId::LIST) {
+						    matches = expected_spec.ndims == actual_spec.ndims &&
+						              std::equal(expected_spec.dims.begin() + 1, expected_spec.dims.end(),
+						                         actual_spec.dims.begin() + 1, actual_spec.dims.end());
+					    }
+				    }
 				    if constexpr (std::is_same_v<ExpectedT, RunEncodedColumnSpec>) {
 					    matches = matches && expected_spec.encoding == actual_spec.encoding;
 				    }
@@ -1343,6 +1404,44 @@ static bool H5ReadSchemasMatch(const H5ReadSingleFileBindData &expected, const H
 static const vector<ColumnSpec> &GetCanonicalColumns(const H5ReadBindData &bind_data) {
 	D_ASSERT(!bind_data.file_bind_data.empty());
 	return bind_data.file_bind_data[0].columns;
+}
+
+static idx_t ComputeScanBatchSize(const vector<ColumnSpec> &columns, const vector<column_t> &data_column_ids,
+                                  idx_t target_batch_size_bytes) {
+	D_ASSERT(target_batch_size_bytes > 0);
+	idx_t projected_numeric_row_bytes = 0;
+	for (auto column_id : data_column_ids) {
+		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
+		    regular_spec && !regular_spec->is_string) {
+			if (regular_spec->leaf_row_bytes >= target_batch_size_bytes - projected_numeric_row_bytes) {
+				return 1;
+			}
+			projected_numeric_row_bytes += regular_spec->leaf_row_bytes;
+		}
+	}
+	if (projected_numeric_row_bytes == 0) {
+		return STANDARD_VECTOR_SIZE;
+	}
+	return MinValue<idx_t>(target_batch_size_bytes / projected_numeric_row_bytes, STANDARD_VECTOR_SIZE);
+}
+
+static bool H5ReadHasWideFixedArrayProjection(const vector<ColumnSpec> &columns,
+                                              const vector<column_t> &data_column_ids) {
+	idx_t projected_fixed_array_row_bytes = 0;
+	for (auto column_id : data_column_ids) {
+		auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
+		if (!regular_spec || regular_spec->is_string || regular_spec->column_type.id() != LogicalTypeId::ARRAY) {
+			continue;
+		}
+
+		// Each fixed ARRAY output vector eagerly allocates STANDARD_VECTOR_SIZE rows.
+		// Return before the sum can overflow; only the threshold comparison matters.
+		if (regular_spec->leaf_row_bytes >= H5_READ_WIDE_ROW_THRESHOLD_BYTES - projected_fixed_array_row_bytes) {
+			return true;
+		}
+		projected_fixed_array_row_bytes += regular_spec->leaf_row_bytes;
+	}
+	return false;
 }
 
 static H5ReadSingleFileBindView GetSingleFileBindView(const H5ReadBindData &bind_data, idx_t file_idx) {
@@ -1445,6 +1544,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 
 	result->columns_to_scan = data_column_ids;
 	result->output_column_positions = data_output_positions;
+	result->scan_batch_size = ComputeScanBatchSize(bind_data.columns, data_column_ids, target_batch_size_bytes);
 
 	// Build global-to-local index mapping for projection pushdown
 	// This allows O(1) lookup: global_column_idx -> local_column_states_idx
@@ -1470,7 +1570,6 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 	// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
 	result->column_states.reserve(GetNumScannedColumns(*result));
 	std::vector<CacheRefreshOrderEntry> cache_refresh_entries;
-	idx_t projected_numeric_row_bytes = 0;
 
 	// Process columns in scan order (builds dense array)
 	for (idx_t i = 0; i < GetNumScannedColumns(*result); i++) {
@@ -1493,7 +1592,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 					    throw IOException(FormatDatasetError("Failed to open dataset", bind_data.filename, spec.path));
 				    }
 
-				    // Cache the file dataspace (reused across all chunks)
+				    // Cache the file dataspace (reused across all reads)
 				    H5DataspaceHandle file_space(dataset);
 				    if (!file_space.is_valid()) {
 					    throw IOException(
@@ -1504,25 +1603,25 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    state.dataset = std::move(dataset);
 				    state.file_space = std::move(file_space);
 
-				    // Cache numeric columns (strings are read directly)
-				    bool is_cacheable = !spec.is_string;
-				    if (is_cacheable) {
-					    projected_numeric_row_bytes += NumericCast<idx_t>(spec.element_size);
-					    idx_t chunk_size =
-					        ComputeChunkSize(spec, state.dataset.get(), target_batch_size_bytes, bind_data.num_rows);
-					    if (chunk_size > 0) {
-						    state.chunk_cache = std::make_unique<ChunkCache>();
+				    // Cache non-empty numeric columns when a bounded window can serve multiple output batches.
+				    if (!spec.is_string && spec.leaf_row_bytes > 0) {
+					    auto window_rows = ComputeCacheWindowRows(spec, state.dataset.get(), target_batch_size_bytes,
+					                                              bind_data.num_rows);
+					    if (window_rows > 0 &&
+					        H5ReadShouldCreateCache(spec, window_rows, bind_data.num_rows, result->scan_batch_size)) {
+						    state.cache = std::make_unique<RegularColumnCache>();
+						    state.cache->window_rows = window_rows;
 
-						    auto chunk_count = (chunk_size >= bind_data.num_rows) ? 1 : ChunkCache::MAX_CHUNKS;
+						    auto window_count = ComputeCacheWindowCount(window_rows, bind_data.num_rows);
 
 						    auto base_type = GetBaseType(spec.column_type);
 						    DispatchOnNumericType(base_type, [&](auto type_tag) {
 							    using T = typename decltype(type_tag)::type;
-							    for (idx_t chunk_idx = 0; chunk_idx < chunk_count; chunk_idx++) {
-								    auto &chunk = state.chunk_cache->chunks[chunk_idx];
-								    idx_t buffer_elements = chunk_size * spec.elements_per_row;
-								    chunk.cache = std::vector<T>(buffer_elements);
-								    chunk.chunk_size = chunk_size;
+							    for (idx_t window_idx = 0; window_idx < window_count; window_idx++) {
+								    auto &window = state.cache->windows[window_idx];
+								    auto buffer_elements = CheckedDatasetSizeProduct(window_rows, spec.elements_per_row,
+								                                                     bind_data.filename, spec.path);
+								    window.cache = std::vector<T>(buffer_elements);
 							    }
 						    });
 
@@ -1688,11 +1787,6 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 		result->cache_refresh_order.push_back(entry.local_idx);
 	}
 
-	if (projected_numeric_row_bytes > 0) {
-		auto target_rows = MaxValue<idx_t>(target_batch_size_bytes / projected_numeric_row_bytes, 1);
-		result->scan_batch_size = MinValue<idx_t>(target_rows, STANDARD_VECTOR_SIZE);
-	}
-
 	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
 	// Group claimed filters by column
 	unordered_map<idx_t, vector<ClaimedFilter>> filters_by_column;
@@ -1719,22 +1813,9 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 		result->valid_row_ranges.push_back({0, bind_data.num_rows});
 	}
 
-	result->position = 0;
 	result->position_done = AdjustPositionDoneForRanges(result->valid_row_ranges, 0);
 
 	return result;
-}
-
-static idx_t ComputeProjectedNumericRowBytes(const H5ReadBindData &bind_data, const vector<column_t> &data_column_ids) {
-	const auto &columns = GetCanonicalColumns(bind_data);
-	idx_t projected_numeric_row_bytes = 0;
-	for (auto column_id : data_column_ids) {
-		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
-		    regular_spec && !regular_spec->is_string) {
-			projected_numeric_row_bytes += NumericCast<idx_t>(regular_spec->element_size);
-		}
-	}
-	return projected_numeric_row_bytes;
 }
 
 // Helper: Flip comparison for when constant is on left side (e.g., 10 < col becomes col > 10)
@@ -2076,23 +2157,36 @@ static RangeSelection NextRangeFrom(const std::vector<RowRange> &valid_row_range
 	return NextRangeFrom(valid_row_ranges, position, NumericLimits<idx_t>::Maximum(), NumericLimits<idx_t>::Maximum());
 }
 
-static idx_t GetChunkCount(const ChunkCache &cache, idx_t total_rows) {
-	auto chunk_size = cache.chunks[0].chunk_size;
-	if (chunk_size == 0 || chunk_size >= total_rows) {
-		return 1;
-	}
-	return ChunkCache::MAX_CHUNKS;
-}
-
 static RangeSelection ClaimNextRange(H5ReadGlobalState &gstate, idx_t num_rows) {
 	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
-	auto position = gstate.position.load();
-	auto range = NextRangeFrom(gstate.valid_row_ranges, position, num_rows, gstate.scan_batch_size);
+	auto range = NextRangeFrom(gstate.valid_row_ranges, gstate.position, num_rows, gstate.scan_batch_size);
 	if (!range.has_data) {
 		return {false, 0, 0};
 	}
-	gstate.position.store(range.position + range.to_read);
+	gstate.position = range.position + range.to_read;
 	return range;
+}
+
+static void MarkRangeComplete(H5ReadGlobalState &gstate, idx_t position, idx_t count) {
+	std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
+	auto completed_through = gstate.position_done.load(std::memory_order_acquire);
+	auto scan_end = position + count;
+	if (position != completed_through) {
+		gstate.completed_ranges[position] = scan_end;
+		return;
+	}
+
+	completed_through = scan_end;
+	while (true) {
+		completed_through = AdjustPositionDoneForRanges(gstate.valid_row_ranges, completed_through);
+		auto it = gstate.completed_ranges.find(completed_through);
+		if (it == gstate.completed_ranges.end()) {
+			break;
+		}
+		completed_through = it->second;
+		gstate.completed_ranges.erase(it);
+	}
+	gstate.position_done.store(completed_through, std::memory_order_release);
 }
 
 // Helper function to scan a run-encoded column
@@ -2217,10 +2311,10 @@ static void ScanRunEncodedColumn(const RunEncodedColumnSpec &spec, RunEncodedCol
 	});
 }
 
-// ==================== Chunk Caching Helpers ====================
+// ==================== Cache Window Helpers ====================
 
 // Helper: Read data from HDF5 into typed cache buffer
-static void ReadIntoTypedCache(Chunk::CacheStorage &cache, hid_t dataset_id, hid_t file_space_id,
+static void ReadIntoTypedCache(CacheWindow::CacheStorage &cache, hid_t dataset_id, hid_t file_space_id,
                                idx_t dataset_row_start, idx_t rows_to_read, const RegularColumnSpec &spec,
                                const string &filename) {
 	auto base_type = GetBaseType(spec.column_type);
@@ -2243,7 +2337,7 @@ static void ReadIntoTypedCache(Chunk::CacheStorage &cache, hid_t dataset_id, hid
 }
 
 // Helper: Copy data from typed cache to result vector
-static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_offset_rows, idx_t rows_to_copy,
+static void CopyFromTypedCache(const CacheWindow::CacheStorage &cache, idx_t buffer_offset_rows, idx_t rows_to_copy,
                                Vector &result_vector, idx_t result_offset_rows, LogicalType column_type,
                                idx_t elements_per_row) {
 	DispatchOnNumericType(column_type, [&](auto type_tag) {
@@ -2261,31 +2355,29 @@ static void CopyFromTypedCache(const Chunk::CacheStorage &cache, idx_t buffer_of
 	});
 }
 
-static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_id,
-                          const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
-                          idx_t total_rows, const RegularColumnSpec &spec, const string &filename) {
-	auto chunk_count = GetChunkCount(cache, total_rows);
+static void TryLoadCacheWindows(RegularColumnCache &cache, hid_t dataset_id, hid_t file_space_id,
+                                const std::vector<RowRange> &valid_row_ranges, std::atomic<idx_t> &position_done,
+                                idx_t total_rows, const RegularColumnSpec &spec, const string &filename) {
+	auto window_count = ComputeCacheWindowCount(cache.window_rows, total_rows);
 	idx_t max_end_row = 0;
-	for (idx_t i = 0; i < chunk_count; i++) {
-		auto &chunk = cache.chunks[i];
-		auto end_row = chunk.end_row.load(std::memory_order_acquire);
+	for (idx_t i = 0; i < window_count; i++) {
+		auto &window = cache.windows[i];
+		auto end_row = window.end_row.load(std::memory_order_acquire);
 		max_end_row = end_row > max_end_row ? end_row : max_end_row;
 	}
 	auto position_done_value = position_done.load(std::memory_order_acquire);
-	for (idx_t i = 0; i < chunk_count; i++) {
-		auto &chunk = cache.chunks[i];
-		if (chunk.end_row.load(std::memory_order_acquire) <= position_done_value) {
-			// This chunk's previous window is fully behind position_done, so every row
-			// in that window has already been returned or skipped and the chunk can be
-			// reused for the next unread range.
+	for (idx_t i = 0; i < window_count; i++) {
+		auto &window = cache.windows[i];
+		if (window.end_row.load(std::memory_order_acquire) <= position_done_value) {
+			// Every row in this window has been returned or skipped, so it can be reused.
 			auto next_range = NextRangeFrom(valid_row_ranges, max_end_row);
 			if (next_range.has_data) {
-				idx_t rows_to_load = std::min(chunk.chunk_size, total_rows - next_range.position);
-				ReadIntoTypedCache(chunk.cache, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
+				idx_t rows_to_load = std::min(cache.window_rows, total_rows - next_range.position);
+				ReadIntoTypedCache(window.cache, dataset_id, file_space_id, next_range.position, rows_to_load, spec,
 				                   filename);
 
-				idx_t new_end = next_range.position + chunk.chunk_size;
-				chunk.end_row.store(new_end, std::memory_order_release);
+				idx_t new_end = next_range.position + cache.window_rows;
+				window.end_row.store(new_end, std::memory_order_release);
 
 				max_end_row = new_end;
 			}
@@ -2293,47 +2385,33 @@ static void TryLoadChunks(ChunkCache &cache, hid_t dataset_id, hid_t file_space_
 	}
 }
 
-static void NotifyFetchComplete(H5ReadGlobalState &gstate) {
-#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+static void FinishCacheFetch(H5ReadGlobalState &gstate) {
+	gstate.someone_is_fetching.store(false);
 	gstate.someone_is_fetching.notify_all();
-#else
-	gstate.fetch_cv.notify_all();
-#endif
-}
-
-static void WaitForFetchComplete(H5ReadGlobalState &gstate) {
-#if defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
-	gstate.someone_is_fetching.wait(true, std::memory_order_relaxed);
-#else
-	std::unique_lock<std::mutex> lock(gstate.fetch_mutex);
-	gstate.fetch_cv.wait(lock, [&]() { return !gstate.someone_is_fetching.load(std::memory_order_acquire); });
-#endif
 }
 
 static void TryRefreshCache(H5ReadGlobalState &gstate, const H5ReadSingleFileBindView &bind_data) {
 	bool expected = false;
 	if (gstate.someone_is_fetching.compare_exchange_strong(expected, true)) {
-		// Exactly one thread refreshes chunk caches at a time. Other threads return
-		// immediately here and only block later if the chunks covering their read
+		// Exactly one thread refreshes cache windows at a time. Other threads return
+		// immediately here and only block later if the windows covering their read
 		// range are still not available.
 		try {
 			for (auto local_idx : gstate.cache_refresh_order) {
 				GlobalColumnIdx global_idx = GetGlobalIdx(gstate, local_idx);
 				const auto &spec = std::get<RegularColumnSpec>(bind_data.columns[global_idx]);
 				auto &state = std::get<RegularColumnState>(gstate.column_states[local_idx]);
-				D_ASSERT(state.chunk_cache);
+				D_ASSERT(state.cache);
 
-				TryLoadChunks(*state.chunk_cache, state.dataset.get(), state.file_space.get(), gstate.valid_row_ranges,
-				              gstate.position_done, bind_data.num_rows, spec, bind_data.filename);
+				TryLoadCacheWindows(*state.cache, state.dataset.get(), state.file_space.get(), gstate.valid_row_ranges,
+				                    gstate.position_done, bind_data.num_rows, spec, bind_data.filename);
 			}
 		} catch (...) {
-			gstate.someone_is_fetching.store(false);
-			NotifyFetchComplete(gstate);
+			FinishCacheFetch(gstate);
 			throw;
 		}
 		// Done loading - release the flag so another thread can load next time
-		gstate.someone_is_fetching.store(false);
-		NotifyFetchComplete(gstate);
+		FinishCacheFetch(gstate);
 	}
 }
 
@@ -2342,25 +2420,25 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
                               Vector &result_vector, idx_t position, idx_t to_read,
                               const H5ReadSingleFileBindView &bind_data, H5ReadGlobalState &gstate) {
 	ThrowIfInterrupted(context);
-	// Check if using cache
-	if (state.chunk_cache) {
-		auto &cache = *state.chunk_cache;
-		auto chunk_count = GetChunkCount(cache, bind_data.num_rows);
-		LogicalType base_type;
-		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
+	auto base_type = GetBaseType(spec.column_type);
+	auto &target_vector = PrepareRegularResultVector(result_vector, spec, to_read, bind_data.filename);
 
-		auto *chunk1 = &cache.chunks[0];
-		Chunk *chunk2 = chunk_count > 1 ? &cache.chunks[1] : nullptr;
+	if (state.cache) {
+		auto &cache = *state.cache;
+		auto window_count = ComputeCacheWindowCount(cache.window_rows, bind_data.num_rows);
+
+		auto *window1 = &cache.windows[0];
+		CacheWindow *window2 = window_count > 1 ? &cache.windows[1] : nullptr;
 		for (;;) {
 			ThrowIfInterrupted(context);
 
 			TryRefreshCache(gstate, bind_data);
 
-			idx_t end1 = chunk1->end_row.load(std::memory_order_acquire);
-			idx_t end2 = chunk2 ? chunk2->end_row.load(std::memory_order_acquire) : end1;
+			idx_t end1 = window1->end_row.load(std::memory_order_acquire);
+			idx_t end2 = window2 ? window2->end_row.load(std::memory_order_acquire) : end1;
 
-			if (chunk2 && end1 > end2) {
-				std::swap(chunk1, chunk2);
+			if (window2 && end1 > end2) {
+				std::swap(window1, window2);
 				std::swap(end1, end2);
 			}
 
@@ -2369,29 +2447,28 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 			}
 
 			if (gstate.someone_is_fetching.load(std::memory_order_acquire)) {
-				WaitForFetchComplete(gstate);
+				gstate.someone_is_fetching.wait(true, std::memory_order_relaxed);
 			}
 		}
 
-		// Copy data from chunks that overlap our read range [position, position + to_read)
-		for (auto *chunk : {chunk1, chunk2}) {
-			if (!chunk) {
+		// Copy data from windows that overlap our read range [position, position + to_read)
+		for (auto *window : {window1, window2}) {
+			if (!window) {
 				continue;
 			}
-			idx_t chunk_end = chunk->end_row.load(std::memory_order_acquire);
-			idx_t chunk_start = (chunk_end > chunk->chunk_size) ? (chunk_end - chunk->chunk_size) : 0;
+			idx_t window_end = window->end_row.load(std::memory_order_acquire);
+			idx_t window_start = (window_end > cache.window_rows) ? (window_end - cache.window_rows) : 0;
 
-			// Check if chunk overlaps our range
-			if (chunk_start < position + to_read && chunk_end > position) {
-				idx_t overlap_start = MaxValue<idx_t>(chunk_start, position);
-				idx_t overlap_end = MinValue<idx_t>(chunk_end, position + to_read);
+			if (window_start < position + to_read && window_end > position) {
+				idx_t overlap_start = MaxValue<idx_t>(window_start, position);
+				idx_t overlap_end = MinValue<idx_t>(window_end, position + to_read);
 				idx_t overlap_size = overlap_end - overlap_start;
 
-				idx_t chunk_offset = overlap_start - chunk_start;
+				idx_t window_offset = overlap_start - window_start;
 				idx_t result_offset = overlap_start - position;
-				D_ASSERT(chunk_offset + overlap_size <= chunk->chunk_size);
+				D_ASSERT(window_offset + overlap_size <= cache.window_rows);
 
-				CopyFromTypedCache(chunk->cache, chunk_offset, overlap_size, target_vector, result_offset, base_type,
+				CopyFromTypedCache(window->cache, window_offset, overlap_size, target_vector, result_offset, base_type,
 				                   spec.elements_per_row);
 			}
 		}
@@ -2415,14 +2492,12 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		// Handle string data using helper
 		ReadHDF5Strings(dataset_id, *spec.string_h5_type, mem_space, file_space, to_read, bind_data.filename, spec.path,
 		                [&](idx_t i, const std::string &str) {
-			                FlatVector::GetData<string_t>(result_vector)[i] =
-			                    StringVector::AddString(result_vector, str);
+			                FlatVector::GetData<string_t>(target_vector)[i] =
+			                    StringVector::AddString(target_vector, str);
 		                });
 
 	} else {
 		// Handle numeric data
-		LogicalType base_type;
-		auto &target_vector = GetInnermostVector(result_vector, spec.column_type, base_type);
 		H5ErrorSuppressor suppress;
 		herr_t status = DispatchOnNumericType(base_type, [&](auto type_tag) {
 			using T = typename decltype(type_tag)::type;
@@ -2512,38 +2587,8 @@ static void H5ReadSingleFileScan(ClientContext &context, const H5ReadSingleFileB
 	}
 
 	output.SetCardinality(to_read);
-
-	// Update position_done to track completed scans
-	// This scan returned rows [position, position + to_read)
-	// position_done uses half-open interval: [0, position_done) has been returned or filtered out
-	{
-		std::lock_guard<std::mutex> lock(gstate.range_selection_mutex);
-
-		idx_t scan_end = position + to_read;
-		idx_t current_done = gstate.position_done.load();
-
-		if (position == current_done) {
-			// This scan is contiguous with position_done - advance directly
-			gstate.position_done.store(scan_end);
-
-			// Merge any subsequent completed ranges that are now contiguous
-			while (true) {
-				current_done = gstate.position_done.load();
-				current_done = AdjustPositionDoneForRanges(gstate.valid_row_ranges, current_done);
-				gstate.position_done.store(current_done);
-				auto it = gstate.completed_ranges.find(current_done);
-				if (it == gstate.completed_ranges.end()) {
-					break;
-				}
-				gstate.position_done.store(it->second);
-				gstate.completed_ranges.erase(it);
-			}
-			current_done = AdjustPositionDoneForRanges(gstate.valid_row_ranges, gstate.position_done.load());
-			gstate.position_done.store(current_done);
-		} else {
-			// This scan completed out of order - store for later merging
-			gstate.completed_ranges[position] = scan_end;
-		}
+	if (!gstate.cache_refresh_order.empty()) {
+		MarkRangeComplete(gstate, position, to_read);
 	}
 }
 
@@ -2584,13 +2629,13 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	BuildH5ReadProjectionLayout(bind_data, input.column_ids, result->data_column_ids,
 	                            result->data_output_column_positions, result->filename_output_positions,
 	                            result->empty_output_positions);
-	auto projected_numeric_row_bytes = ComputeProjectedNumericRowBytes(bind_data, result->data_column_ids);
-	if (projected_numeric_row_bytes > 0) {
+	// Avoid multiplying a large eager fixed-ARRAY allocation across workers for tiny inputs.
+	if (H5ReadHasWideFixedArrayProjection(GetCanonicalColumns(bind_data), result->data_column_ids)) {
 		idx_t max_num_rows = 0;
 		for (const auto &file_bind_data : bind_data.file_bind_data) {
 			max_num_rows = MaxValue<idx_t>(max_num_rows, file_bind_data.num_rows);
 		}
-		if (projected_numeric_row_bytes >= H5_READ_WIDE_ROW_FEW_ROWS_THRESHOLD && max_num_rows < STANDARD_VECTOR_SIZE) {
+		if (max_num_rows < STANDARD_VECTOR_SIZE) {
 			result->max_threads = 1;
 		}
 	}
@@ -2830,6 +2875,7 @@ public:
 	H5ReadScalarFileReader(ClientContext &context_p, string filename_p, bool swmr_p)
 	    : context(context_p), filename(std::move(filename_p)) {
 		H5ErrorSuppressor suppress;
+		// H5FileHandle acquires hdf5_global_mutex around H5Fopen.
 		file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr_p);
 		if (!file.is_valid()) {
 			throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", filename));

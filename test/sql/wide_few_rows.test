@@ -23,7 +23,7 @@ ORDER BY row_id;
 3	300000.0	1300102.0	2306363.0
 4	400000.0	1400102.0	2406363.0
 
-# Force small cache chunks so the scan has to produce multiple sub-2048 batches.
+# Force small cache windows so the scan has to produce multiple sub-2048 batches.
 statement ok
 SET h5db_batch_size='64KB';
 
@@ -47,9 +47,216 @@ ORDER BY row_id;
 statement ok
 RESET h5db_batch_size;
 
-# Ordered sink path should still work on the wide-row tiny-input shape.
+# Small 1D primitive datasets are read directly when one output batch covers the
+# complete cache window.
+query II
+SELECT count(*), sum(row_id)
+FROM h5_read('test/data/wide_few_rows.h5', '/row_id');
+----
+5	10
+
+# A zero-sized inner dimension has rows but no numeric values to cache.
+query II
+SELECT count(*), sum(array_length(zero_inner_large))
+FROM h5_read('test/data/wide_few_rows.h5', '/zero_inner_large');
+----
+3000	0
+
+# Larger 1D primitive datasets retain the extension read-ahead path.
+query IIII
+SELECT count(*), min(int32_cached), max(int32_cached), sum(int32_cached)
+FROM h5_read('test/data/wide_few_rows.h5', '/int32_cached');
+----
+300000	0	299999	44999850000
+
+# A one-row cache window cannot serve a later output batch. Read directly into
+# the nested LIST vector while reusing that vector across scan calls.
+statement ok
+SET h5db_batch_size='64KB';
+
+query III
+SELECT row_id, list_contiguous[128][128], list_chunked_row[64][17]
+FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/row_id',
+  '/list_contiguous',
+  '/list_chunked_row'
+)
+ORDER BY row_id;
+----
+0	3012827.0	3506316.0
+1	3112827.0	3606316.0
+2	3212827.0	3706316.0
+3	3312827.0	3806316.0
+4	3412827.0	3906316.0
+
+statement ok
+RESET h5db_batch_size;
+
+# Rows below 64 KiB retain fixed ARRAY types. Wider rows use nested LISTs so
+# DuckDB allocates only the rows produced by the scan.
+query TTTTT
+SELECT typeof(wide_contiguous), typeof(list_contiguous), typeof(extreme_single),
+       typeof(list_2d), typeof(list_4d)
+FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/wide_contiguous',
+  '/list_contiguous',
+  '/extreme_single',
+  '/list_2d',
+  '/list_4d'
+)
+LIMIT 1;
+----
+DOUBLE[64][64]	DOUBLE[][]	SMALLINT[][]	BIGINT[]	BIGINT[][][]
+
+# Populate nested list offsets correctly while reusing the output vector across
+# multi-row scan batches, a smaller final batch, and multiple cache windows.
+statement ok
+SET h5db_batch_size='512KB';
+
+query III
+SELECT row_id, list_contiguous[128][128], list_chunked_pair[64][17]
+FROM h5_read(
+  'test/data/wide_few_rows.h5',
+  '/row_id',
+  '/list_contiguous',
+  '/list_chunked_pair'
+)
+ORDER BY row_id;
+----
+0	3012827.0	4006316.0
+1	3112827.0	4106316.0
+2	3212827.0	4206316.0
+3	3312827.0	4306316.0
+4	3412827.0	4406316.0
+
+statement ok
+RESET h5db_batch_size;
+
+# The smallest fallback rank has one LIST layer.
+query IIT
+SELECT list_2d[1], list_2d[8192], typeof(list_2d)
+FROM h5_read('test/data/wide_few_rows.h5', '/list_2d')
+ORDER BY list_2d[1];
+----
+0	8191	BIGINT[]
+8192	16383	BIGINT[]
+16384	24575	BIGINT[]
+
+# A rank-four row exactly at the 64 KiB threshold uses three LIST layers.
+query IIT
+SELECT list_4d[1][1][1], list_4d[8][16][64], typeof(list_4d)
+FROM h5_read('test/data/wide_few_rows.h5', '/list_4d')
+ORDER BY list_4d[1][1][1];
+----
+0	8191	BIGINT[][][]
+8192	16383	BIGINT[][][]
+
+# LIST types do not encode their dimensions. Multi-file reads accept different
+# row counts but still require matching inner dimensions.
+query IRR
+SELECT count(*), sum(values[1][1]), sum(values[128][128])
+FROM h5_read([
+  'test/data/wide_shape_a.h5',
+  'test/data/wide_shape_b.h5'
+], '/values');
+----
+5	8.0	8.0
+
+statement error
+SELECT count(*)
+FROM h5_read([
+  'test/data/wide_shape_a.h5',
+  'test/data/wide_shape_mismatch.h5'
+], '/values');
+----
+<REGEX>:.*h5_read matched file '.*' with an incompatible schema.*
+
+# A non-empty 2048x2048 row must allocate only its actual leaf values.
+statement ok
+SET memory_limit='256MB';
+
+# The logical dataset is 16 GB, but LIMIT 1 should allocate and read only one
+# approximately 8 MB row.
+query IIT
+SELECT logical_16gb[1][1], logical_16gb[2000][2000], typeof(logical_16gb)
+FROM h5_read('test/data/wide_few_rows.h5', '/logical_16gb')
+LIMIT 1;
+----
+-7	-7	SMALLINT[][]
+
+# A complete 72 MiB dataset uses one cache window. This stays below the same
+# 128 MiB total that the previous policy allowed for two 64 MiB windows.
+query IIT
+SELECT single_cache_window[1][1], single_cache_window[2048][2048], typeof(single_cache_window)
+FROM h5_read('test/data/wide_few_rows.h5', '/single_cache_window')
+LIMIT 1;
+----
+-9	-9	SMALLINT[][]
+
+# Cache limits apply to fixed ARRAY output too. The HDF5 first chunk dimension
+# would otherwise produce two approximately 4 GiB logical cache windows.
+statement ok
+SET memory_limit='64MB';
+
+query IIT
+SELECT fixed_cache_limit[1], fixed_cache_limit[4096], typeof(fixed_cache_limit)
+FROM h5_read('test/data/wide_few_rows.h5', '/fixed_cache_limit')
+LIMIT 1;
+----
+7	7	UTINYINT[4096]
+
+statement ok
+SET memory_limit='256MB';
+
+query IIIT
+SELECT extreme_single[1][1], extreme_single[1024][1024], extreme_single[2048][2048],
+       typeof(extreme_single)
+FROM h5_read('test/data/wide_few_rows.h5', '/extreme_single');
+----
+11	22	33	SMALLINT[][]
+
+# Projecting an empty extreme-width value used to request a 16 GiB ARRAY vector.
+query I
+SELECT count(extreme_empty)
+FROM h5_read('test/data/wide_few_rows.h5', '/extreme_empty');
+----
+0
+
+statement ok
+CREATE TEMP TABLE extreme_tmp AS
+SELECT * FROM h5_read('test/data/wide_few_rows.h5', '/extreme_single');
+
+query IIT
+SELECT extreme_single[1][1], extreme_single[2048][2048], typeof(extreme_single)
+FROM extreme_tmp;
+----
+11	33	SMALLINT[][]
+
+statement ok
+DROP TABLE extreme_tmp;
+
+statement ok
+RESET memory_limit;
+
+# LIST fallback columns no longer inherit the fixed-ARRAY single-thread
+# workaround. Exercise their shared cache with several output batches.
 statement ok
 SET threads=8;
+
+statement ok
+SET memory_limit='320MB';
+
+query IRR
+SELECT count(*), sum(list_threaded[1][1]), sum(list_threaded[128][64])
+FROM h5_read('test/data/wide_few_rows.h5', '/list_threaded');
+----
+100	300.0	300.0
+
+# Ordered sink path should still work on the wide-row tiny-input shape.
+# The three fixed ARRAY columns allocate about 192 MiB per worker, so the
+# fixed-ARRAY guard must avoid multiplying that allocation across eight workers.
 
 statement ok
 CREATE TEMP TABLE wide_tmp AS
@@ -69,3 +276,6 @@ FROM wide_tmp;
 
 statement ok
 DROP TABLE wide_tmp;
+
+statement ok
+RESET memory_limit;

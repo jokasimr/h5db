@@ -173,7 +173,7 @@ echo -e "${GREEN}[20/28] Generating sparse_partition_pushdown.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_sparse_partition_pushdown_test.py)
 
 echo ""
-echo -e "${GREEN}[21/28] Generating wide_few_rows.h5${NC}"
+echo -e "${GREEN}[21/28] Generating wide-row test files${NC}"
 (cd test/data && "$PYTHON_BIN" create_wide_few_rows_test.py)
 
 echo ""
@@ -257,6 +257,7 @@ echo "    - cache_progress.h5       (h5_read cache-progress boundaries)"
 echo "    - sparse_pushdown_cache.h5 (sparse pushdown cache coverage)"
 echo "    - sparse_partition_pushdown.h5 (sparse pushdown across logical partitions)"
 echo "    - wide_few_rows.h5        (wide-row cache/threading coverage)"
+echo "    - wide_shape_*.h5         (wide-row multi-file shape coverage)"
 echo "    - links.h5                (hard/soft/external link coverage)"
 echo "    - complex_links.h5        (complicated link graph coverage)"
 echo "    - h5_tree_traversal_hint_bug.h5 (h5_tree prefix-root regression fixture)"
