@@ -322,10 +322,10 @@ New focused tests to add:
   - selecting only the shorter column from `h5_read(file, short, long)` still
     returns the max row count, because row count is determined by the bound
     function inputs rather than projected columns
-- numeric cache boundary:
+- read-ahead cache boundary:
   - a chunk straddles the shorter dataset end
   - the readable prefix is returned and the suffix is null
-- all-padded numeric cache chunk:
+- all-padded read-ahead cache chunk:
   - a requested chunk starts after the shorter dataset end and does not hang
 - run-encoded columns with mismatched regular datasets:
   - encoded columns use max aligned row count
@@ -342,7 +342,7 @@ catching cache/read-boundary mistakes on non-local VFDs.
 
 ### Cache Reads Past Dataset End
 
-The numeric cache is optimized around the current invariant that every regular
+The read-ahead cache is optimized around the current invariant that every regular
 column has the file's row count. Changing row-count semantics invalidates that
 assumption.
 
@@ -437,7 +437,7 @@ Rationale:
 
 - it preserves existing API behavior
 - it avoids a breaking result-cardinality change
-- it keeps the scanner and numeric cache invariants simple
+- it keeps the scanner and read-ahead cache invariants simple
 - it avoids introducing large padded result sets unexpectedly
 
 The positional-alignment alternative remains a plausible future breaking

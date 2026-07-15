@@ -898,7 +898,7 @@ SET h5db_swmr_default = true;
 ```
 
 ### `h5db_batch_size` (VARCHAR)
-Target batch size used by `h5_read` for numeric caching and scan sizing. Accepts DuckDB memory-size
+Target batch size used by `h5_read` for read-ahead caching and scan sizing. Accepts DuckDB memory-size
 strings such as `'1MB'`, `'8MB'`, `'512KB'`. Defaults to `'1MB'`. Values above `1GB` are clamped to `1GB`.
 
 This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` may align cache windows upward to the

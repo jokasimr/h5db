@@ -88,7 +88,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption("h5db_swmr_default", "Default to SWMR read mode for h5db table functions",
 	                          LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("h5db_batch_size", "Target batch size for h5_read numeric caching (e.g. 1MB, 8MB)",
+	config.AddExtensionOption("h5db_batch_size", "Target batch size for h5_read read-ahead caching (e.g. 1MB, 8MB)",
 	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_BATCH_SIZE_SETTING), SetH5dbBatchSize);
 
 	// Register HDF5 table functions

@@ -116,8 +116,9 @@ struct RegularColumnSpec {
 	std::optional<H5TypeHandle> string_h5_type; // Present only for string datasets
 	int ndims;
 	std::vector<hsize_t> dims;
-	idx_t leaf_row_bytes;   // Numeric leaf storage per row
-	idx_t elements_per_row; // Numeric leaf elements per row
+	// Per-column DuckDB output footprint for one scan row.
+	idx_t output_bytes_per_row; // Zero for strings or zero-sized values
+	idx_t elements_per_row;     // Output elements in the same scan-row value
 };
 
 // Scalar dataset specification (rank-0 value or null dataspace)
@@ -178,7 +179,8 @@ struct CacheWindow {
 	                 std::vector<float>, std::vector<double>>;
 	CacheStorage cache;
 
-	// The owning cache's window size makes the start recoverable from end_row.
+	// end_row is one past the logical cache window start plus window_rows.
+	// This makes the cache window start recoverable as (end_row - window_rows).
 	// Zero marks an uninitialized window as reusable.
 	std::atomic<idx_t> end_row {0};
 };
@@ -591,7 +593,7 @@ static idx_t ComputeCacheWindowRows(const RegularColumnSpec &spec, hid_t dataset
 
 	idx_t window_rows;
 	if (chunk_rows > 0) {
-		auto row_bytes = MaxValue<idx_t>(spec.leaf_row_bytes, 1);
+		auto row_bytes = MaxValue<idx_t>(spec.output_bytes_per_row, 1);
 		idx_t target_rows = MaxValue<idx_t>(target_batch_size_bytes / row_bytes, 1);
 		target_rows = MaxValue<idx_t>(target_rows, chunk_rows);
 		idx_t remainder = target_rows % chunk_rows;
@@ -601,7 +603,7 @@ static idx_t ComputeCacheWindowRows(const RegularColumnSpec &spec, hid_t dataset
 		window_rows = target_rows;
 		D_ASSERT(window_rows % chunk_rows == 0);
 	} else {
-		window_rows = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.leaf_row_bytes, 1), 1);
+		window_rows = MaxValue<idx_t>(target_batch_size_bytes / MaxValue<idx_t>(spec.output_bytes_per_row, 1), 1);
 	}
 	if (total_rows == 0) {
 		return 0;
@@ -615,9 +617,9 @@ static idx_t ComputeCacheWindowCount(idx_t window_rows, idx_t total_rows) {
 
 static bool H5ReadShouldCreateCache(const RegularColumnSpec &spec, idx_t window_rows, idx_t total_rows,
                                     idx_t scan_batch_size) {
-	D_ASSERT(spec.leaf_row_bytes > 0);
+	D_ASSERT(spec.output_bytes_per_row > 0);
 	auto window_count = ComputeCacheWindowCount(window_rows, total_rows);
-	auto max_window_rows = H5_READ_CACHE_LIMIT_BYTES / window_count / spec.leaf_row_bytes;
+	auto max_window_rows = H5_READ_CACHE_LIMIT_BYTES / window_count / spec.output_bytes_per_row;
 	return window_rows > scan_batch_size && window_rows <= max_window_rows;
 }
 
@@ -1308,19 +1310,20 @@ static H5ReadSingleFileBindData BindSingleH5ReadFile(ClientContext &context, con
 			// Map HDF5 type to DuckDB type
 			LogicalType base_type = H5TypeToDuckDBType(type);
 
-			// Calculate output element size for multi-dimensional arrays.
+			// Calculate DuckDB output bytes/elements for this column in one scan row.
 			// This intentionally uses the DuckDB/native memory size, not the file size:
 			// e.g. HDF5 float16 values are widened into DuckDB FLOAT values.
-			ds_info.leaf_row_bytes = ds_info.is_string ? 0 : H5ReadNumericOutputElementSize(base_type);
+			ds_info.output_bytes_per_row = ds_info.is_string ? 0 : H5ReadNumericOutputElementSize(base_type);
 			ds_info.elements_per_row = 1;
 			for (int j = 1; j < ds_info.ndims; j++) {
 				auto dimension = static_cast<idx_t>(ds_info.dims[j]);
-				ds_info.leaf_row_bytes =
-				    CheckedDatasetSizeProduct(ds_info.leaf_row_bytes, dimension, result.filename, ds_info.path);
+				ds_info.output_bytes_per_row =
+				    CheckedDatasetSizeProduct(ds_info.output_bytes_per_row, dimension, result.filename, ds_info.path);
 				ds_info.elements_per_row =
 				    CheckedDatasetSizeProduct(ds_info.elements_per_row, dimension, result.filename, ds_info.path);
 			}
-			auto uses_nested_lists = ds_info.ndims > 1 && ds_info.leaf_row_bytes >= H5_READ_WIDE_ROW_THRESHOLD_BYTES;
+			auto uses_nested_lists =
+			    ds_info.ndims > 1 && ds_info.output_bytes_per_row >= H5_READ_WIDE_ROW_THRESHOLD_BYTES;
 
 			if (ds_info.is_string) {
 				// Preserve file-local string metadata for runtime string decoding.
@@ -1406,23 +1409,25 @@ static const vector<ColumnSpec> &GetCanonicalColumns(const H5ReadBindData &bind_
 	return bind_data.file_bind_data[0].columns;
 }
 
-static idx_t ComputeScanBatchSize(const vector<ColumnSpec> &columns, const vector<column_t> &data_column_ids,
-                                  idx_t target_batch_size_bytes) {
+static idx_t EstimateScanBatchSize(const vector<ColumnSpec> &columns, const vector<column_t> &data_column_ids,
+                                   idx_t target_batch_size_bytes) {
 	D_ASSERT(target_batch_size_bytes > 0);
-	idx_t projected_numeric_row_bytes = 0;
+	// This estimates projected row width from regular non-string columns. Strings,
+	// scalars, run-encoded, index, filename, and empty columns are not included.
+	idx_t estimated_output_bytes_per_row = 0;
 	for (auto column_id : data_column_ids) {
 		if (auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
 		    regular_spec && !regular_spec->is_string) {
-			if (regular_spec->leaf_row_bytes >= target_batch_size_bytes - projected_numeric_row_bytes) {
+			if (regular_spec->output_bytes_per_row >= target_batch_size_bytes - estimated_output_bytes_per_row) {
 				return 1;
 			}
-			projected_numeric_row_bytes += regular_spec->leaf_row_bytes;
+			estimated_output_bytes_per_row += regular_spec->output_bytes_per_row;
 		}
 	}
-	if (projected_numeric_row_bytes == 0) {
+	if (estimated_output_bytes_per_row == 0) {
 		return STANDARD_VECTOR_SIZE;
 	}
-	return MinValue<idx_t>(target_batch_size_bytes / projected_numeric_row_bytes, STANDARD_VECTOR_SIZE);
+	return MinValue<idx_t>(target_batch_size_bytes / estimated_output_bytes_per_row, STANDARD_VECTOR_SIZE);
 }
 
 static bool H5ReadHasWideFixedArrayProjection(const vector<ColumnSpec> &columns,
@@ -1436,10 +1441,10 @@ static bool H5ReadHasWideFixedArrayProjection(const vector<ColumnSpec> &columns,
 
 		// Each fixed ARRAY output vector eagerly allocates STANDARD_VECTOR_SIZE rows.
 		// Return before the sum can overflow; only the threshold comparison matters.
-		if (regular_spec->leaf_row_bytes >= H5_READ_WIDE_ROW_THRESHOLD_BYTES - projected_fixed_array_row_bytes) {
+		if (regular_spec->output_bytes_per_row >= H5_READ_WIDE_ROW_THRESHOLD_BYTES - projected_fixed_array_row_bytes) {
 			return true;
 		}
-		projected_fixed_array_row_bytes += regular_spec->leaf_row_bytes;
+		projected_fixed_array_row_bytes += regular_spec->output_bytes_per_row;
 	}
 	return false;
 }
@@ -1544,7 +1549,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 
 	result->columns_to_scan = data_column_ids;
 	result->output_column_positions = data_output_positions;
-	result->scan_batch_size = ComputeScanBatchSize(bind_data.columns, data_column_ids, target_batch_size_bytes);
+	result->scan_batch_size = EstimateScanBatchSize(bind_data.columns, data_column_ids, target_batch_size_bytes);
 
 	// Build global-to-local index mapping for projection pushdown
 	// This allows O(1) lookup: global_column_idx -> local_column_states_idx
@@ -1603,8 +1608,9 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    state.dataset = std::move(dataset);
 				    state.file_space = std::move(file_space);
 
-				    // Cache non-empty numeric columns when a bounded window can serve multiple output batches.
-				    if (!spec.is_string && spec.leaf_row_bytes > 0) {
+				    // Create read-ahead cache windows for non-empty cacheable columns when one
+				    // window can serve multiple output batches.
+				    if (!spec.is_string && spec.output_bytes_per_row > 0) {
 					    auto window_rows = ComputeCacheWindowRows(spec, state.dataset.get(), target_batch_size_bytes,
 					                                              bind_data.num_rows);
 					    if (window_rows > 0 &&

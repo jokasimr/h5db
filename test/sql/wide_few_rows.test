@@ -55,7 +55,7 @@ FROM h5_read('test/data/wide_few_rows.h5', '/row_id');
 ----
 5	10
 
-# A zero-sized inner dimension has rows but no numeric values to cache.
+# A zero-sized inner dimension has rows but no cacheable values.
 query II
 SELECT count(*), sum(array_length(zero_inner_large))
 FROM h5_read('test/data/wide_few_rows.h5', '/zero_inner_large');
