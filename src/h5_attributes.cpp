@@ -175,7 +175,7 @@ static vector<AttributeInfo> BindSingleH5AttributesFile(ClientContext &context, 
 	hsize_t idx = 0;
 	AttrIterData iter_data;
 	iter_data.attributes = &result;
-	auto status = H5Aiterate2(obj, H5_INDEX_NAME, H5_ITER_NATIVE, &idx, attr_info_callback, &iter_data);
+	auto status = H5Aiterate2(obj, H5_INDEX_NAME, H5_ITER_INC, &idx, attr_info_callback, &iter_data);
 	if (status < 0) {
 		if (iter_data.error) {
 			throw IOException(FormatHDF5ObjectContextError(iter_data.error_message, filename, object_path));

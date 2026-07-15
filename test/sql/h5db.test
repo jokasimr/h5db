@@ -1029,16 +1029,16 @@ IO Error: Failed to open dataset: /nonexistent_values in file: test/data/run_enc
 #===--------------------------------------------------------------------===#
 
 # Test reading scalar and array attributes from a dataset
-query IITTIIIIIIRRT
+query RRTIIIITTIIII
 SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
 ----
-42	1234	[1, 2, 3, 4, 5]	[1.1, 2.2, 3.3]	123456	9876543210	255	65535	4294967295	18446744073709551615	3.14159	2.718281828	Hello HDF5!
+3.14159	2.718281828	[1.1, 2.2, 3.3]	1234	123456	9876543210	42	[1, 2, 3, 4, 5]	Hello HDF5!	65535	4294967295	18446744073709551615	255
 
 # Test reading attributes from a group
-query ITI
+query TIT
 SELECT * FROM h5_attributes('test/data/with_attrs.h5', '/group_with_attrs');
 ----
-999	I am a group	[10, 20, 30]
+[10, 20, 30]	999	I am a group
 
 # Test verifying column names match attribute names
 query I

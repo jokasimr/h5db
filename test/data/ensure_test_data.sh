@@ -65,6 +65,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/glob/glob_with_attrs_2.h5"
   "$PROJECT_ROOT/test/data/glob/attr_schema_1.h5"
   "$PROJECT_ROOT/test/data/glob/attr_schema_2.h5"
+  "$PROJECT_ROOT/test/data/glob/attr_schema_reverse_order.h5"
   "$PROJECT_ROOT/test/data/glob/attr_schema_name_mismatch.h5"
   "$PROJECT_ROOT/test/data/glob/attr_schema_type_mismatch.h5"
   "$PROJECT_ROOT/test/data/glob/glob_attrs_edge_1.h5"

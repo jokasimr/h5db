@@ -72,12 +72,22 @@ def write_order_file(path: Path, value: int, marker_name: str) -> None:
         h5.create_dataset(marker_name, data=np.array([value], dtype=np.int32))
 
 
-def write_attribute_schema_file(path: Path, *, second_name: str = "b", second_value=np.int64(2)) -> None:
+def write_attribute_schema_file(
+    path: Path,
+    *,
+    second_name: str = "b",
+    second_value=np.int64(2),
+    reverse_creation_order: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
         dataset = h5.create_dataset("target", data=np.array([1], dtype=np.int32))
-        dataset.attrs["a"] = np.int32(1)
-        dataset.attrs[second_name] = second_value
+        if reverse_creation_order:
+            dataset.attrs[second_name] = second_value
+            dataset.attrs["a"] = np.int32(1)
+        else:
+            dataset.attrs["a"] = np.int32(1)
+            dataset.attrs[second_name] = second_value
 
 
 def write_large_order_file(path: Path, base_value: int, num_rows: int = 50_000) -> None:
@@ -246,6 +256,7 @@ def main() -> None:
     write_order_file(GLOB_LITERAL_META_DIR / "dir[1]" / "nested.h5", 2, "marker_2")
     write_attribute_schema_file(GLOB_DIR / "attr_schema_1.h5")
     write_attribute_schema_file(GLOB_DIR / "attr_schema_2.h5")
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_reverse_order.h5", reverse_creation_order=True)
     write_attribute_schema_file(GLOB_DIR / "attr_schema_name_mismatch.h5", second_name="c")
     write_attribute_schema_file(GLOB_DIR / "attr_schema_type_mismatch.h5", second_value=np.float64(2.5))
 

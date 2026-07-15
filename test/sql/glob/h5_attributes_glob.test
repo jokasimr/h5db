@@ -13,6 +13,15 @@ FROM h5_attributes([
 ----
 2	2	4
 
+query III
+SELECT COUNT(*), SUM(a), SUM(b)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_reverse_order.h5'
+], '/target');
+----
+2	2	4
+
 query II
 SELECT COUNT(*), SUM(int32_attr)
 FROM h5_attributes('test/data/glob/glob_with_attrs_*.h5', '/dataset_with_attrs');

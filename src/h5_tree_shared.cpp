@@ -234,7 +234,7 @@ Value H5ReadAllAttributesMapValue(hid_t object_id) {
 	H5TreeAllAttributesIterData iter_data;
 	iter_data.keys = &keys;
 	iter_data.values = &values;
-	auto status = H5Aiterate2(object_id, H5_INDEX_NAME, H5_ITER_NATIVE, &idx, H5TreeAllAttributesCallback, &iter_data);
+	auto status = H5Aiterate2(object_id, H5_INDEX_NAME, H5_ITER_INC, &idx, H5TreeAllAttributesCallback, &iter_data);
 	if (status < 0) {
 		if (iter_data.error) {
 			throw IOException(iter_data.error_message);
