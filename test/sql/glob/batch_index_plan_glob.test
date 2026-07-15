@@ -1,0 +1,18 @@
+# name: test/sql/glob/batch_index_plan_glob.test
+# description: h5_read glob materialization into sink plans without table-function batch indexes
+# group: [glob]
+
+require h5db
+
+statement ok
+PRAGMA threads=4;
+
+statement ok
+CREATE TEMP TABLE tmp_h5_glob AS
+SELECT values
+FROM h5_read('test/data/glob_order/order_*.h5', '/values');
+
+query II
+SELECT COUNT(*), SUM(values) FROM tmp_h5_glob;
+----
+3	13
