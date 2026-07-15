@@ -179,6 +179,34 @@ FROM (
 ----
 ARRAY(1)	BLOB	FFFE	1	VARIANT[]	BLOB	FFFE	1	VARIANT[1]	BLOB	FFFE	1	ARRAY(1)	BLOB	FFFE	1
 
+query TTTTI
+SELECT
+    typeof(attr_2d),
+    attr_2d,
+    variant_typeof(map_extract_value(h5_attr, 'attr_2d')),
+    TRY_CAST(map_extract_value(h5_attr, 'attr_2d') AS INTEGER[][]),
+    TRY_CAST(map_extract_value(h5_attr, 'attr_2d') AS INTEGER[][]) = [[0, 1, 2], [3, 4, 5]]::INTEGER[][]
+FROM h5_ls(
+    'test/data/attrs_edge_cases.h5',
+    '/',
+    h5_attr(),
+    h5_attr('attr_2d', NULL::INTEGER[][])
+)
+WHERE path = '/multidim_attr_dataset';
+----
+INTEGER[][]	[[0, 1, 2], [3, 4, 5]]	ARRAY(2)	[[0, 1, 2], [3, 4, 5]]	1
+
+query TI
+SELECT typeof(null_int_attr), CASE WHEN null_int_attr IS NULL THEN 1 ELSE 0 END
+FROM h5_ls(
+    'test/data/attrs_edge_cases.h5',
+    '/',
+    h5_attr('null_int_attr', NULL::INTEGER)
+)
+WHERE path = '/null_dataspace_attr_dataset';
+----
+INTEGER	1
+
 query TTITTI
 SELECT
     typeof(struct_extract(row_value, 'invalid_utf8_string_array_blist')),
@@ -696,7 +724,7 @@ SELECT filename, cardinality(h5_ls(filename, '/'))
 FROM files
 ORDER BY filename;
 ----
-test/data/attrs_edge_cases.h5	15
+test/data/attrs_edge_cases.h5	22
 test/data/links.h5	10
 
 query TTI

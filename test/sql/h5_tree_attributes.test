@@ -568,10 +568,56 @@ WHERE path = '/invalid_utf8_vlen_string_array_attr_dataset';
 ----
 IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /invalid_utf8_vlen_string_array_attr_dataset in file: test/data/invalid_string_array_attrs.h5
 
-statement error
-SELECT * FROM h5_tree('test/data/attrs_edge_cases.h5', h5_attr('attr_2d', [0, 0, 0]::INTEGER[]));
+query TT
+SELECT typeof(attr_2d), attr_2d
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::INTEGER[][])
+)
+WHERE path = '/multidim_attr_dataset';
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+INTEGER[][]	[[0, 1, 2], [3, 4, 5]]
+
+query TT
+SELECT typeof(attr_2d), attr_2d
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::INTEGER[3][2])
+)
+WHERE path = '/multidim_attr_dataset';
+----
+INTEGER[3][2]	[[0, 1, 2], [3, 4, 5]]
+
+statement error
+SELECT * FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('attr_2d', NULL::INTEGER[2][3])
+)
+WHERE path = '/multidim_attr_dataset';
+----
+IO Error: Attribute 'attr_2d' contains values that cannot be cast to INTEGER[2][3] in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+
+query TT
+SELECT
+    typeof(invalid_utf8_2d),
+    hex(array_extract(array_extract(invalid_utf8_2d, 1), 2))
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('invalid_utf8_2d', NULL::BLOB[][])
+)
+WHERE path = '/multidim_invalid_string_attr_dataset';
+----
+BLOB[][]	FFFE
+
+query TI
+SELECT typeof(null_int_attr), CASE WHEN null_int_attr IS NULL THEN 1 ELSE 0 END
+FROM h5_tree(
+    'test/data/attrs_edge_cases.h5',
+    h5_attr('null_int_attr', 42::INTEGER)
+)
+WHERE path = '/null_dataspace_attr_dataset';
+----
+INTEGER	1
 
 # A failed projected-attribute scan must not poison a subsequent h5_tree scan.
 query T
@@ -608,11 +654,11 @@ statement error
 SELECT *
 FROM h5_tree(
     'test/data/attrs_edge_cases.h5',
-    h5_attr('attr_2d', [0, 0, 0]::INTEGER[]),
+    h5_attr('attr_2d', NULL::INTEGER[2][3]),
     h5_attr('missing_attr', 'fallback'::VARCHAR)
 );
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+IO Error: Attribute 'attr_2d' contains values that cannot be cast to INTEGER[2][3] in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 query T
 SELECT safe_attr

@@ -243,13 +243,64 @@ FROM (
 16909060	1	1
 
 # =============================================================================
-# Unsupported multidimensional attribute
+# Multidimensional attributes
 # =============================================================================
 
-statement error
-SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset');
+query TTTT
+SELECT typeof(attr_2d), attr_2d, typeof(attr_3d), attr_3d
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset');
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+INTEGER[][]	[[0, 1, 2], [3, 4, 5]]	INTEGER[][][]	[[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]], [[12, 13, 14, 15], [16, 17, 18, 19], [20, 21, 22, 23]]]
+
+query TTTTTT
+SELECT
+    typeof(zero_0_3),
+    zero_0_3,
+    typeof(zero_2_0_3),
+    zero_2_0_3,
+    typeof(zero_2_3_0),
+    zero_2_3_0
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_zero_attr_dataset');
+----
+INTEGER[][]	[]	INTEGER[][][]	[[], []]	INTEGER[][][]	[[[], [], []], [[], [], []]]
+
+query TTTT
+SELECT typeof(fixed_text_2d), fixed_text_2d, typeof(vlen_text_2d), vlen_text_2d
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_string_attr_dataset');
+----
+VARCHAR[][]	[[a, bb], [ccc, dddd]]	VARCHAR[][]	[[a, bb], [ccc, dddd]]
+
+query TI
+SELECT typeof(null_int_attr), CASE WHEN null_int_attr IS NULL THEN 1 ELSE 0 END
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/null_dataspace_attr_dataset');
+----
+INTEGER	1
+
+query TI
+SELECT
+    variant_typeof(map_extract_value(attrs, 'null_int_attr')),
+    CASE WHEN TRY_CAST(map_extract_value(attrs, 'null_int_attr') AS INTEGER) IS NULL THEN 1 ELSE 0 END
+FROM (
+    SELECT h5_attributes('test/data/attrs_edge_cases.h5', '/null_dataspace_attr_dataset') AS attrs
+);
+----
+VARIANT_NULL	1
+
+query TT
+SELECT typeof(attr_rank4), attr_rank4
+FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_rank4_attr_dataset');
+----
+INTEGER[][][][]	[[[[0, 1]]]]
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_rank5_attr_dataset');
+----
+IO Error: Attribute 'attr_rank5' has unsupported multidimensional dataspace: attributes with more than 4 dimensions are not currently supported in object: /multidim_rank5_attr_dataset in file: test/data/attrs_edge_cases.h5
+
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_invalid_string_attr_dataset');
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in value construction in object: /multidim_invalid_string_attr_dataset in file: test/data/attrs_edge_cases.h5
 
 # =============================================================================
 # Unsupported attribute types
@@ -291,6 +342,11 @@ SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dat
 ----
 IO Error: Attribute 'bitfield_attr' has unsupported type: Unsupported HDF5 type class: 4 in object: /bitfield_attr_dataset in file: test/data/attrs_edge_cases.h5
 
+statement error
+SELECT * FROM h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_h5t_array_attr_dataset');
+----
+IO Error: Attribute 'rank2_array_attr' has unsupported type: Only 1D array attributes are supported, found 2D array in object: /multidim_h5t_array_attr_dataset in file: test/data/attrs_edge_cases.h5
+
 query TTTTTT
 SELECT
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/multidim_attr_dataset'), 'attr_2d')),
@@ -300,7 +356,7 @@ SELECT
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/opaque_attr_dataset'), 'opaque_attr')),
     variant_typeof(map_extract_value(h5_attributes('test/data/attrs_edge_cases.h5', '/bitfield_attr_dataset'), 'bitfield_attr'));
 ----
-VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL
+ARRAY(2)	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL	VARIANT_NULL
 
 query TT
 SELECT

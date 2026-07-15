@@ -239,7 +239,7 @@ make -j8
 - Compound, enum, reference, opaque, bitfield, time-like, and non-string variable-length HDF5 types are not supported.
 - Datasets with more than 4 dimensions are not supported.
 - Multi-dimensional string datasets are not supported.
-- Attribute multidimensional dataspaces are not supported.
+- Attribute dataspaces with more than 4 dimensions are not supported.
 
 See [docs/API.md](docs/API.md) for full type-mapping details and error behavior.
 

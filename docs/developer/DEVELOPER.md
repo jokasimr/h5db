@@ -428,6 +428,8 @@ deactivate
 ### Code Formatting
 
 The project uses automated code formatting to maintain consistency.
+The formatting targets use tools installed in the repo virtual environment, so activate `venv` before running
+`make format-check` or `make format-fix`.
 
 **One-time setup** (already configured):
 ```bash
@@ -680,6 +682,14 @@ Solution: Regenerate all test data:
 Solution: Activate the virtual environment first:
   source venv/bin/activate
   make -j8
+```
+
+**Problem**: `make format-fix` fails because `black`, `clang-format`, or `cmake-format` is missing
+```
+Solution: Install the dev tools if needed, then activate the virtual environment:
+  ./scripts/setup-dev-env.sh
+  source venv/bin/activate
+  make format-fix
 ```
 
 **Problem**: VCPKG dependencies not found

@@ -501,6 +501,188 @@ static idx_t H5GetAttributeListLength(hid_t h5_type_id, hid_t h5_space_id, const
 	return static_cast<idx_t>(dims[0]);
 }
 
+static idx_t H5CheckedAttributeSizeProduct(idx_t left, idx_t right, const std::string &attribute_name) {
+	if (right != 0 && left > NumericLimits<idx_t>::Maximum() / right) {
+		throw IOException("Attribute '" + attribute_name + "' dimensions exceed the supported in-memory size");
+	}
+	return left * right;
+}
+
+static idx_t H5CheckedAttributeDimension(hsize_t dimension, const std::string &attribute_name) {
+	if (dimension > NumericLimits<idx_t>::Maximum()) {
+		throw IOException("Attribute '" + attribute_name + "' dimension exceeds the supported in-memory size");
+	}
+	return static_cast<idx_t>(dimension);
+}
+
+static vector<idx_t> H5GetSimpleAttributeDimensions(hid_t h5_space_id, const std::string &attribute_name) {
+	auto ndims = H5Sget_simple_extent_ndims(h5_space_id);
+	if (ndims < 0) {
+		throw IOException("Failed to inspect attribute dataspace: " + attribute_name);
+	}
+	vector<hsize_t> h5_dims(static_cast<idx_t>(ndims));
+	if (ndims > 0 && H5Sget_simple_extent_dims(h5_space_id, h5_dims.data(), nullptr) < 0) {
+		throw IOException("Failed to inspect attribute dimensions: " + attribute_name);
+	}
+	vector<idx_t> dims;
+	dims.reserve(h5_dims.size());
+	for (auto dimension : h5_dims) {
+		dims.push_back(H5CheckedAttributeDimension(dimension, attribute_name));
+	}
+	return dims;
+}
+
+static idx_t H5AttributeElementCount(const vector<idx_t> &dims, const std::string &attribute_name) {
+	idx_t element_count = 1;
+	for (auto dimension : dims) {
+		element_count = H5CheckedAttributeSizeProduct(element_count, dimension, attribute_name);
+	}
+	return element_count;
+}
+
+static LogicalType H5BuildNestedListType(LogicalType leaf_type, const vector<idx_t> &dims) {
+	auto result = std::move(leaf_type);
+	for (idx_t i = dims.size(); i > 0; i--) {
+		result = LogicalType::LIST(result);
+	}
+	return result;
+}
+
+template <typename T>
+static hid_t H5GetNativeAttributeMemoryType(hid_t h5_type_id, const std::string &attribute_name,
+                                            H5TypeHandle &owned_memory_type);
+
+static const LogicalType &H5GetNestedListLeafType(const LogicalType &type) {
+	auto current_type = &type;
+	while (current_type->id() == LogicalTypeId::LIST) {
+		current_type = &ListType::GetChildType(*current_type);
+	}
+	return *current_type;
+}
+
+static Value H5BuildNestedAttributeList(const LogicalType &list_type, const vector<idx_t> &dims, idx_t dimension_idx,
+                                        vector<Value> &leaves, idx_t &leaf_offset) {
+	D_ASSERT(list_type.id() == LogicalTypeId::LIST);
+	auto &child_type = ListType::GetChildType(list_type);
+	auto child_count = dims[dimension_idx];
+	vector<Value> children;
+	children.reserve(child_count);
+	if (dimension_idx + 1 == dims.size()) {
+		for (idx_t i = 0; i < child_count; i++) {
+			children.push_back(std::move(leaves[leaf_offset++]));
+		}
+	} else {
+		for (idx_t i = 0; i < child_count; i++) {
+			children.push_back(H5BuildNestedAttributeList(child_type, dims, dimension_idx + 1, leaves, leaf_offset));
+		}
+	}
+	return Value::LIST(child_type, std::move(children));
+}
+
+static vector<Value> H5ReadStringAttributeLeaves(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id,
+                                                 const std::string &attribute_name, idx_t element_count,
+                                                 const LogicalType &leaf_type, H5StringDecodeMode string_decode_mode) {
+	vector<Value> values;
+	values.reserve(element_count);
+	if (element_count == 0) {
+		return values;
+	}
+
+	auto type_info = H5InspectStringType(h5_type_id, attribute_name);
+	if (type_info.is_variable) {
+		vector<char *> raw_values(element_count);
+		H5ErrorSuppressor suppress;
+		if (H5Aread(attr_id, h5_type_id, raw_values.data()) < 0) {
+			throw IOException("Failed to read string array attribute: " + attribute_name);
+		}
+
+		auto reclaim = [&]() {
+			if (H5Dvlen_reclaim(h5_type_id, h5_space_id, H5P_DEFAULT, raw_values.data()) < 0) {
+				throw IOException("Failed to reclaim string array attribute: " + attribute_name);
+			}
+		};
+
+		try {
+			for (idx_t i = 0; i < element_count; i++) {
+				if (!raw_values[i]) {
+					values.emplace_back(leaf_type);
+					continue;
+				}
+				values.emplace_back(
+				    H5DecodeVariableStringValue(std::string(raw_values[i]), type_info, string_decode_mode));
+			}
+		} catch (...) {
+			try {
+				reclaim();
+			} catch (...) {
+			}
+			throw;
+		}
+		reclaim();
+		return values;
+	}
+
+	if (type_info.fixed_length > NumericLimits<idx_t>::Maximum()) {
+		throw IOException("Attribute '" + attribute_name +
+		                  "' string element size exceeds the supported in-memory size");
+	}
+	auto fixed_length = static_cast<idx_t>(type_info.fixed_length);
+	auto buffer_size = H5CheckedAttributeSizeProduct(element_count, fixed_length, attribute_name);
+	vector<char> buffer(buffer_size);
+	H5ErrorSuppressor suppress;
+	if (H5Aread(attr_id, h5_type_id, buffer.data()) < 0) {
+		throw IOException("Failed to read string array attribute: " + attribute_name);
+	}
+
+	for (idx_t i = 0; i < element_count; i++) {
+		auto *raw_ptr = buffer.data() + (i * fixed_length);
+		values.emplace_back(H5DecodeFixedStringValue(raw_ptr, type_info, string_decode_mode));
+	}
+	return values;
+}
+
+static Value H5ReadSimpleDataspaceAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id,
+                                                 const LogicalType &resolved_type, const std::string &attribute_name,
+                                                 H5StringDecodeMode string_decode_mode) {
+	auto dims = H5GetSimpleAttributeDimensions(h5_space_id, attribute_name);
+	auto element_count = H5AttributeElementCount(dims, attribute_name);
+	auto &resolved_leaf_type = H5GetNestedListLeafType(resolved_type);
+	auto leaf_type = resolved_leaf_type;
+	if (resolved_leaf_type.id() == LogicalTypeId::VARCHAR && string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB) {
+		leaf_type = LogicalType::VARIANT();
+	}
+	auto output_type = H5BuildNestedListType(leaf_type, dims);
+
+	vector<Value> leaves;
+	if (resolved_leaf_type.id() == LogicalTypeId::VARCHAR) {
+		leaves = H5ReadStringAttributeLeaves(attr_id, h5_type_id, h5_space_id, attribute_name, element_count, leaf_type,
+		                                     string_decode_mode);
+	} else {
+		leaves = DispatchOnNumericType(resolved_leaf_type, [&](auto type_tag) -> vector<Value> {
+			using T = typename decltype(type_tag)::type;
+			vector<Value> values;
+			values.reserve(element_count);
+			if (element_count == 0) {
+				return values;
+			}
+			vector<T> raw_values(element_count);
+			H5TypeHandle owned_memory_type;
+			auto memory_type = H5GetNativeAttributeMemoryType<T>(h5_type_id, attribute_name, owned_memory_type);
+			H5ErrorSuppressor suppress;
+			if (H5Aread(attr_id, memory_type, raw_values.data()) < 0) {
+				throw IOException("Failed to read array attribute: " + attribute_name);
+			}
+			for (auto &value : raw_values) {
+				values.push_back(H5CreateDuckDBValue(value));
+			}
+			return values;
+		});
+	}
+
+	idx_t leaf_offset = 0;
+	return H5BuildNestedAttributeList(output_type, dims, 0, leaves, leaf_offset);
+}
+
 static LogicalType H5StringArrayElementType(H5StringDecodeMode string_decode_mode) {
 	return string_decode_mode == H5StringDecodeMode::TEXT_OR_BLOB ? LogicalType::VARIANT() : LogicalType::VARCHAR;
 }
@@ -765,29 +947,28 @@ LogicalType H5AttributeTypeToDuckDBType(hid_t type_id) {
 
 static H5AttributeTypeResolution H5ResolveAttributeLogicalTypeInternal(hid_t type_id, hid_t space_id) {
 	auto space_class = H5Sget_simple_extent_type(space_id);
-	auto ndims = H5Sget_simple_extent_ndims(space_id);
-	hsize_t dims[H5S_MAX_RANK];
-	if (space_class == H5S_NO_CLASS || ndims < 0) {
+	if (space_class == H5S_NO_CLASS) {
 		throw IOException("Failed to inspect attribute dataspace");
 	}
-	if (ndims > 0) {
-		if (H5Sget_simple_extent_dims(space_id, dims, nullptr) < 0) {
-			throw IOException("Failed to inspect attribute dimensions");
-		}
-	}
-
-	if (space_class != H5S_SCALAR && space_class != H5S_SIMPLE) {
+	if (space_class != H5S_SCALAR && space_class != H5S_SIMPLE && space_class != H5S_NULL) {
 		return {false, LogicalType(), "unsupported dataspace class"};
-	}
-	if (space_class == H5S_SIMPLE && ndims > 1) {
-		return {false, LogicalType(), "unsupported multidimensional dataspace (only 1D arrays supported)"};
 	}
 
 	LogicalType duckdb_type;
-	if (space_class == H5S_SIMPLE && ndims == 1) {
+	if (space_class == H5S_SIMPLE) {
+		vector<idx_t> dims;
+		try {
+			dims = H5GetSimpleAttributeDimensions(space_id, "");
+			if (dims.size() > 4) {
+				throw IOException("unsupported multidimensional dataspace: attributes with more than 4 dimensions are "
+				                  "not currently supported");
+			}
+		} catch (const IOException &ex) {
+			return {false, LogicalType(), NormalizeAttributeTypeError(ex)};
+		}
 		try {
 			LogicalType element_type = H5TypeToDuckDBType(type_id);
-			duckdb_type = LogicalType::LIST(element_type);
+			duckdb_type = H5BuildNestedListType(std::move(element_type), dims);
 		} catch (const std::exception &ex) {
 			return {false, LogicalType(), "unsupported type: " + NormalizeAttributeTypeError(ex)};
 		}
@@ -870,6 +1051,17 @@ static hid_t H5GetNativeAttributeMemoryType(hid_t h5_type_id, const std::string 
 
 Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, const LogicalType &resolved_type,
                            const std::string &attribute_name, H5StringDecodeMode string_decode_mode) {
+	auto space_class = H5Sget_simple_extent_type(h5_space_id);
+	if (space_class == H5S_NO_CLASS) {
+		throw IOException("Failed to inspect attribute dataspace: " + attribute_name);
+	}
+	if (space_class == H5S_NULL) {
+		return Value(resolved_type);
+	}
+	if (space_class == H5S_SIMPLE && resolved_type.id() == LogicalTypeId::LIST) {
+		return H5ReadSimpleDataspaceAttributeValue(attr_id, h5_type_id, h5_space_id, resolved_type, attribute_name,
+		                                           string_decode_mode);
+	}
 	if (resolved_type.id() == LogicalTypeId::LIST) {
 		auto &child_type = ListType::GetChildType(resolved_type);
 		if (child_type.id() == LogicalTypeId::VARCHAR) {

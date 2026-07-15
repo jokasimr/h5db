@@ -86,13 +86,23 @@ SELECT * FROM h5_ls([
 ----
 IO Error: Failed to open object: /group in file: test/data/attrs_edge_cases.h5
 
-statement error
-SELECT * FROM h5_tree([
+query III
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (
+        WHERE path = '/multidim_attr_dataset'
+          AND attr_2d = [[0, 1, 2], [3, 4, 5]]::INTEGER[][]
+    ),
+    COUNT(*) FILTER (
+        WHERE path = '/dataset_with_attrs'
+          AND attr_2d IS NULL
+    )
+FROM h5_tree([
     'test/data/with_attrs.h5',
     'test/data/attrs_edge_cases.h5'
-], h5_attr('attr_2d', [0, 0, 0]::INTEGER[]));
+], h5_attr('attr_2d', NULL::INTEGER[][]));
 ----
-IO Error: Attribute 'attr_2d' has unsupported multidimensional dataspace (only 1D arrays supported) in object: /multidim_attr_dataset in file: test/data/attrs_edge_cases.h5
+26	1	1
 
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR[]);

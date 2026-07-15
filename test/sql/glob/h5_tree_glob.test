@@ -35,14 +35,23 @@ FROM h5_tree('test/data/glob/glob_with_attrs_*.h5');
 ----
 6	2
 
-statement error
-SELECT *
+query III
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (
+        WHERE path = '/multidim_attr_dataset'
+          AND attr_2d = [[0, 1, 2], [3, 4, 5]]::INTEGER[][]
+    ),
+    COUNT(*) FILTER (
+        WHERE path = '/empty_group'
+          AND attr_2d IS NULL
+    )
 FROM h5_tree(
     'test/data/glob/glob_attrs_edge_*.h5',
-    h5_attr('attr_2d', [0, 0, 0]::INTEGER[])
+    h5_attr('attr_2d', NULL::INTEGER[][])
 );
 ----
-<REGEX>:.*Attribute 'attr_2d' has unsupported multidimensional dataspace \(only 1D arrays supported\) in object: /multidim_attr_dataset in file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)glob[\\\\/]glob_attrs_edge_1\.h5.*
+46	2	2
 
 query II
 SELECT
@@ -50,7 +59,7 @@ SELECT
     COUNT(*) FILTER (WHERE path = '/multidim_attr_dataset')
 FROM h5_tree('test/data/glob/glob_attrs_edge_*.h5');
 ----
-32	2
+46	2
 
 query I
 SELECT COUNT(*)

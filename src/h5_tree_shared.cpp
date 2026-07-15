@@ -140,11 +140,11 @@ static bool H5TreeTypePreservesRawStringBytes(const LogicalType &type) {
 		return true;
 	case LogicalTypeId::LIST: {
 		auto &child_type = ListType::GetChildType(type);
-		return child_type.id() == LogicalTypeId::VARIANT || child_type.id() == LogicalTypeId::BLOB;
+		return H5TreeTypePreservesRawStringBytes(child_type);
 	}
 	case LogicalTypeId::ARRAY: {
 		auto &child_type = ArrayType::GetChildType(type);
-		return child_type.id() == LogicalTypeId::VARIANT || child_type.id() == LogicalTypeId::BLOB;
+		return H5TreeTypePreservesRawStringBytes(child_type);
 	}
 	default:
 		return false;

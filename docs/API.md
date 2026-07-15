@@ -309,9 +309,10 @@ Reads attributes from an object or the file root.
 
 **Type Support:**
 - Numeric scalars and string scalars
-- Simple 1D numeric and string arrays, returned as DuckDB `LIST`s
+- Simple numeric and string attribute dataspaces up to rank 4, returned as nested DuckDB `LIST`s
 - HDF5 `H5T_ARRAY`-typed attributes are supported when they are 1D
 - Empty numeric and string attribute arrays are supported
+- `H5S_NULL` attributes are returned as typed `NULL`
 
 **Examples:**
 ```sql
@@ -662,9 +663,10 @@ Creates a projected-attribute definition for use with `h5_tree()` or `h5_ls()`.
 **Supported attribute forms:**
 - numeric and string scalars
 - simple 1D numeric and string arrays
+- simple multidimensional numeric and string attribute dataspaces up to rank 4
 - 1D `H5T_ARRAY`-typed attributes
 - empty numeric and string arrays
-- multidimensional attribute dataspaces are not supported
+- `H5S_NULL` attributes as typed `NULL`
 
 **Example:**
 ```sql
@@ -996,7 +998,7 @@ All functions provide clear error messages for common issues:
 3. **Opaque, bitfield, reference, time-like, and non-string variable-length HDF5 type classes** are not supported
 4. **Datasets with >4 dimensions** are not supported
 5. **Multi-dimensional string datasets** are not supported
-6. **Attribute multidimensional dataspaces** are not supported (only scalar and 1D)
+6. **Attribute dataspaces with >4 dimensions** are not supported
 
 ---
 
