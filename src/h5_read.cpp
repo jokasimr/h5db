@@ -333,11 +333,10 @@ struct H5ReadMultiFileGlobalState : public GlobalTableFunctionState {
 	vector<idx_t> empty_output_positions;
 	shared_ptr<H5ReadGlobalState> current_file;
 	idx_t current_file_idx = 0;
-	idx_t max_threads = GlobalTableFunctionState::MAX_THREADS;
 	std::mutex current_file_lock;
 
 	idx_t MaxThreads() const override {
-		return max_threads;
+		return GlobalTableFunctionState::MAX_THREADS;
 	}
 };
 
@@ -1428,25 +1427,6 @@ static idx_t EstimateScanBatchSize(const vector<ColumnSpec> &columns, const vect
 		return STANDARD_VECTOR_SIZE;
 	}
 	return MinValue<idx_t>(target_batch_size_bytes / estimated_output_bytes_per_row, STANDARD_VECTOR_SIZE);
-}
-
-static bool H5ReadHasWideFixedArrayProjection(const vector<ColumnSpec> &columns,
-                                              const vector<column_t> &data_column_ids) {
-	idx_t projected_fixed_array_row_bytes = 0;
-	for (auto column_id : data_column_ids) {
-		auto regular_spec = std::get_if<RegularColumnSpec>(&columns[column_id]);
-		if (!regular_spec || regular_spec->is_string || regular_spec->column_type.id() != LogicalTypeId::ARRAY) {
-			continue;
-		}
-
-		// Each fixed ARRAY output vector eagerly allocates STANDARD_VECTOR_SIZE rows.
-		// Return before the sum can overflow; only the threshold comparison matters.
-		if (regular_spec->output_bytes_per_row >= H5_READ_WIDE_ROW_THRESHOLD_BYTES - projected_fixed_array_row_bytes) {
-			return true;
-		}
-		projected_fixed_array_row_bytes += regular_spec->output_bytes_per_row;
-	}
-	return false;
 }
 
 static H5ReadSingleFileBindView GetSingleFileBindView(const H5ReadBindData &bind_data, idx_t file_idx) {
@@ -2635,16 +2615,6 @@ static unique_ptr<GlobalTableFunctionState> H5ReadInit(ClientContext &context, T
 	BuildH5ReadProjectionLayout(bind_data, input.column_ids, result->data_column_ids,
 	                            result->data_output_column_positions, result->filename_output_positions,
 	                            result->empty_output_positions);
-	// Avoid multiplying a large eager fixed-ARRAY allocation across workers for tiny inputs.
-	if (H5ReadHasWideFixedArrayProjection(GetCanonicalColumns(bind_data), result->data_column_ids)) {
-		idx_t max_num_rows = 0;
-		for (const auto &file_bind_data : bind_data.file_bind_data) {
-			max_num_rows = MaxValue<idx_t>(max_num_rows, file_bind_data.num_rows);
-		}
-		if (max_num_rows < STANDARD_VECTOR_SIZE) {
-			result->max_threads = 1;
-		}
-	}
 	D_ASSERT(!bind_data.file_bind_data.empty());
 	SetCurrentH5ReadFile(context, bind_data, *result, 0);
 	return result;

@@ -240,8 +240,7 @@ DROP TABLE extreme_tmp;
 statement ok
 RESET memory_limit;
 
-# LIST fallback columns no longer inherit the fixed-ARRAY single-thread
-# workaround. Exercise their shared cache with several output batches.
+# LIST fallback columns should scan correctly with several output batches.
 statement ok
 SET threads=8;
 
@@ -255,9 +254,6 @@ FROM h5_read('test/data/wide_few_rows.h5', '/list_threaded');
 100	300.0	300.0
 
 # Ordered sink path should still work on the wide-row tiny-input shape.
-# The three fixed ARRAY columns allocate about 192 MiB per worker, so the
-# fixed-ARRAY guard must avoid multiplying that allocation across eight workers.
-
 statement ok
 CREATE TEMP TABLE wide_tmp AS
 SELECT * FROM h5_read(
