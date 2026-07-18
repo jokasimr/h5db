@@ -10,7 +10,6 @@
 #else
 #include "duckdb/common/types/vector.hpp"
 #endif
-#include <cstring>
 
 namespace duckdb {
 
@@ -56,15 +55,11 @@ bool H5TreeIsProjectedAttributeArgument(const Value &input) {
 	return tag == "__attr__" || tag == "__attr_all__";
 }
 
-static H5TreeObjectIdentity H5TreeIdentityFromToken(unsigned long fileno, const H5O_token_t &token) {
-	H5TreeObjectIdentity identity;
-	identity.fileno = fileno;
-	std::memcpy(identity.token.data(), &token, sizeof(H5O_token_t));
-	return identity;
-}
-
 static H5TreeObjectIdentity H5TreeIdentityFromObjectInfo(const H5O_info2_t &info) {
-	return H5TreeIdentityFromToken(info.fileno, info.token);
+	H5TreeObjectIdentity identity;
+	identity.fileno = info.fileno;
+	identity.token = info.token;
+	return identity;
 }
 
 static void H5TreeWriteOptionalString(Vector &vector, idx_t row_idx, const std::optional<std::string> &value) {
@@ -320,60 +315,59 @@ std::optional<std::string> H5TreeTypeName(H5TreeEntryType type) {
 	}
 }
 
-bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type) {
+static bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type) {
 	return type == H5TreeEntryType::GROUP || type == H5TreeEntryType::DATASET || type == H5TreeEntryType::DATATYPE;
 }
 
+H5TreeReadOptions H5TreeReadAll(idx_t projected_attribute_count) {
+	H5TreeReadOptions result;
+	result.read_type = true;
+	result.read_dtype = true;
+	result.read_shape = true;
+	result.projected_attribute_ids.reserve(projected_attribute_count);
+	for (idx_t i = 0; i < projected_attribute_count; i++) {
+		result.projected_attribute_ids.push_back(i);
+	}
+	return result;
+}
+
 H5TreeFileReader::H5TreeFileReader(ClientContext &context_p, const std::string &filename_p, bool swmr,
-                                   const vector<H5TreeProjectedAttributeSpec> &projected_attributes_p)
-    : context(context_p), filename(filename_p), projected_attributes(projected_attributes_p) {
+                                   const vector<H5TreeProjectedAttributeSpec> &projected_attributes_p,
+                                   H5TreeReadOptions read_options_p)
+    : filename(filename_p), projected_attributes(projected_attributes_p), read_options(std::move(read_options_p)) {
 	H5ErrorSuppressor suppress;
-	file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr);
+	file = H5FileHandle(&context_p, filename.c_str(), H5F_ACC_RDONLY, swmr);
 	if (!file.is_valid()) {
 		throw IOException(FormatRemoteFileError("Failed to open HDF5 file", filename));
 	}
-	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
-	InitializeRootIdentity();
 }
 
-void H5TreeFileReader::InitializeRootIdentity() {
+H5TreeObjectIdentity H5TreeFileReader::GetRootIdentity() {
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	H5ErrorSuppressor suppress;
 	H5O_info2_t root_info;
 	if (H5Oget_info3(file, &root_info, H5O_INFO_BASIC) < 0) {
 		throw IOException(FormatRemoteFileError("Failed to inspect HDF5 root object", filename));
 	}
-	root_identity = H5TreeIdentityFromObjectInfo(root_info);
+	return H5TreeIdentityFromObjectInfo(root_info);
 }
 
-H5ObjectHandle H5TreeFileReader::OpenObjectByIdentity(const H5TreeObjectIdentity &identity, const std::string &path) {
-	if (identity.fileno == root_identity.fileno) {
-		H5O_token_t token;
-		std::memcpy(&token, identity.token.data(), sizeof(H5O_token_t));
-		auto object_id = H5Oopen_by_token(file, token);
-		if (object_id >= 0) {
-			return H5ObjectHandle::TakeOwnershipOf(object_id);
-		}
+bool H5TreeFileReader::SameObject(const H5TreeObjectIdentity &lhs, const H5TreeObjectIdentity &rhs) const {
+	if (lhs.fileno != rhs.fileno) {
+		return false;
 	}
-	return H5ObjectHandle(file, path.c_str());
+	int comparison;
+	if (H5Otoken_cmp(file, &lhs.token, &rhs.token, &comparison) < 0) {
+		throw IOException(FormatRemoteFileError("Failed to compare HDF5 object identities", filename));
+	}
+	return comparison == 0;
 }
 
-H5ObjectHandle H5TreeFileReader::OpenObject(const H5TreeObjectIdentity &identity, const std::string &path,
-                                            hid_t parent_loc, const char *link_name) {
+H5ObjectHandle H5TreeFileReader::OpenObject(const std::string &path, hid_t parent_loc, const char *link_name) {
 	if (parent_loc >= 0 && link_name) {
 		return H5ObjectHandle(parent_loc, link_name);
 	}
-	return OpenObjectByIdentity(identity, path);
-}
-
-bool H5TreeFileReader::ResolveObjectInfo(H5O_info2_t &info, const std::optional<H5TreeObjectIdentity> &identity,
-                                         const std::string &path, hid_t parent_loc, const char *link_name) {
-	if (parent_loc >= 0 && link_name) {
-		return H5Oget_info_by_name3(parent_loc, link_name, &info, H5O_INFO_BASIC, H5P_DEFAULT) >= 0;
-	}
-	if (identity) {
-		auto object = OpenObjectByIdentity(*identity, path);
-		return object.is_valid() && H5Oget_info3(object, &info, H5O_INFO_BASIC) >= 0;
-	}
-	return H5Oget_info_by_name3(file, path.c_str(), &info, H5O_INFO_BASIC, H5P_DEFAULT) >= 0;
+	return H5ObjectHandle(file, path.c_str());
 }
 
 H5TreeEntryType H5TreeFileReader::EntryTypeFromObjectInfo(const H5O_info2_t &info) {
@@ -389,52 +383,42 @@ H5TreeEntryType H5TreeFileReader::EntryTypeFromObjectInfo(const H5O_info2_t &inf
 	}
 }
 
-H5TreeResolvedEntry H5TreeFileReader::ResolveEntry(const std::string &path, const H5L_info2_t &link_info,
-                                                   hid_t parent_loc, const char *link_name) {
+H5TreeResolvedEntry H5TreeFileReader::ResolveEntry(const H5L_info2_t &link_info, hid_t parent_loc,
+                                                   const char *link_name) {
 	H5TreeResolvedEntry result;
-	result.is_soft_link = link_info.type == H5L_TYPE_SOFT;
-
 	if (link_info.type == H5L_TYPE_EXTERNAL) {
 		result.type_kind = H5TreeEntryType::EXTERNAL;
 		return result;
 	}
 
-	if (link_info.type == H5L_TYPE_HARD) {
-		result.identity = H5TreeIdentityFromToken(root_identity.fileno, link_info.u.token);
-	}
-
 	H5O_info2_t info;
-	if (!ResolveObjectInfo(info, result.identity, path, parent_loc, link_name)) {
+	if (H5Oget_info_by_name3(parent_loc, link_name, &info, H5O_INFO_BASIC, H5P_DEFAULT) < 0) {
 		result.type_kind = H5TreeEntryType::LINK;
-		result.identity.reset();
 		return result;
 	}
 	result.identity = H5TreeIdentityFromObjectInfo(info);
 	result.type_kind = EntryTypeFromObjectInfo(info);
-
-	if (result.type_kind == H5TreeEntryType::GROUP && result.identity) {
-		result.traversable_group = true;
-	}
-
 	return result;
 }
 
 void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEntryType type_kind,
-                                                        const H5TreeObjectIdentity &identity, const std::string &path,
-                                                        hid_t parent_loc, const char *link_name) {
-	auto need_dataset_metadata = type_kind == H5TreeEntryType::DATASET;
-	auto need_projected_attributes = !projected_attributes.empty() && H5TreeCanHaveProjectedAttributes(type_kind);
+                                                        const std::string &path, hid_t parent_loc,
+                                                        const char *link_name) {
+	auto need_dataset_metadata =
+	    type_kind == H5TreeEntryType::DATASET && (read_options.read_dtype || read_options.read_shape);
+	auto need_projected_attributes =
+	    !read_options.projected_attribute_ids.empty() && H5TreeCanHaveProjectedAttributes(type_kind);
 	if (!need_dataset_metadata && !need_projected_attributes) {
 		return;
 	}
 
 	H5ErrorSuppressor suppress;
-	auto object = OpenObject(identity, path, parent_loc, link_name);
+	auto object = OpenObject(path, parent_loc, link_name);
 	if (!object.is_valid()) {
 		throw IOException(FormatHDF5ObjectError("Failed to open object during tree traversal", filename, path));
 	}
 
-	if (need_dataset_metadata) {
+	if (need_dataset_metadata && read_options.read_dtype) {
 		hid_t type_id = H5Dget_type(object);
 		if (type_id < 0) {
 			throw IOException(
@@ -442,11 +426,15 @@ void H5TreeFileReader::PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEn
 		}
 		H5TypeHandle type = H5TypeHandle::TakeOwnershipOf(type_id);
 		row.dtype = H5TypeToString(type);
+	}
+	if (need_dataset_metadata && read_options.read_shape) {
 		row.shape = H5GetShape(object);
 	}
 
 	if (need_projected_attributes) {
-		for (idx_t i = 0; i < projected_attributes.size(); i++) {
+		for (auto i : read_options.projected_attribute_ids) {
+			D_ASSERT(i < projected_attributes.size());
+			D_ASSERT(i < row.projected_values.size());
 			try {
 				if (projected_attributes[i].all_attributes) {
 					H5TreePopulateAllAttributesValue(row.projected_values[i], object);
@@ -506,15 +494,19 @@ static herr_t H5TreeListCallback(hid_t parent_loc, const char *name, const H5L_i
 	auto &data = *reinterpret_cast<H5TreeListIterData *>(op_data);
 	try {
 		auto path = H5TreeJoinChildPath(data.group_path, name);
-		auto resolved = data.reader->ResolveEntry(path, *info, parent_loc, name);
 		H5TreeNamedRow named_row;
 		named_row.name = name;
 		named_row.row.path = path;
-		named_row.row.type = H5TreeTypeName(resolved.type_kind);
-		named_row.row.projected_values.resize(data.reader->GetProjectedAttributes().size());
-		if (resolved.identity) {
-			data.reader->PopulateRowMetadataAndAttributes(named_row.row, resolved.type_kind, *resolved.identity, path,
-			                                              parent_loc, name);
+		if (data.reader->NeedsEntryResolution()) {
+			auto resolved = data.reader->ResolveEntry(*info, parent_loc, name);
+			if (data.reader->ReadsType()) {
+				named_row.row.type = H5TreeTypeName(resolved.type_kind);
+			}
+			data.reader->InitializeProjectedValues(named_row.row);
+			if (resolved.identity) {
+				data.reader->PopulateRowMetadataAndAttributes(named_row.row, resolved.type_kind, path, parent_loc,
+				                                              name);
+			}
 		}
 		data.rows->push_back(std::move(named_row));
 		return data.max_rows > 0 && data.rows->size() >= data.max_rows ? 1 : 0;
@@ -540,7 +532,18 @@ static bool H5TreeListEntriesInternal(H5TreeFileReader &reader, const std::strin
 		}
 		throw IOException(FormatHDF5ObjectError("Failed to list group entries", reader.GetFilename(), group_path));
 	}
-	return status == 0;
+	if (status > 0) {
+		// A positive callback result means that the output batch is full, but it does not say whether the
+		// callback stopped on the group's final link. Resuming H5Literate_by_name2 at idx == nlinks is an
+		// HDF5 error, so explicitly detect an exact-full final batch.
+		H5G_info_t group_info;
+		if (H5Gget_info_by_name(reader.GetFileHandle(), group_path.c_str(), &group_info, H5P_DEFAULT) < 0) {
+			throw IOException(
+			    FormatHDF5ObjectError("Failed to inspect group during listing", reader.GetFilename(), group_path));
+		}
+		return idx >= group_info.nlinks;
+	}
+	return true;
 }
 
 void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &group_path,

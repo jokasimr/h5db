@@ -43,7 +43,7 @@ To ensure test data exists (generate only if missing):
 | `endian_attrs.h5` | `create_endian_attrs_test.py` | 4 KB | Numeric scalar, list, and `H5T_ARRAY` attributes with explicit byte order |
 | `invalid_string_array_attrs.h5` | `create_invalid_string_array_attrs_test.py` | 4 KB | Invalid string-array attribute coverage for `h5_attributes`/`h5_attr` |
 | `root_attrs.h5` | `create_root_attrs_test.py` | 4 KB | Root attribute handling plus numeric/string array attrs, including empty arrays |
-| `empty_scalar.h5`, `h5_read_multifile_empty_*.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets, including multi-file row-count edge cases |
+| `empty_scalar.h5`, `h5_read_multifile_empty_*.h5`, `h5_ls_multifile_empty.h5` | `create_empty_scalar_test.py` | 2 KB | Empty and scalar datasets, including multi-file row-count and namespace edge cases |
 | `h5_read_string_edge_cases.h5` | `create_h5_read_string_edge_cases.py` | 13 KB | String padding and invalid-text dataset coverage for `h5_read` |
 | `statement_cache_*.h5.gz` | `create_statement_cache_test.py` | 1 KB | Compressed fixtures for prepared-statement rebinding tests |
 | `names_edge_cases.h5` | `create_names_edge_cases.py` | 2 KB | Dataset names with spaces/unicode |

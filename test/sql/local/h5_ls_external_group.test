@@ -1,0 +1,19 @@
+# name: test/sql/local/h5_ls_external_group.test
+# description: h5_ls resolves external-group children relative to their target file
+# group: [local]
+
+require h5db
+
+# The callback's parent identifier belongs to the external target file here;
+# resolving and opening children must be relative to that identifier.
+query TTTTI
+SELECT path, type, dtype, shape, attr
+FROM h5_ls(
+    'test/data/links.h5',
+    '/external_group_link',
+    h5_attr('attr', -1::INTEGER)
+)
+ORDER BY path;
+----
+/external_group_link/external_data	dataset	int16	[3]	11
+/external_group_link/nested	group	NULL	NULL	-1

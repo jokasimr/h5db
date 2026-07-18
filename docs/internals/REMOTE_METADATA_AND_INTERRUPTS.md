@@ -5,6 +5,8 @@
 > - `h5_tree` now uses explicit resumable `H5Literate_by_name2` traversal and
 >   returns rows directly from the DuckDB execution thread
 > - `h5_ls` now exists as the shallow-listing API discussed below
+> - table `h5_tree` and `h5_ls` now make HDF5 metadata and attribute reads
+>   projection-aware
 > - the interruptibility discussion remains a design note; transport details in
 >   DuckDB-backed remote filesystems may change across DuckDB versions
 
@@ -41,37 +43,50 @@ The backing object is:
 
 ### What `h5_tree` does today
 
-`h5_tree` performs a full metadata walk over the namespace and opens datasets to
-fetch `dtype` and `shape`. It traverses one group at a time with resumable
-`H5Literate_by_name2` calls and returns rows in DuckDB-sized batches. Each
-iteration slice holds the global HDF5 mutex only while it is using HDF5; the
-mutex is released before the batch is returned to DuckDB.
+`h5_tree` performs a recursive namespace walk. It traverses one group at a time
+with resumable `H5Literate_by_name2` calls and returns rows in DuckDB-sized
+batches. Each iteration slice holds the global HDF5 mutex only while it is using
+HDF5; the mutex is released before the batch is returned to DuckDB.
+
+Every recursive scan must:
 
 - open the file
 - traverse the namespace from `/`
-- for each dataset:
-  - open the dataset
-  - fetch type
-  - fetch shape
+- resolve local links to determine their object type and identity
+- identify groups, avoid cycles, and descend into the groups it finds
+
+Additional work depends on DuckDB's projected scan columns:
+
+- `dtype` opens datasets and reads their datatypes only when required
+- `shape` opens datasets and reads their dataspaces only when required
+- each `h5_attr(...)` argument is read only when its output column is required
+- columns used only by residual filters are still required and are therefore
+  read
+- a count-only scan uses a constant-`NULL` empty virtual column to carry row
+  cardinality instead of forcing any real HDF5-backed output column
 
 This means:
 
-- the query is still dominated by remote metadata latency
-- dataset metadata amplification is still part of the `h5_tree` contract today
+- recursive traversal can still be dominated by remote object-resolution
+  latency
+- object resolution during recursive traversal remains part of `h5_tree`
+- unrequested dataset metadata and projected attributes add no HDF5 work
 - resumable batches allow `LIMIT` and other early-stopping plans to avoid walking
   the entire namespace
 - batching improves responsiveness, but it does not make first-run remote
   metadata exploration cheap on large scattered files
 
-DuckDB projection pushdown currently avoids materializing unrequested output
-vectors, but it does not yet reduce HDF5 metadata work in `h5_tree`: dataset
-`dtype` and `shape` are still read for every dataset, and every `h5_attr(...)`
-argument is still populated even when its output column is not needed by the
-query. Making metadata collection projection-aware is a separate optimization.
+Table `h5_ls` has a cheaper path because it does not recurse. It always opens
+and validates the requested group, but a path-only or count-only scan can emit
+its links without resolving each child object. Selecting `type`, `dtype`,
+`shape`, or projected attributes performs the resolution and metadata work
+needed by those columns. Scalar `h5_ls` constructs its complete map and remains
+eager.
 
 ### What was observed on the real file
 
-A bounded 20-second probe of the real DuckDB path:
+A bounded 20-second probe made before metadata reads became projection-aware
+used this query:
 
 ```sql
 SELECT COUNT(*) FROM h5_tree('s3://...');
@@ -97,6 +112,11 @@ The first `GET` ranges were at widely scattered offsets:
 - `54.31 GiB`
 - `54.61 GiB`
 
+These request counts are a historical baseline, not the expected request count
+for the current `COUNT(*)` query. The current implementation skips dataset
+`dtype`, `shape`, and attribute reads for that query. The observation remains
+useful because it shows how widely the file's namespace metadata is scattered.
+
 This is the important fact:
 
 - the query is latency-bound by scattered metadata lookups across a huge file
@@ -106,53 +126,58 @@ In other words, the dominant problem is not "too much data transferred". It is "
 
 ### What this means
 
-For files like this, the current `h5_tree` contract is fundamentally expensive on remote storage:
+For files like this, recursive traversal can remain expensive on remote storage
+even after unrequested fields are removed:
 
 - large file
 - scattered metadata
-- full object walk
-- per-dataset metadata inspection
+- recursive object resolution
 - synchronous execution
 
-There is no realistic implementation trick inside the current semantics that will make first-run remote `h5_tree` cheap on these files.
+Selecting `dtype`, `shape`, or projected attributes adds the corresponding
+per-object inspection. A full-row `FROM h5_tree(...)` query selects all of those
+fields and therefore performs the full metadata work. A query such as
+`SELECT path FROM h5_tree(...)` avoids that additional work, but it still has to
+resolve objects to discover the recursive structure.
 
 ## Reasonable Solutions For Slow Remote `h5_tree`
 
 ### Conclusion
 
-Yes, there is a reasonable solution, but it is **not** "make the current full-fidelity `h5_tree` always fast remotely".
+The implemented solution is to make metadata collection follow ordinary SQL
+projection and to provide `h5_ls` for shallow exploration. Users can request a
+full metadata result when needed without paying for those fields in a narrower
+query.
 
-The reasonable solution is:
+### Recommended usage
 
-1. keep the current full-fidelity `h5_tree` semantics for users who explicitly want them
-2. add a cheaper remote-oriented metadata mode or function with reduced semantics
+Project only the columns needed by the query:
 
-### Recommended direction
+```sql
+SELECT path, type
+FROM h5_tree('s3://bucket/file.h5');
+```
 
-Add a cheaper tree/listing API that avoids opening every dataset to fetch `dtype` and `shape`.
+This still walks the complete recursive namespace, but it does not open every
+dataset for `dtype` or `shape`.
 
-Examples of acceptable designs:
+When recursive discovery is unnecessary, list one group and project only its
+paths:
 
-1. Add options to `h5_tree`
-   - `include_dtype := false`
-   - `include_shape := false`
-   - `max_depth := N`
-   - `shallow := true`
+```sql
+SELECT path
+FROM h5_ls('s3://bucket/file.h5', '/entry');
+```
 
-2. Add a separate function
-   - `h5_ls(...)` now fills part of this role as a shallow immediate-child
-     listing API
-   - it still returns the full row shape (`path`, `type`, `dtype`, `shape`, and
-     optional projected attributes), so it is cheaper mainly because it is
-     shallow, not because it is metadata-light
-   - a future lighter-weight mode could still choose to omit `dtype`/`shape`
+This can avoid per-child resolution entirely. `LIMIT` can stop either table
+function at a batch boundary when the surrounding plan permits early stopping.
+An `ORDER BY` generally requires consuming the complete input before returning
+ordered rows.
 
-3. Add selective traversal
-   - filter to a subtree
-   - filter to groups only
-   - filter to datasets only
-
-These are reasonable because they change the amount of required HDF5 metadata work, not just the implementation details.
+Path and type filters are currently residual SQL filters; they do not prune the
+recursive `h5_tree` walk. If recursive object resolution itself remains too
+expensive, possible future APIs include a maximum depth, an explicit subtree
+root, or traversal restricted to selected object kinds.
 
 ### What is likely not enough
 
@@ -163,23 +188,28 @@ The following may help repeated queries, but they do not solve the first-run pro
 - minor VFD-level request coalescing improvements
 - planner changes
 
-Those are worthwhile, but they do not change the fact that the query semantics require many remote metadata lookups.
+Those are worthwhile, but they do not eliminate the remote metadata lookups
+required by recursive object resolution.
 
 ### Recommendation
 
-For remote usability, prefer a two-tier API:
+For remote usability, choose among these execution shapes deliberately:
 
 1. `h5_tree`
-   - full fidelity
-   - potentially expensive remotely
+   - recursive and cycle-safe
+   - always resolves namespace objects, but reads only projected metadata and
+     attributes
 
-2. `h5_ls`
+2. table `h5_ls`
    - shallow listing
-   - intended for exploratory use over remote storage
-   - still not a substitute for a future truly metadata-light listing mode if
-     first-run remote latency becomes a bigger product concern
+   - can avoid child resolution in path-only and count-only queries
 
-That is the cleanest way to make remote metadata exploration practical without weakening the current API contract unexpectedly.
+3. scalar `h5_ls`
+   - returns one complete map value
+   - eagerly reads all standard fields and declared projected attributes
+
+This uses normal SQL projection rather than function-specific flags to control
+metadata cost.
 
 ## Interruptibility
 
@@ -248,12 +278,15 @@ The key property is:
 
 ## Recommended `h5db` follow-up changes
 
-Even with the main fix in `httpfs`, `h5db` should still improve its own cooperative checks:
+Table `h5_tree` already checks for interruption before scans, between traversal
+slices, and inside its link callback. Table `h5_ls` checks before each batch.
+Further work should focus on operations that cannot currently observe an
+interrupt while they are blocked:
 
-1. Check `context.interrupted` before entering expensive HDF5 operations.
-2. Consider making `WaitForFetchComplete(...)` interruptible only if transport-layer cancellation lands first. The
+1. Consider making `WaitForFetchComplete(...)` interruptible only if transport-layer cancellation lands first. The
    current repository intentionally leaves this wait blocking.
-3. When a remote HDF5 call fails because the underlying request was cancelled, translate that to `InterruptException`, not `IOException`.
+2. When a remote HDF5 call fails because the underlying request was cancelled,
+   translate that to `InterruptException`, not `IOException`.
 
 These are smaller changes, but they improve responsiveness and make cancellation semantics cleaner.
 
@@ -274,8 +307,11 @@ These are brittle and are likely to create correctness or maintenance problems.
 
 Reasonable solution:
 
-- yes, but only by adding a cheaper metadata-listing mode/function
-- not by expecting the current full-fidelity remote traversal to become cheap on huge scattered files
+- project only the metadata columns the query needs
+- use table `h5_ls` for shallow exploration; path-only and count-only scans can
+  avoid resolving children
+- recursive `h5_tree` still has to resolve objects and can therefore remain
+  expensive on huge files with scattered metadata
 
 ### Interruptibility
 
@@ -284,6 +320,6 @@ Reasonable solution:
 - yes
 - implement in-flight cancellation in the underlying DuckDB remote filesystem
 - mark user-cancelled requests as non-retryable
-- add a few cooperative interrupt checks in `h5db`
+- retain cooperative checks between HDF5 operations in `h5db`
 
 That combination is the cleanest path that is both maintainable and technically sound.

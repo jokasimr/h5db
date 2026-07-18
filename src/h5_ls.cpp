@@ -46,14 +46,16 @@ struct H5LsOutputColumn {
 struct H5LsScanLayout {
 	vector<H5LsOutputColumn> projected_columns;
 	vector<idx_t> filename_output_idxs;
+	vector<idx_t> empty_output_idxs;
 	std::optional<idx_t> shape_output_idx;
+	H5TreeReadOptions read_options;
 };
 
 class H5LsFileScanner {
 public:
 	H5LsFileScanner(ClientContext &context, const string &filename, const string &group_path_p, bool swmr,
-	                const vector<H5TreeProjectedAttributeSpec> &projected_attributes)
-	    : group_path(group_path_p), reader(context, filename, swmr, projected_attributes) {
+	                const vector<H5TreeProjectedAttributeSpec> &projected_attributes, H5TreeReadOptions read_options)
+	    : group_path(group_path_p), reader(context, filename, swmr, projected_attributes, std::move(read_options)) {
 		H5TreeValidateListGroup(reader, group_path);
 	}
 
@@ -122,10 +124,11 @@ static bool H5LsOutputHasColumnName(const vector<string> &names, const string &c
 
 static virtual_column_map_t H5GetFilenameVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
 	virtual_column_map_t result;
-	if (bind_data_p && bind_data_p->Cast<H5LsBindData>().visible_filename_idx.has_value()) {
-		return result;
+	if (!bind_data_p || !bind_data_p->Cast<H5LsBindData>().visible_filename_idx.has_value()) {
+		result.insert(
+		    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
 	}
-	result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
+	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
 	return result;
 }
 
@@ -146,16 +149,48 @@ static void H5LsPopulateFilenameColumns(const string &filename, const vector<idx
 	}
 }
 
+static void H5LsPopulateEmptyColumns(const vector<idx_t> &empty_output_idxs, DataChunk &output) {
+	if (output.size() == 0) {
+		return;
+	}
+	for (auto output_idx : empty_output_idxs) {
+		auto &vector = output.data[output_idx];
+		vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::SetNull(vector, true);
+	}
+}
+
 static H5LsScanLayout H5LsBuildOutputLayout(const H5LsBindData &bind_data, const vector<column_t> &column_ids) {
 	H5LsScanLayout result;
 	for (idx_t output_idx = 0; output_idx < column_ids.size(); output_idx++) {
 		auto column_id = column_ids[output_idx];
+		if (column_id == COLUMN_IDENTIFIER_EMPTY) {
+			result.empty_output_idxs.push_back(output_idx);
+			continue;
+		}
 		if (H5LsIsFilenameColumn(bind_data, column_id)) {
 			result.filename_output_idxs.push_back(output_idx);
 			continue;
 		}
-		if (column_id == 3) {
+		if (column_id >= 4 + bind_data.projected_attributes.size()) {
+			throw InternalException("h5_ls column id %llu out of range", column_id);
+		}
+		switch (column_id) {
+		case 0:
+			break;
+		case 1:
+			result.read_options.read_type = true;
+			break;
+		case 2:
+			result.read_options.read_dtype = true;
+			break;
+		case 3:
+			result.read_options.read_shape = true;
 			result.shape_output_idx = output_idx;
+			break;
+		default:
+			result.read_options.projected_attribute_ids.push_back(column_id - 4);
+			break;
 		}
 		result.projected_columns.push_back({output_idx, column_id});
 	}
@@ -276,8 +311,9 @@ static void H5LsOpenFileScanner(ClientContext &context, const H5LsBindData &bind
 	ThrowIfInterrupted(context);
 	D_ASSERT(file_idx < bind_data.filenames.size());
 	state.file_idx = file_idx;
-	state.scanner = make_uniq<H5LsFileScanner>(context, bind_data.filenames[file_idx], bind_data.group_path,
-	                                           bind_data.swmr, bind_data.projected_attributes);
+	state.scanner =
+	    make_uniq<H5LsFileScanner>(context, bind_data.filenames[file_idx], bind_data.group_path, bind_data.swmr,
+	                               bind_data.projected_attributes, state.output_layout.read_options);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5LsInit(ClientContext &context, TableFunctionInitInput &input) {
@@ -346,6 +382,7 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	}
 	H5LsPopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs,
 	                            output);
+	H5LsPopulateEmptyColumns(gstate.output_layout.empty_output_idxs, output);
 }
 
 static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, ScalarFunction &bound_function,
@@ -428,7 +465,8 @@ static void H5LsScalarWriteFileRows(ClientContext &context, const H5LsScalarFile
 		return;
 	}
 	ThrowIfInterrupted(context);
-	H5TreeFileReader reader(context, file_rows.filename, bind_data.swmr, bind_data.projected_attributes);
+	H5TreeFileReader reader(context, file_rows.filename, bind_data.swmr, bind_data.projected_attributes,
+	                        H5TreeReadAll(bind_data.projected_attributes.size()));
 	for (auto row_idx : file_rows.row_idxs) {
 		auto path_idx = path_data.sel->get_index(row_idx);
 		H5LsScalarWriteRow(reader, path_ptr[path_idx], result, row_idx, bind_data.projected_attributes, names,
@@ -469,7 +507,8 @@ static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 			return;
 		}
 		auto filename = filename_ptr[filename_idx].GetString();
-		H5TreeFileReader reader(context, filename, bind_data.swmr, bind_data.projected_attributes);
+		H5TreeFileReader reader(context, filename, bind_data.swmr, bind_data.projected_attributes,
+		                        H5TreeReadAll(bind_data.projected_attributes.size()));
 		H5LsScalarWriteRow(reader, path_ptr[path_idx], result, 0, bind_data.projected_attributes, names, return_types);
 		return;
 	}
@@ -534,8 +573,6 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 	h5_ls_table_function.varargs = LogicalType::ANY;
 	h5_ls_table_function.named_parameters["filename"] = LogicalType::ANY;
 	h5_ls_table_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
-	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
-	// h5_ls still intentionally collects full child metadata for each emitted row.
 	h5_ls_table_function.projection_pushdown = true;
 	h5_ls_table_function.pushdown_complex_filter = H5LsPushdownComplexFilter;
 	h5_ls_table_function.get_virtual_columns = H5GetFilenameVirtualColumns;

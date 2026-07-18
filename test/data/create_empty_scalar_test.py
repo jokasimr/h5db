@@ -48,3 +48,8 @@ create_multifile_edge_file("h5_read_multifile_empty_a.h5", [1, 2], 10, 10)
 create_multifile_edge_file("h5_read_multifile_empty_b.h5", [], 20, None)
 create_multifile_edge_file("h5_read_multifile_empty_c.h5", [10, 20, 30], 30, 30)
 print("Created h5_read_multifile_empty_*.h5 successfully!")
+
+with h5py.File("h5_ls_multifile_empty.h5", "w"):
+    pass
+
+print("Created h5_ls_multifile_empty.h5 successfully!")

@@ -29,6 +29,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/h5_read_multifile_empty_a.h5"
   "$PROJECT_ROOT/test/data/h5_read_multifile_empty_b.h5"
   "$PROJECT_ROOT/test/data/h5_read_multifile_empty_c.h5"
+  "$PROJECT_ROOT/test/data/h5_ls_multifile_empty.h5"
   "$PROJECT_ROOT/test/data/h5_read_string_edge_cases.h5"
   "$PROJECT_ROOT/test/data/h5_read_refresh_order.h5"
   "$PROJECT_ROOT/test/data/statement_cache_initial.h5.gz"

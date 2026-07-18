@@ -2,8 +2,6 @@
 
 #include "duckdb.hpp"
 #include "h5_raii.hpp"
-#include <array>
-#include <compare>
 #include <optional>
 #include <vector>
 
@@ -21,14 +19,19 @@ struct H5TreeProjectedAttributeSpec {
 
 struct H5TreeObjectIdentity {
 	unsigned long fileno = 0;
-	std::array<unsigned char, sizeof(H5O_token_t)> token {};
-
-	auto operator<=>(const H5TreeObjectIdentity &) const = default;
+	H5O_token_t token {};
 };
 
 struct H5TreeProjectedAttributeValue {
 	bool present = false;
 	Value value;
+};
+
+struct H5TreeReadOptions {
+	bool read_type = false;
+	bool read_dtype = false;
+	bool read_shape = false;
+	vector<idx_t> projected_attribute_ids;
 };
 
 struct H5TreeRow {
@@ -42,8 +45,6 @@ struct H5TreeRow {
 struct H5TreeResolvedEntry {
 	H5TreeEntryType type_kind = H5TreeEntryType::UNKNOWN;
 	std::optional<H5TreeObjectIdentity> identity;
-	bool traversable_group = false;
-	bool is_soft_link = false;
 };
 
 struct H5TreeNamedRow {
@@ -58,54 +59,55 @@ void H5TreeBindProjectedAttributes(const std::string &function_name, const vecto
                                    vector<string> &names, vector<LogicalType> &return_types,
                                    vector<H5TreeProjectedAttributeSpec> &projected_attributes);
 std::optional<std::string> H5TreeTypeName(H5TreeEntryType type);
-bool H5TreeCanHaveProjectedAttributes(H5TreeEntryType type);
 void H5TreeWriteProjectedValue(const H5TreeRow &row, const vector<H5TreeProjectedAttributeSpec> &projected_attributes,
                                column_t column_id, Vector &vector, idx_t row_idx, idx_t &shape_offset,
                                uint64_t *shape_data);
 Value H5ReadAllAttributesMapValue(hid_t object_id);
+H5TreeReadOptions H5TreeReadAll(idx_t projected_attribute_count);
 
 class H5TreeFileReader {
 public:
 	H5TreeFileReader(ClientContext &context, const std::string &filename, bool swmr,
-	                 const vector<H5TreeProjectedAttributeSpec> &projected_attributes);
+	                 const vector<H5TreeProjectedAttributeSpec> &projected_attributes, H5TreeReadOptions read_options);
 
 	H5FileHandle &GetFileHandle() {
 		return file;
-	}
-
-	const H5TreeObjectIdentity &GetRootIdentity() const {
-		return root_identity;
 	}
 
 	const std::string &GetFilename() const {
 		return filename;
 	}
 
-	const vector<H5TreeProjectedAttributeSpec> &GetProjectedAttributes() const {
-		return projected_attributes;
+	bool ReadsType() const {
+		return read_options.read_type;
 	}
 
-	H5TreeResolvedEntry ResolveEntry(const std::string &path, const H5L_info2_t &link_info, hid_t parent_loc,
-	                                 const char *link_name);
-	void PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEntryType type_kind,
-	                                      const H5TreeObjectIdentity &identity, const std::string &path,
+	bool NeedsEntryResolution() const {
+		return read_options.read_type || read_options.read_dtype || read_options.read_shape ||
+		       !read_options.projected_attribute_ids.empty();
+	}
+
+	void InitializeProjectedValues(H5TreeRow &row) const {
+		if (!read_options.projected_attribute_ids.empty()) {
+			row.projected_values.resize(projected_attributes.size());
+		}
+	}
+
+	H5TreeObjectIdentity GetRootIdentity();
+	bool SameObject(const H5TreeObjectIdentity &lhs, const H5TreeObjectIdentity &rhs) const;
+	H5TreeResolvedEntry ResolveEntry(const H5L_info2_t &link_info, hid_t parent_loc, const char *link_name);
+	void PopulateRowMetadataAndAttributes(H5TreeRow &row, H5TreeEntryType type_kind, const std::string &path,
 	                                      hid_t parent_loc, const char *link_name);
 
 private:
-	H5ObjectHandle OpenObjectByIdentity(const H5TreeObjectIdentity &identity, const std::string &path);
-	H5ObjectHandle OpenObject(const H5TreeObjectIdentity &identity, const std::string &path, hid_t parent_loc,
-	                          const char *link_name);
-	bool ResolveObjectInfo(H5O_info2_t &info, const std::optional<H5TreeObjectIdentity> &identity,
-	                       const std::string &path, hid_t parent_loc, const char *link_name);
-	void InitializeRootIdentity();
+	H5ObjectHandle OpenObject(const std::string &path, hid_t parent_loc, const char *link_name);
 	static H5TreeEntryType EntryTypeFromObjectInfo(const H5O_info2_t &info);
 
 private:
-	ClientContext &context;
 	const std::string &filename;
 	const vector<H5TreeProjectedAttributeSpec> &projected_attributes;
+	H5TreeReadOptions read_options;
 	H5FileHandle file;
-	H5TreeObjectIdentity root_identity;
 };
 
 void H5TreeListImmediateEntries(H5TreeFileReader &reader, const std::string &group_path,

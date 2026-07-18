@@ -40,7 +40,9 @@ struct H5TreeOutputColumn {
 struct H5TreeScanLayout {
 	vector<H5TreeOutputColumn> projected_columns;
 	vector<idx_t> filename_output_idxs;
+	vector<idx_t> empty_output_idxs;
 	std::optional<idx_t> shape_output_idx;
+	H5TreeReadOptions read_options;
 };
 
 class H5TreeScanner;
@@ -83,10 +85,11 @@ static bool H5TreeOutputHasColumnName(const vector<string> &names, const string 
 
 static virtual_column_map_t H5TreeGetFilenameVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
 	virtual_column_map_t result;
-	if (bind_data_p && bind_data_p->Cast<H5TreeBindData>().visible_filename_idx.has_value()) {
-		return result;
+	if (!bind_data_p || !bind_data_p->Cast<H5TreeBindData>().visible_filename_idx.has_value()) {
+		result.insert(
+		    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
 	}
-	result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
+	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
 	return result;
 }
 
@@ -107,26 +110,58 @@ static void H5TreePopulateFilenameColumns(const string &filename, const vector<i
 	}
 }
 
+static void H5TreePopulateEmptyColumns(const vector<idx_t> &empty_output_idxs, DataChunk &output) {
+	if (output.size() == 0) {
+		return;
+	}
+	for (auto output_idx : empty_output_idxs) {
+		auto &vector = output.data[output_idx];
+		vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::SetNull(vector, true);
+	}
+}
+
 static H5TreeScanLayout H5TreeBuildOutputLayout(const H5TreeBindData &bind_data, const vector<column_t> &column_ids) {
 	H5TreeScanLayout result;
 	for (idx_t output_idx = 0; output_idx < column_ids.size(); output_idx++) {
 		auto column_id = column_ids[output_idx];
+		if (column_id == COLUMN_IDENTIFIER_EMPTY) {
+			result.empty_output_idxs.push_back(output_idx);
+			continue;
+		}
 		if (H5TreeIsFilenameColumn(bind_data, column_id)) {
 			result.filename_output_idxs.push_back(output_idx);
 			continue;
 		}
-		if (column_id == 3) {
+		if (column_id >= 4 + bind_data.projected_attributes.size()) {
+			throw InternalException("h5_tree column id %llu out of range", column_id);
+		}
+		switch (column_id) {
+		case 0:
+			break;
+		case 1:
+			result.read_options.read_type = true;
+			break;
+		case 2:
+			result.read_options.read_dtype = true;
+			break;
+		case 3:
+			result.read_options.read_shape = true;
 			result.shape_output_idx = output_idx;
+			break;
+		default:
+			result.read_options.projected_attribute_ids.push_back(column_id - 4);
+			break;
 		}
 		result.projected_columns.push_back({output_idx, column_id});
 	}
 	return result;
 }
 
-static bool H5TreeAncestryContains(const std::shared_ptr<const H5TreeAncestryNode> &ancestry,
+static bool H5TreeAncestryContains(H5TreeFileReader &reader, const std::shared_ptr<const H5TreeAncestryNode> &ancestry,
                                    const H5TreeObjectIdentity &identity) {
 	for (auto node = ancestry; node; node = node->parent) {
-		if (node->identity == identity) {
+		if (reader.SameObject(node->identity, identity)) {
 			return true;
 		}
 	}
@@ -143,8 +178,8 @@ static std::string H5TreeJoinPath(const std::string &parent, const char *name) {
 class H5TreeScanner {
 public:
 	H5TreeScanner(ClientContext &context_p, const string &filename_p, bool swmr_p,
-	              const vector<H5TreeProjectedAttributeSpec> &projected_attributes_p)
-	    : context(context_p), reader(context_p, filename_p, swmr_p, projected_attributes_p) {
+	              const vector<H5TreeProjectedAttributeSpec> &projected_attributes_p, H5TreeReadOptions read_options)
+	    : context(context_p), reader(context_p, filename_p, swmr_p, projected_attributes_p, std::move(read_options)) {
 		auto root_ancestry =
 		    std::make_shared<H5TreeAncestryNode>(H5TreeAncestryNode {reader.GetRootIdentity(), nullptr});
 		group_stack.push_back(H5TreeGroupFrame {"/", std::move(root_ancestry)});
@@ -183,10 +218,11 @@ private:
 		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 		H5TreeRow row;
 		row.path = "/";
-		row.type = H5TreeTypeName(H5TreeEntryType::GROUP);
-		row.projected_values.resize(reader.GetProjectedAttributes().size());
-		reader.PopulateRowMetadataAndAttributes(row, H5TreeEntryType::GROUP, reader.GetRootIdentity(), "/", -1,
-		                                        nullptr);
+		if (reader.ReadsType()) {
+			row.type = H5TreeTypeName(H5TreeEntryType::GROUP);
+		}
+		reader.InitializeProjectedValues(row);
+		reader.PopulateRowMetadataAndAttributes(row, H5TreeEntryType::GROUP, "/", -1, nullptr);
 		rows.push_back(std::move(row));
 	}
 
@@ -239,19 +275,20 @@ private:
 			}
 
 			auto path = H5TreeJoinPath(data.frame.path, name);
-			auto resolved = data.reader.ResolveEntry(path, *info, parent_loc, name);
+			auto resolved = data.reader.ResolveEntry(*info, parent_loc, name);
 			H5TreeRow row;
 			row.path = path;
-			row.type = H5TreeTypeName(resolved.type_kind);
-			row.projected_values.resize(data.reader.GetProjectedAttributes().size());
+			if (data.reader.ReadsType()) {
+				row.type = H5TreeTypeName(resolved.type_kind);
+			}
+			data.reader.InitializeProjectedValues(row);
 			if (resolved.identity) {
-				data.reader.PopulateRowMetadataAndAttributes(row, resolved.type_kind, *resolved.identity, path,
-				                                             parent_loc, name);
+				data.reader.PopulateRowMetadataAndAttributes(row, resolved.type_kind, path, parent_loc, name);
 			}
 			data.rows.push_back(std::move(row));
 
-			if (resolved.traversable_group && resolved.identity &&
-			    !H5TreeAncestryContains(data.frame.ancestry, *resolved.identity)) {
+			if (resolved.type_kind == H5TreeEntryType::GROUP && resolved.identity &&
+			    !H5TreeAncestryContains(data.reader, data.frame.ancestry, *resolved.identity)) {
 				auto ancestry =
 				    std::make_shared<H5TreeAncestryNode>(H5TreeAncestryNode {*resolved.identity, data.frame.ancestry});
 				data.child_frames.push_back(H5TreeGroupFrame {std::move(path), std::move(ancestry)});
@@ -302,7 +339,7 @@ static void H5TreeOpenFileScanner(ClientContext &context, const H5TreeBindData &
 	D_ASSERT(file_idx < bind_data.filenames.size());
 	state.file_idx = file_idx;
 	state.scanner = make_uniq<H5TreeScanner>(context, bind_data.filenames[file_idx], bind_data.swmr,
-	                                         bind_data.projected_attributes);
+	                                         bind_data.projected_attributes, state.output_layout.read_options);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5TreeInit(ClientContext &context, TableFunctionInitInput &input) {
@@ -368,6 +405,7 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 	}
 	H5TreePopulateFilenameColumns(bind_data.filenames[gstate.file_idx], gstate.output_layout.filename_output_idxs,
 	                              output);
+	H5TreePopulateEmptyColumns(gstate.output_layout.empty_output_idxs, output);
 }
 
 void RegisterH5TreeFunction(ExtensionLoader &loader) {

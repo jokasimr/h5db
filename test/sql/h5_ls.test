@@ -21,12 +21,91 @@ FROM h5_ls('test/data/links.h5');
 ----
 10	2
 
-query TI
-SELECT path, attr
+# A positive HDF5 iteration result only means that the callback stopped. When
+# the final link exactly fills a DuckDB vector, h5_ls must recognize that the
+# saved index has reached the group link count instead of attempting one more
+# H5Literate_by_name2 call at idx == nlinks. This fixture has 6144 links, or
+# exactly three STANDARD_VECTOR_SIZE batches.
+query II
+SELECT COUNT(*), COUNT(type)
+FROM h5_ls('test/data/h5_tree_scalar_deadlock.h5', '/');
+----
+6144	6144
+
+# Finishing an exact-full batch must also advance a multi-file scan.
+query II
+SELECT COUNT(*), COUNT(DISTINCT filename)
+FROM h5_ls([
+    'test/data/h5_tree_scalar_deadlock.h5',
+    'test/data/links.h5'
+], '/');
+----
+6154	2
+
+query T
+SELECT dtype
+FROM h5_ls('test/data/simple.h5', '/')
+WHERE path = '/integers';
+----
+int32
+
+query T
+SELECT shape
+FROM h5_ls('test/data/simple.h5', '/')
+WHERE path = '/integers';
+----
+[10]
+
+# Requesting metadata must resolve links and open linked datasets. Path-only
+# h5_ls scans intentionally skip this work.
+query TTTT
+SELECT path, type, dtype, shape
+FROM h5_ls('test/data/links.h5', '/')
+WHERE path IN ('/dangling_link', '/external_link', '/hard_link', '/soft_link')
+ORDER BY path;
+----
+/dangling_link	link	NULL	NULL
+/external_link	external	NULL	NULL
+/hard_link	dataset	int32	[4]
+/soft_link	dataset	int32	[4]
+
+# Metadata projection must remain active when the scan advances to another file.
+query TTT
+SELECT path, dtype, shape
+FROM h5_ls([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_1.h5'
+], '/')
+WHERE path LIKE '/marker_%'
+ORDER BY path;
+----
+/marker_1	int32	[1]
+/marker_2	int32	[1]
+
+# Projected-attribute requirements, including their original column indices,
+# must also survive a file transition alongside dataset metadata requirements.
+query TTTTI
+SELECT path, dtype, shape, string_attr, group_int_attr
+FROM h5_ls([
+    'test/data/glob/glob_with_attrs_1.h5',
+    'test/data/glob/glob_with_attrs_2.h5'
+], '/',
+    h5_attr('string_attr', NULL::VARCHAR),
+    h5_attr('group_int_attr', -1::BIGINT)
+)
+ORDER BY path, string_attr NULLS LAST;
+----
+/dataset_with_attrs	int64	[10]	Hello HDF5!	-1
+/dataset_with_attrs	int64	[10]	Hello HDF5!	-1
+/group_with_attrs	NULL	NULL	NULL	999
+/group_with_attrs	NULL	NULL	NULL	999
+
+query TTTTI
+SELECT path, type, dtype, shape, attr
 FROM h5_ls('test/data/links.h5', '/group', h5_attr('attr', -1::INTEGER))
 ORDER BY path;
 ----
-/group/data	7
+/group/data	dataset	int32	[4]	7
 
 query II
 SELECT COUNT(*), COUNT(*) FILTER (WHERE attr = 13)
@@ -938,3 +1017,75 @@ statement error
 SELECT h5_ls('test/data/links.h5', '/group/data');
 ----
 IO Error: Object is not a group: /group/data in file: test/data/links.h5
+
+# Unused projected attributes must not be read by table h5_ls.
+query I
+SELECT COUNT(*)
+FROM h5_ls('test/data/with_attrs.h5', '/', h5_attr('string_attr', 0::INTEGER));
+----
+2
+
+# A visible filename column must not prevent DuckDB from requesting the empty
+# virtual column for a count-only scan.
+query I
+SELECT COUNT(*)
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_attr('string_attr', 0::INTEGER),
+    filename = true
+);
+----
+2
+
+query T
+SELECT path
+FROM h5_ls('test/data/with_attrs.h5', '/', h5_attr('string_attr', 0::INTEGER))
+WHERE path = '/dataset_with_attrs';
+----
+/dataset_with_attrs
+
+query T
+SELECT safe_attr
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('bad_attr', h5_attr('string_attr', 0::INTEGER)),
+    h5_alias('safe_attr', h5_attr('string_attr', NULL::VARCHAR))
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!
+
+# An empty group in one file must advance directly to the next file without
+# losing its metadata and projected-attribute read requirements.
+query TTTTTT
+SELECT filename, path, type, dtype, shape, string_attr
+FROM h5_ls([
+    'test/data/h5_ls_multifile_empty.h5',
+    'test/data/with_attrs.h5'
+], '/', h5_attr('string_attr', NULL::VARCHAR))
+WHERE path = '/dataset_with_attrs';
+----
+test/data/with_attrs.h5	/dataset_with_attrs	dataset	int64	[10]	Hello HDF5!
+
+statement error
+SELECT path
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('bad_attr', h5_attr('string_attr', 0::INTEGER))
+)
+WHERE bad_attr = 1;
+----
+IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER in object: /dataset_with_attrs in file: test/data/with_attrs.h5
+
+# Scalar h5_ls constructs its complete MAP value and remains eager.
+statement error
+SELECT cardinality(h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_alias('bad_attr', h5_attr('string_attr', 0::INTEGER))
+));
+----
+IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER in object: /dataset_with_attrs in file: test/data/with_attrs.h5

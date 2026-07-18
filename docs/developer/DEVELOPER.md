@@ -473,9 +473,10 @@ source venv/bin/activate && make format-fix
    ```
 
 2. **Protected locations** (current shape):
-   - `h5_tree`: file opens, resumable namespace-iteration slices, object inspection, and dataset metadata reads;
-     the mutex is released before each produced batch is returned to DuckDB
-   - `h5_ls`: file opens and immediate-child inspection
+   - `h5_tree`: file opens, resumable namespace-iteration slices, object resolution, and any projected dataset metadata
+     or attribute reads; the mutex is released before each produced batch is returned to DuckDB
+   - `h5_ls`: file opens, group validation, immediate-child iteration, and any projected child metadata or attribute
+     reads; scalar `h5_ls` reads its complete result while holding the mutex
    - `h5_read`: schema determination, dataset opens, and scan-time HDF5 reads
    - `h5_attributes`: attribute schema reads and attribute value reads
 

@@ -35,15 +35,15 @@ FROM h5_tree('test/data/links.h5');
 ----
 1	1	0
 
-query T
-SELECT string_attr
+query TTTT
+SELECT type, dtype, shape, string_attr
 FROM h5_tree(
     'test/data/with_attrs.h5',
     h5_attr('string_attr', NULL::VARCHAR)
 )
 WHERE path = '/dataset_with_attrs';
 ----
-Hello HDF5!
+dataset	int64	[10]	Hello HDF5!
 
 query II
 SELECT COUNT(*), COUNT(DISTINCT filename)
@@ -54,6 +54,19 @@ FROM h5_tree([
 WHERE path LIKE '/marker_%';
 ----
 2	2
+
+# Metadata projection must remain active when the scan advances to another file.
+query TTT
+SELECT path, dtype, shape
+FROM h5_tree([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_1.h5'
+])
+WHERE path LIKE '/marker_%'
+ORDER BY path;
+----
+/marker_1	int32	[1]
+/marker_2	int32	[1]
 
 # Stopping a traversal must leave no HDF5 mutex owner behind.
 query I
@@ -67,6 +80,20 @@ SELECT COUNT(*)
 FROM h5_tree('test/data/simple.h5');
 ----
 10
+
+query T
+SELECT dtype
+FROM h5_tree('test/data/simple.h5')
+WHERE path = '/integers';
+----
+int32
+
+query T
+SELECT shape
+FROM h5_tree('test/data/simple.h5')
+WHERE path = '/integers';
+----
+[10]
 
 # HDF5 returns the callback's positive stop value even when the callback handled
 # the final link. Verify both a partial first vector and exact completion at the

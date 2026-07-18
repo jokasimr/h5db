@@ -670,3 +670,54 @@ FROM h5_tree(
 WHERE path = '/dataset_with_attrs';
 ----
 Hello HDF5!
+
+# Unused projected attributes must not be read.
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', 0::INTEGER));
+----
+3
+
+# A visible filename column must not prevent DuckDB from requesting the empty
+# virtual column for a count-only scan.
+query I
+SELECT COUNT(*)
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', 0::INTEGER),
+    filename = true
+);
+----
+3
+
+query T
+SELECT path
+FROM h5_tree('test/data/with_attrs.h5', h5_attr('string_attr', 0::INTEGER))
+WHERE path = '/dataset_with_attrs';
+----
+/dataset_with_attrs
+
+# Attribute values retain their original projected-column indices when only a
+# subset is requested.
+query T
+SELECT safe_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('bad_attr', h5_attr('string_attr', 0::INTEGER)),
+    h5_alias('safe_attr', h5_attr('string_attr', NULL::VARCHAR))
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!
+
+# Columns used only by a residual filter are still requested from the table
+# function and must therefore still be read.
+statement error
+SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_alias('bad_attr', h5_attr('string_attr', 0::INTEGER))
+)
+WHERE bad_attr = 1;
+----
+IO Error: Attribute 'string_attr' contains values that cannot be cast to INTEGER in object: /dataset_with_attrs in file: test/data/with_attrs.h5
