@@ -466,14 +466,15 @@ source venv/bin/activate && make format-fix
 1. **When adding new HDF5 function calls**, always protect them with the mutex:
    ```cpp
    // Lock for all HDF5 operations (not thread-safe)
-   std::lock_guard<std::mutex> lock(hdf5_global_mutex);
+   std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 
    // Now safe to call HDF5 API
    hid_t file_id = H5Fopen(...);
    ```
 
 2. **Protected locations** (current shape):
-   - `h5_tree`: file opens, namespace traversal, object inspection, and dataset metadata reads
+   - `h5_tree`: file opens, resumable namespace-iteration slices, object inspection, and dataset metadata reads;
+     the mutex is released before each produced batch is returned to DuckDB
    - `h5_ls`: file opens and immediate-child inspection
    - `h5_read`: schema determination, dataset opens, and scan-time HDF5 reads
    - `h5_attributes`: attribute schema reads and attribute value reads
@@ -568,6 +569,7 @@ h5db/
 │   ├── h5_remote_backend.cpp # DuckDB-FS and SFTP remote backends
 │   ├── h5_remote_vfd.cpp    # HDF5 remote VFD glue
 │   ├── h5_sftp_secrets.cpp  # DuckDB TYPE sftp secret registration
+│   ├── h5_attr.cpp          # h5_attr projected-attribute marker
 │   ├── h5_tree.cpp          # h5_tree implementation
 │   ├── h5_ls.cpp            # h5_ls table/scalar implementations
 │   ├── h5_tree_shared.cpp   # shared h5_tree/h5_ls metadata helpers
@@ -605,6 +607,7 @@ h5db/
 - **`src/h5_remote_backend.cpp`**: DuckDB-backed remote access plus `sftp://` backend
 - **`src/h5_remote_vfd.cpp`**: HDF5 VFD integration for remote files
 - **`src/h5_sftp_secrets.cpp`**: registration and validation for DuckDB `TYPE sftp` secrets
+- **`src/h5_attr.cpp`**: `h5_attr(...)` projected-attribute marker registration
 - **`src/h5_tree.cpp`**: recursive namespace listing
 - **`src/h5_ls.cpp`**: immediate-child listing (`h5_ls` table and scalar forms)
 - **`src/h5_tree_shared.cpp`**: shared row resolution, metadata, and projected-attribute helpers for `h5_tree`/`h5_ls`

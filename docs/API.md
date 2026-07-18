@@ -91,6 +91,7 @@ as additional columns with `h5_attr(...)`.
 - External links are returned as `type = 'external'` leaf rows and are not traversed.
 - Projected attributes and dataset metadata are populated only for resolved local
   rows. Unresolved and external rows use projected defaults.
+- Row order is left unspecified to allow efficient reads, use `ORDER BY` if the order of the output matters.
 
 **Projected Attributes:**
 - Projected attributes are declared with `h5_attr(...)` and may be renamed with `h5_alias(...)`.

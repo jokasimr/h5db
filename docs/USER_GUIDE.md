@@ -87,6 +87,8 @@ This returns one row per path with:
 
 Use this when you want the big picture.
 
+The row order of the output is unspecified, use `ORDER BY` when output order matters.
+
 Typical workflow:
 
 ```sql

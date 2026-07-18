@@ -2,7 +2,8 @@
 
 > Status: The remote metadata analysis in this document still applies, but some
 > implementation details have moved on:
-> - `h5_tree` now streams rows via a worker thread rather than doing all work in `Init`
+> - `h5_tree` now uses explicit resumable `H5Literate_by_name2` traversal and
+>   returns rows directly from the DuckDB execution thread
 > - `h5_ls` now exists as the shallow-listing API discussed below
 > - the interruptibility discussion remains a design note; transport details in
 >   DuckDB-backed remote filesystems may change across DuckDB versions
@@ -40,9 +41,11 @@ The backing object is:
 
 ### What `h5_tree` does today
 
-`h5_tree` still performs a full metadata walk over the namespace and still opens
-datasets to fetch `dtype` and `shape`, even though rows are now streamed out by a
-worker thread instead of being fully prepared in `Init`.
+`h5_tree` performs a full metadata walk over the namespace and opens datasets to
+fetch `dtype` and `shape`. It traverses one group at a time with resumable
+`H5Literate_by_name2` calls and returns rows in DuckDB-sized batches. Each
+iteration slice holds the global HDF5 mutex only while it is using HDF5; the
+mutex is released before the batch is returned to DuckDB.
 
 - open the file
 - traverse the namespace from `/`
@@ -55,8 +58,16 @@ This means:
 
 - the query is still dominated by remote metadata latency
 - dataset metadata amplification is still part of the `h5_tree` contract today
-- streaming helps responsiveness, but it does not make first-run remote metadata
-  exploration cheap on large scattered files
+- resumable batches allow `LIMIT` and other early-stopping plans to avoid walking
+  the entire namespace
+- batching improves responsiveness, but it does not make first-run remote
+  metadata exploration cheap on large scattered files
+
+DuckDB projection pushdown currently avoids materializing unrequested output
+vectors, but it does not yet reduce HDF5 metadata work in `h5_tree`: dataset
+`dtype` and `shape` are still read for every dataset, and every `h5_attr(...)`
+argument is still populated even when its output column is not needed by the
+query. Making metadata collection projection-aware is a separate optimization.
 
 ### What was observed on the real file
 

@@ -189,6 +189,10 @@ echo -e "${GREEN}[24/28] Generating h5_tree_traversal_hint_bug.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_h5_tree_traversal_hint_bug.py)
 
 echo ""
+echo -e "${GREEN}[24b/28] Generating h5_tree_vector_boundary.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_h5_tree_vector_boundary_test.py)
+
+echo ""
 echo -e "${GREEN}[25/28] Generating swmr test files${NC}"
 (cd test/data && "$PYTHON_BIN" create_swmr_test.py)
 
@@ -261,6 +265,7 @@ echo "    - wide_shape_*.h5         (wide-row multi-file shape coverage)"
 echo "    - links.h5                (hard/soft/external link coverage)"
 echo "    - complex_links.h5        (complicated link graph coverage)"
 echo "    - h5_tree_traversal_hint_bug.h5 (h5_tree prefix-root regression fixture)"
+echo "    - h5_tree_vector_boundary.h5 (resumable traversal vector boundary)"
 echo "    - links_external_target.h5 (external-link target)"
 echo "    - swmr_enabled.h5         (SWMR flag enabled)"
 echo "    - swmr_disabled.h5        (SWMR flag disabled)"

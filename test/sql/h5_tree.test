@@ -1,0 +1,118 @@
+# name: test/sql/h5_tree.test
+# description: explicit resumable tree traversal
+# group: [sql]
+
+require h5db
+
+query IIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group'),
+    COUNT(*) FILTER (WHERE type = 'dataset'),
+    COUNT(*) FILTER (WHERE dtype = 'int32')
+FROM h5_tree('test/data/simple.h5');
+----
+10	3	7	2
+
+query IIIIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (WHERE type = 'group'),
+    COUNT(*) FILTER (WHERE type = 'dataset'),
+    COUNT(*) FILTER (WHERE type = 'datatype'),
+    COUNT(*) FILTER (WHERE type = 'link'),
+    COUNT(*) FILTER (WHERE type = 'external')
+FROM h5_tree('test/data/links.h5');
+----
+17	7	6	1	1	2
+
+query III
+SELECT
+    COUNT(*) FILTER (WHERE path = '/hard_group/data'),
+    COUNT(*) FILTER (WHERE path = '/soft_group/data'),
+    COUNT(*) FILTER (WHERE path = '/cycle_root/hard_loop/cycle_data')
+FROM h5_tree('test/data/links.h5');
+----
+1	1	0
+
+query T
+SELECT string_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('string_attr', NULL::VARCHAR)
+)
+WHERE path = '/dataset_with_attrs';
+----
+Hello HDF5!
+
+query II
+SELECT COUNT(*), COUNT(DISTINCT filename)
+FROM h5_tree([
+    'test/data/glob_order/order_2.h5',
+    'test/data/glob_order/order_1.h5'
+])
+WHERE path LIKE '/marker_%';
+----
+2	2
+
+# Stopping a traversal must leave no HDF5 mutex owner behind.
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_tree('test/data/many_groups.h5') LIMIT 1);
+----
+1
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/simple.h5');
+----
+10
+
+# HDF5 returns the callback's positive stop value even when the callback handled
+# the final link. Verify both a partial first vector and exact completion at the
+# end of the second vector without dropping or duplicating rows.
+query I
+SELECT COUNT(*)
+FROM (SELECT path FROM h5_tree('test/data/h5_tree_vector_boundary.h5') LIMIT 2048);
+----
+2048
+
+query III
+SELECT
+    COUNT(*),
+    COUNT(DISTINCT path),
+    COUNT(*) FILTER (WHERE type = 'link')
+FROM h5_tree('test/data/h5_tree_vector_boundary.h5');
+----
+4096	4096	4095
+
+# Scalar HDF5 work driven by h5_tree rows is the deadlock-sensitive case that
+# motivated the explicit traversal.
+query I
+SELECT TRY_CAST(h5_read(filename, path) AS BIGINT)
+FROM h5_tree('test/data/empty_scalar.h5')
+WHERE path = '/scalar_int';
+----
+7
+
+# A second table-valued HDF5 source can also run in the same pipeline.
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+POSITIONAL JOIN h5_ls('test/data/links.h5');
+----
+17
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/links.h5')
+POSITIONAL JOIN h5_read('test/data/empty_scalar.h5', '/long');
+----
+17
+
+query I
+SELECT COUNT(*)
+FROM h5_tree('test/data/complex_links.h5')
+POSITIONAL JOIN h5_tree('test/data/links.h5');
+----
+74
