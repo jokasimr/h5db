@@ -60,6 +60,7 @@ To ensure test data exists (generate only if missing):
 | `complex_links.h5` | `create_complex_links_test.py` | 6 KB | Complicated hard/soft link graph for `h5_tree`/`h5_ls` reasoning |
 | `h5_tree_traversal_hint_bug.h5` | `create_h5_tree_traversal_hint_bug.py` | 5 KB | `h5_tree` prefix traversal-root regression coverage |
 | `h5_tree_vector_boundary.h5` | `create_h5_tree_vector_boundary_test.py` | 153 KB | Resumable traversal across exact DuckDB vector boundaries |
+| `h5_tree_scalar_deadlock.h5` | `create_h5_tree_scalar_deadlock_test.py` | 246 KB | Scalar HDF5 read during a multi-vector tree traversal |
 | `swmr_enabled.h5` | `create_swmr_test.py` | 2.1 KB | File with SWMR flag enabled |
 | `swmr_disabled.h5` | `create_swmr_test.py` | 2.1 KB | File with SWMR flag disabled |
 | `large_rse_test.h5` | `create_large_rse_test.py` | 16 MB | Large RSE multithreading regression tests |
@@ -115,6 +116,7 @@ test/data/
 ├── create_complex_links_test.py       # Creates: complex_links.h5
 ├── create_h5_tree_traversal_hint_bug.py # Creates: h5_tree_traversal_hint_bug.h5
 ├── create_h5_tree_vector_boundary_test.py # Creates: h5_tree_vector_boundary.h5
+├── create_h5_tree_scalar_deadlock_test.py # Creates: h5_tree_scalar_deadlock.h5
 ├── create_swmr_test.py                # Creates: swmr_enabled.h5, swmr_disabled.h5
 ├── create_large_rse_test.py           # Creates: large_rse_test.h5
 │
@@ -133,6 +135,7 @@ test/data/
 ├── links.h5
 ├── links_external_target.h5
 ├── h5_tree_vector_boundary.h5
+├── h5_tree_scalar_deadlock.h5
 ├── swmr_enabled.h5
 ├── swmr_disabled.h5
 ├── large_rse_test.h5

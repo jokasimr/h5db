@@ -48,6 +48,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/complex_links.h5"
   "$PROJECT_ROOT/test/data/h5_tree_traversal_hint_bug.h5"
   "$PROJECT_ROOT/test/data/h5_tree_vector_boundary.h5"
+  "$PROJECT_ROOT/test/data/h5_tree_scalar_deadlock.h5"
   "$PROJECT_ROOT/test/data/links_external_target.h5"
   "$PROJECT_ROOT/test/data/swmr_enabled.h5"
   "$PROJECT_ROOT/test/data/swmr_disabled.h5"

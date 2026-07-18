@@ -86,14 +86,24 @@ FROM h5_tree('test/data/h5_tree_vector_boundary.h5');
 ----
 4096	4096	4095
 
-# Scalar HDF5 work driven by h5_tree rows is the deadlock-sensitive case that
-# motivated the explicit traversal.
+# Basic dynamic scalar HDF5 work driven by an h5_tree row.
 query I
 SELECT TRY_CAST(h5_read(filename, path) AS BIGINT)
 FROM h5_tree('test/data/empty_scalar.h5')
 WHERE path = '/scalar_int';
 ----
 7
+
+# The former worker-thread traversal could deadlock when scalar h5_read waited
+# for the global HDF5 mutex while the traversal waited to publish another full
+# vector. This dedicated fixture contains three vectors of links to one scalar
+# dataset, and both scalar arguments come from the h5_tree row.
+query I
+SELECT SUM(TRY_CAST(h5_read(filename, path) AS BIGINT))
+FROM h5_tree('test/data/h5_tree_scalar_deadlock.h5')
+WHERE type = 'dataset';
+----
+43008
 
 # A second table-valued HDF5 source can also run in the same pipeline.
 query I
