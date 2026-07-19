@@ -194,7 +194,7 @@ In the current code:
 
 Relevant code:
 
-- [src/h5_read.cpp](../../src/h5_read.cpp)
+- [src/h5_read_table.cpp](../../src/h5_read_table.cpp)
 - [duckdb/src/parallel/pipeline_executor.cpp](../../duckdb/src/parallel/pipeline_executor.cpp)
 - [duckdb/src/execution/operator/persistent/physical_batch_insert.cpp](../../duckdb/src/execution/operator/persistent/physical_batch_insert.cpp)
 - [duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp](../../duckdb/src/execution/operator/persistent/physical_batch_copy_to_file.cpp)

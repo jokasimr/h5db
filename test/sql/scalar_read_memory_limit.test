@@ -1,0 +1,135 @@
+# name: test/sql/scalar_read_memory_limit.test
+# description: scalar h5_read materialization memory guard
+# group: [sql]
+
+require h5db
+
+query T
+SELECT current_setting('h5db_scalar_read_memory_limit');
+----
+64MB
+
+statement error
+SET h5db_scalar_read_memory_limit='not-a-size';
+----
+Invalid value for h5db_scalar_read_memory_limit
+
+statement error
+SET h5db_scalar_read_memory_limit='0B';
+----
+Invalid value for h5db_scalar_read_memory_limit
+
+statement error
+SET h5db_scalar_read_memory_limit='-1';
+----
+Invalid value for h5db_scalar_read_memory_limit
+
+statement ok
+SET h5db_scalar_read_memory_limit='1KB';
+
+# A small numeric array remains below the configured estimated peak limit.
+query T
+SELECT TRY_CAST(h5_read('test/data/empty_scalar.h5', '/array_2d_int') AS INTEGER[][]);
+----
+[[0, 1, 2], [3, 4, 5]]
+
+# Numeric array metadata is checked before allocating the typed leaf vector.
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/array_5d_uint16');
+----
+Scalar h5_read memory limit exceeded for dataset /array_5d_uint16
+
+# Small variable-length string arrays use the typed VARCHAR vector path.
+statement ok
+SET h5db_scalar_read_memory_limit='2KB';
+
+query T
+SELECT TRY_CAST(h5_read('test/data/empty_scalar.h5', '/array_2d_str') AS VARCHAR[][]);
+----
+[[alpha, beta], [gamma, delta]]
+
+statement ok
+SET h5db_scalar_read_memory_limit='1KB';
+
+# A large number of tiny fixed strings is rejected based on vector and variant
+# overhead rather than only the one-byte HDF5 payload.
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/array_many_fixed_str');
+----
+Scalar h5_read memory limit exceeded for dataset /array_many_fixed_str
+
+# Variable-length payload sizes are checked after HDF5 reads them and before
+# VARIANT construction.
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/scalar_long_str');
+----
+Scalar h5_read memory limit exceeded for dataset /scalar_long_str
+
+# The post-read variable-length payload check also applies to arrays.
+statement error
+SELECT h5_read('test/data/empty_scalar.h5', '/array_long_str');
+----
+Scalar h5_read memory limit exceeded for dataset /array_long_str
+
+# Dynamic paths accumulate the retained-memory estimate for the output chunk.
+statement error
+WITH paths(path) AS (
+    VALUES ('/array_2d_int'), ('/array_2d_int'), ('/array_2d_int')
+)
+SELECT COUNT(h5_read('test/data/empty_scalar.h5', path))
+FROM paths;
+----
+Scalar h5_read memory limit exceeded for dataset /array_2d_int
+
+statement ok
+SET h5db_scalar_read_memory_limit='none';
+
+query T
+SELECT current_setting('h5db_scalar_read_memory_limit');
+----
+none
+
+query III
+SELECT
+    TRY_CAST(h5_read('test/data/empty_scalar.h5', '/array_5d_uint16') AS USMALLINT[][][][][])[2][2][2][2][2],
+    TRY_CAST(h5_read('test/data/empty_scalar.h5', '/array_2d_str') AS VARCHAR[][])[2][1],
+    strlen(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/scalar_long_str') AS VARCHAR));
+----
+31	gamma	1024
+
+query IT
+SELECT len(value), value[200000]
+FROM (
+    SELECT TRY_CAST(h5_read('test/data/empty_scalar.h5', '/array_many_fixed_str') AS VARCHAR[]) AS value
+);
+----
+200000	x
+
+statement ok
+PREPARE scalar_array_read AS
+SELECT TRY_CAST(h5_read('test/data/empty_scalar.h5', $1) AS USMALLINT[][][][][])[2][2][2][2][2];
+
+query I
+EXECUTE scalar_array_read('/array_5d_uint16');
+----
+31
+
+# A setting change must also apply to an already prepared statement.
+statement ok
+SET h5db_scalar_read_memory_limit='1KB';
+
+statement error
+EXECUTE scalar_array_read('/array_5d_uint16');
+----
+Scalar h5_read memory limit exceeded for dataset /array_5d_uint16
+
+statement ok
+DEALLOCATE scalar_array_read;
+
+statement ok
+RESET h5db_scalar_read_memory_limit;
+
+query T
+SELECT current_setting('h5db_scalar_read_memory_limit');
+----
+64MB

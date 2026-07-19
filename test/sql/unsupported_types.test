@@ -59,3 +59,9 @@ statement error
 SELECT * FROM h5_read('test/data/unsupported_types.h5', '/bitfield_values');
 ----
 IO Error: Unsupported HDF5 type class: 4
+
+# Scalar h5_read errors include the dynamic file and dataset that failed.
+statement error
+SELECT h5_read('test/data/unsupported_types.h5', '/enum_values');
+----
+IO Error: Unsupported HDF5 type class: 8: /enum_values in file: test/data/unsupported_types.h5

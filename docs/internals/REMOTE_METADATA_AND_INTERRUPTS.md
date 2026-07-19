@@ -227,7 +227,9 @@ Relevant code:
 The remote `h5db` path then blocks inside synchronous HDF5 calls:
 
 - file open in [src/include/h5_raii.hpp](../../src/include/h5_raii.hpp)
-- dataset reads in [src/h5_read.cpp](../../src/h5_read.cpp)
+- shared string dataset reads in [src/h5_read_shared.cpp](../../src/h5_read_shared.cpp)
+- table dataset reads in [src/h5_read_table.cpp](../../src/h5_read_table.cpp)
+- scalar dataset reads in [src/h5_read_scalar.cpp](../../src/h5_read_scalar.cpp)
 
 For DuckDB-backed remote files those HDF5 calls enter the VFD, then DuckDB's remote filesystem stack. In-flight
 transport operations are generally synchronous from h5db's point of view, so h5db cannot reliably make them observe the

@@ -34,7 +34,9 @@ set(EXTENSION_SOURCES
     src/h5_attr.cpp
     src/h5_tree.cpp
     src/h5_ls.cpp
-    src/h5_read.cpp
+    src/h5_read_shared.cpp
+    src/h5_read_table.cpp
+    src/h5_read_scalar.cpp
     src/h5_attributes.cpp
 )
 

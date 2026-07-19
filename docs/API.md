@@ -31,6 +31,7 @@ This document describes the public SQL functions provided by the h5db extension.
 - [Settings](#settings)
   - [`h5db_swmr_default` (BOOLEAN)](#h5db_swmr_default-boolean)
   - [`h5db_batch_size` (VARCHAR)](#h5db_batch_size-varchar)
+  - [`h5db_scalar_read_memory_limit` (VARCHAR)](#h5db_scalar_read_memory_limit-varchar)
 - [Type Mapping](#type-mapping)
   - [HDF5 to DuckDB Type Conversion](#hdf5-to-duckdb-type-conversion)
   - [Multi-Dimensional Arrays](#multi-dimensional-arrays)
@@ -454,7 +455,7 @@ SELECT h5_ls_swmr('data.h5', '/entry/instrument');
 
 ### `h5_read(filename, dataset_path)`
 
-Reads one scalar HDF5 dataset and returns it as `VARIANT`.
+Reads one HDF5 dataset and returns it as `VARIANT`.
 
 This is the scalar counterpart to table-valued `h5_read()`. Use it when the
 filename or dataset path comes from another query and you want one scalar value
@@ -462,19 +463,25 @@ per input row.
 
 **Parameters:**
 - `filename` (VARCHAR): File path or remote URL. May vary per row. See [Remote Access](#remote-access).
-- `dataset_path` (VARCHAR): Path to a scalar HDF5 dataset. May vary per row.
+- `dataset_path` (VARCHAR): Path to an HDF5 dataset. May vary per row.
 
 **Returns:** `VARIANT`
 
 **Semantics:**
-- the target path must resolve to a scalar dataset
-- numeric and string scalar datasets are supported
-- non-scalar datasets raise an error; use table-valued `h5_read()` for array-like datasets
+- the target path must resolve to a dataset
+- numeric and string datasets are supported
+- scalar datasets become primitive variant values
+- non-scalar datasets are fully materialized as row-major nested arrays matching
+  the HDF5 dimensions
+- empty datasets become empty arrays; an HDF5 null dataspace becomes SQL `NULL`
+- materialization is subject to `h5db_scalar_read_memory_limit`, which defaults
+  to `'64MB'`; use table-valued `h5_read()` to scan large datasets
 - missing files or missing datasets raise an error
 - `filename` is used as a path or URL per input row; lists and glob patterns are not expanded
 - `NULL` `filename` yields `NULL`
 - `NULL` `dataset_path` yields `NULL`
-- named parameters such as `swmr := true` or `filename := true` are not supported in the scalar form
+- named parameters such as `swmr := true` or `filename := true` are not
+  supported in the scalar form
 
 **Examples:**
 ```sql
@@ -491,6 +498,8 @@ WITH files(filename) AS (
 )
 SELECT filename, h5_read(filename, '/entry/run_number')
 FROM files;
+
+SELECT TRY_CAST(h5_read('data.h5', '/entry/small_matrix') AS DOUBLE[][]);
 ```
 
 ### `h5_attributes(filename, object_path)`
@@ -908,6 +917,30 @@ dataset's first-dimension HDF5 chunk size.
 **Example:**
 ```sql
 SET h5db_batch_size = '4MB';
+```
+
+### `h5db_scalar_read_memory_limit` (VARCHAR)
+
+Maximum estimated peak memory for scalar `h5_read` materialization in one
+output chunk. Accepts DuckDB memory-size strings such as `'16MB'` and `'1GB'`.
+Defaults to `'64MB'`.
+
+The estimate includes the typed input, nested-array and `VARIANT` encoding
+overhead, the copy into the result vector, and values already retained in the
+same output chunk. It is deliberately conservative and is not based on the
+compressed HDF5 file size. Set the value to `'none'` to disable the guard
+explicitly.
+
+This is an h5db materialization guard, independent of DuckDB's `memory_limit`.
+
+The guard is best-effort rather than a hard bound on process memory usage. In
+particular, the configured bound is not guaranteed for variable-length strings.
+
+```sql
+SET h5db_scalar_read_memory_limit = '16MB';
+
+-- Deliberate opt-in to unbounded scalar materialization:
+SET h5db_scalar_read_memory_limit = 'none';
 ```
 
 ---

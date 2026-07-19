@@ -259,6 +259,23 @@ SELECT
 ----
 FLOAT	4.5
 
+query TTTTR
+SELECT
+    variant_typeof(h5_read('test/data/types.h5', '/float16')),
+    variant_typeof(array_extract(TRY_CAST(h5_read('test/data/types.h5', '/float16') AS VARIANT[]), 1)),
+    variant_typeof(array_extract(TRY_CAST(h5_read('test/data/types.h5', '/uint64') AS VARIANT[]), 1)),
+    CAST(TRY_CAST(h5_read('test/data/types.h5', '/uint64') AS UBIGINT[])[1] AS VARCHAR),
+    TRY_CAST(h5_read('test/data/types.h5', '/float16') AS FLOAT[])[3];
+----
+ARRAY(3)	FLOAT	UINT64	18446744073709551615	3.5
+
+query TT
+SELECT
+    TRY_CAST(h5_read('test/data/types.h5', '/fixed_strings') AS VARCHAR[]),
+    TRY_CAST(h5_read('test/data/types.h5', '/var_strings') AS VARCHAR[]);
+----
+[fixed, width]	[variable, length, strings]
+
 query R
 SELECT float32 FROM h5_read('test/data/types.h5', '/float32') ORDER BY float32;
 ----

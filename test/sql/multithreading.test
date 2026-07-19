@@ -748,3 +748,77 @@ ORDER BY status_values;
 1	300000
 2	200000
 3	400000
+
+# =============================================================================
+# Test 21: Scalar h5_read in parallel worker pipelines
+#
+# Literal scalar calls can be constant-folded before execution, so each branch
+# derives the filename or path from its table scan. The order-independent
+# aggregate sink lets the UNION ALL branches run as parallel pipelines with
+# threads=4 and exercise numeric, variable-length string, and fixed-length
+# string nested-vector materialization concurrently.
+# =============================================================================
+
+query IIII
+SELECT
+    COUNT(*),
+    COUNT(*) FILTER (
+        WHERE kind = 'numeric' AND CASE
+            WHEN use_first THEN TRY_CAST(value AS INTEGER[][])[2][3] = 5
+            ELSE TRY_CAST(value AS USMALLINT[][][][][])[2][2][2][2][2] = 31
+        END
+    ),
+    COUNT(*) FILTER (
+        WHERE kind = 'vlen' AND CASE
+            WHEN use_first THEN TRY_CAST(value AS VARCHAR[][])[2][1] = 'gamma'
+            ELSE TRY_CAST(value AS VARCHAR[])[2] = 'hello'
+        END
+    ),
+    COUNT(*) FILTER (
+        WHERE kind = 'fixed' AND CASE
+            WHEN use_first THEN TRY_CAST(value AS VARCHAR[][])[2][2] = 'dd'
+            ELSE TRY_CAST(value AS VARCHAR[])[2] = 'width'
+        END
+    )
+FROM (
+    SELECT
+        'numeric' AS kind,
+        event_id % 2 = 0 AS use_first,
+        h5_read(
+            'test/data/empty_scalar.h5',
+            CASE
+                WHEN event_id % 2 = 0 THEN '/array_2d_int'
+                ELSE '/array_5d_uint16'
+            END
+        ) AS value
+    FROM h5_read('test/data/multithreading_test.h5', '/detector_1/event_id')
+    UNION ALL
+    SELECT
+        'vlen',
+        event_id % 2 = 0,
+        h5_read(
+            'test/data/empty_scalar.h5',
+            CASE
+                WHEN event_id % 2 = 0 THEN '/array_2d_str'
+                ELSE '/null_strings'
+            END
+        )
+    FROM h5_read('test/data/multithreading_test.h5', '/detector_2/event_id')
+    UNION ALL
+    SELECT
+        'fixed',
+        event_id % 2 = 0,
+        h5_read(
+            CASE
+                WHEN event_id % 2 = 0 THEN 'test/data/multidim.h5'
+                ELSE 'test/data/types.h5'
+            END,
+            CASE
+                WHEN event_id % 2 = 0 THEN '/array_2d_strings'
+                ELSE '/fixed_strings'
+            END
+        )
+    FROM h5_read('test/data/multithreading_test.h5', '/detector_3/event_id')
+) scalar_parallel_results;
+----
+3000	1000	1000	1000

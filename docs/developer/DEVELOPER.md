@@ -566,7 +566,9 @@ h5db/
 │
 ├── src/                     # Source code
 │   ├── h5db_extension.cpp   # Extension entry point
-│   ├── h5_read.cpp          # h5_read implementation
+│   ├── h5_read_table.cpp    # table h5_read implementation
+│   ├── h5_read_scalar.cpp   # scalar h5_read implementation
+│   ├── h5_read_shared.cpp   # shared h5_read dataset helpers
 │   ├── h5_remote_backend.cpp # DuckDB-FS and SFTP remote backends
 │   ├── h5_remote_vfd.cpp    # HDF5 remote VFD glue
 │   ├── h5_sftp_secrets.cpp  # DuckDB TYPE sftp secret registration
@@ -599,9 +601,12 @@ h5db/
 ### Key Files
 
 - **`.env`**: Environment configuration (VCPKG path, build settings)
-- **`src/h5_read.cpp`**: Core HDF5 reading logic, scalar `h5_read`, run-encoded scanner, shared chunk-cache coordination, and
-  multi-file scan wrapper
-- **`src/h5_read.cpp`** intentionally does not currently register DuckDB `get_partition_data`. An earlier
+- **`src/h5_read_table.cpp`**: Table `h5_read`, run-encoded scanner, shared chunk-cache coordination, and multi-file
+  scan wrapper
+- **`src/h5_read_scalar.cpp`**: Scalar `h5_read`, including runtime-typed dataset materialization into `VARIANT`
+- **`src/h5_read_shared.cpp`**: Dataset opening, contextual errors, checked sizing, and string decoding shared by both
+  `h5_read` forms
+- **`src/h5_read_table.cpp`** intentionally does not currently register DuckDB `get_partition_data`. An earlier
   partition-based implementation was removed because early-stopping plans could abandon a partition while still
   blocking shared cache progress. Reintroduce it only with a design that does not make cache progress depend on a
   local scan state returning after it has produced a chunk.

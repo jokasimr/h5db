@@ -45,7 +45,7 @@ If `/short` has shape `[2]` and `/long` has shape `[5]`, the current result has
 two rows. The three trailing values from `/long` are not returned.
 
 This behavior is documented in the public API reference and covered by tests.
-The core implementation is in `src/h5_read.cpp`:
+The core table implementation is in `src/h5_read_table.cpp`:
 
 - `H5ReadSingleFileBindData::num_rows` stores the per-file row count
 - `BindSingleH5ReadFile(...)` tracks the minimum non-scalar regular row count

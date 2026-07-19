@@ -70,6 +70,11 @@ static void SetH5dbBatchSize(ClientContext &context, SetScope scope, Value &para
 	}
 }
 
+static void SetH5dbScalarReadMemoryLimit(ClientContext &, SetScope, Value &parameter) {
+	auto parsed = ParseScalarReadMemoryLimitSetting(parameter);
+	parameter = Value(parsed == NumericLimits<idx_t>::Maximum() ? "none" : parameter.ToString());
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	child_list_t<LogicalType> version_struct_children = {
 	    {"h5db_version", LogicalType::VARCHAR},
@@ -90,11 +95,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("h5db_batch_size", "Target batch size for h5_read read-ahead caching (e.g. 1MB, 8MB)",
 	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_BATCH_SIZE_SETTING), SetH5dbBatchSize);
+	config.AddExtensionOption("h5db_scalar_read_memory_limit",
+	                          "Estimated peak memory limit for scalar h5_read materialization (e.g. 64MB, none)",
+	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_SETTING),
+	                          SetH5dbScalarReadMemoryLimit);
 
-	// Register HDF5 table functions
+	// Register HDF5 functions
 	RegisterH5TreeFunction(loader);
 	RegisterH5LsFunctions(loader);
-	RegisterH5ReadFunction(loader);
+	RegisterH5ReadTableFunction(loader);
+	RegisterH5ReadScalarFunction(loader);
 	RegisterH5RseFunction(loader);
 	RegisterH5ReeFunction(loader);
 	RegisterH5AliasFunction(loader);

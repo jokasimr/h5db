@@ -26,6 +26,11 @@ static constexpr idx_t H5DB_MAX_BATCH_SIZE_BYTES = 1 * 1024 * 1024 * 1024;
 static constexpr const char *H5DB_DEFAULT_BATCH_SIZE_SETTING = "1MB";
 static constexpr const char *H5DB_MAX_BATCH_SIZE_SETTING = "1GB";
 
+// Bounds the estimated peak memory used to materialize one scalar h5_read
+// output chunk. "none" disables the guard explicitly.
+static constexpr idx_t H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_BYTES = 64 * 1000 * 1000;
+static constexpr const char *H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_SETTING = "64MB";
+
 // Resolve SWMR read mode from named parameters or default setting.
 // Named parameter "swmr" takes precedence over h5db_swmr_default.
 bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters);
@@ -46,6 +51,11 @@ idx_t ParseBatchSizeSetting(const Value &setting_value);
 
 // Resolve the configured target size for h5_read scan batches and cache windows.
 idx_t ResolveBatchSizeOption(ClientContext &context);
+
+// Parse and resolve the scalar h5_read materialization guard. The maximum
+// idx_t value represents an explicitly disabled limit.
+idx_t ParseScalarReadMemoryLimitSetting(const Value &setting_value);
+idx_t ResolveScalarReadMemoryLimitOption(ClientContext &context);
 
 FunctionDescription H5FunctionDescription(vector<LogicalType> parameter_types, vector<string> parameter_names,
                                           string description, vector<string> examples = {},

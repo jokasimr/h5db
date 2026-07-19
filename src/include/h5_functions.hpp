@@ -68,7 +68,10 @@ void RegisterH5TreeFunction(ExtensionLoader &loader);
 void RegisterH5LsFunctions(ExtensionLoader &loader);
 
 // Table function for reading HDF5 datasets
-void RegisterH5ReadFunction(ExtensionLoader &loader);
+void RegisterH5ReadTableFunction(ExtensionLoader &loader);
+
+// Scalar function for reading one HDF5 dataset as a VARIANT
+void RegisterH5ReadScalarFunction(ExtensionLoader &loader);
 
 // Scalar function for creating RSE (run-start encoded) column specs
 void RegisterH5RseFunction(ExtensionLoader &loader);

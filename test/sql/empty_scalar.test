@@ -164,10 +164,173 @@ SELECT h5_read('test/data/empty_scalar.h5', '/');
 ----
 IO Error: Failed to open dataset: / in file: test/data/empty_scalar.h5
 
-statement error
-SELECT h5_read('test/data/empty_scalar.h5', '/long');
+# Non-scalar datasets are materialized as nested arrays inside VARIANT.
+query TI
+SELECT
+    variant_typeof(h5_read('test/data/empty_scalar.h5', '/long')),
+    TRY_CAST(h5_read('test/data/empty_scalar.h5', '/long') AS INTEGER[]) = [0, 1, 2, 3, 4]::INTEGER[];
 ----
-IO Error: Scalar h5_read only supports scalar datasets: /long in file: test/data/empty_scalar.h5
+ARRAY(5)	1
+
+query TIII
+WITH value(v) AS (
+    SELECT h5_read('test/data/empty_scalar.h5', '/array_2d_int')
+)
+SELECT
+    variant_typeof(v),
+    array_length(TRY_CAST(v AS INTEGER[][])),
+    TRY_CAST(v AS INTEGER[][])[1][1],
+    TRY_CAST(v AS INTEGER[][])[2][3]
+FROM value;
+----
+ARRAY(2)	2	0	5
+
+query TTT
+WITH value(v) AS (
+    SELECT h5_read('test/data/empty_scalar.h5', '/array_2d_str')
+)
+SELECT
+    variant_typeof(v),
+    TRY_CAST(v AS VARCHAR[][])[1][2],
+    TRY_CAST(v AS VARCHAR[][])[2][1]
+FROM value;
+----
+ARRAY(2)	beta	gamma
+
+query T
+SELECT TRY_CAST(h5_read('test/data/multidim.h5', '/array_2d_strings') AS VARCHAR[][]);
+----
+[[aa, bb], [cc, dd]]
+
+# Scalar h5_read is not limited to the table reader's four-dimensional schema.
+query TII
+WITH value(v) AS (
+    SELECT h5_read('test/data/empty_scalar.h5', '/array_5d_uint16')
+)
+SELECT
+    variant_typeof(v),
+    TRY_CAST(v AS USMALLINT[][][][][])[1][1][1][1][1],
+    TRY_CAST(v AS USMALLINT[][][][][])[2][2][2][2][2]
+FROM value;
+----
+ARRAY(2)	0	31
+
+query TIII
+WITH value(v) AS (
+    SELECT h5_read('test/data/empty_scalar.h5', '/array_big_endian_int32')
+)
+SELECT
+    variant_typeof(array_extract(TRY_CAST(v AS VARIANT[]), 1)),
+    TRY_CAST(v AS INTEGER[])[1],
+    TRY_CAST(v AS INTEGER[])[2],
+    TRY_CAST(v AS INTEGER[])[3]
+FROM value;
+----
+INT32	1	256	65537
+
+query TIIIII
+SELECT
+    variant_typeof(h5_read('test/data/empty_scalar.h5', '/empty_1d')),
+    array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/empty_1d') AS INTEGER[])),
+    array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/empty_2d') AS INTEGER[][])),
+    array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/empty_inner_3d') AS INTEGER[][][])),
+    array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/empty_inner_3d') AS INTEGER[][][])[1]),
+    array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/empty_inner_3d') AS INTEGER[][][])[2]);
+----
+ARRAY(0)	0	0	2	0	0
+
+query TT
+WITH paths(path) AS (
+    VALUES ('/scalar_int'), ('/long'), ('/array_2d_int'), ('/null_int')
+), values AS (
+    SELECT path, h5_read('test/data/empty_scalar.h5', path) AS value
+    FROM paths
+)
+SELECT
+    path,
+    CASE WHEN value IS NULL THEN 'NULL' ELSE variant_typeof(value) END
+FROM values
+ORDER BY path;
+----
+/array_2d_int	ARRAY(2)
+/long	ARRAY(5)
+/null_int	NULL
+/scalar_int	INT32
+
+query TTT
+WITH inputs(filename, path) AS (
+    VALUES
+        ('test/data/types.h5', '/int8'),
+        ('test/data/empty_scalar.h5', '/array_2d_int')
+), values AS (
+    SELECT filename, path, h5_read(filename, path) AS value
+    FROM inputs
+)
+SELECT
+    regexp_extract(filename, '[^/]+$'),
+    path,
+    variant_typeof(array_extract(TRY_CAST(value AS VARIANT[]), 1))
+FROM values
+ORDER BY filename;
+----
+empty_scalar.h5	/array_2d_int	ARRAY(3)
+types.h5	/int8	INT8
+
+query II
+SELECT
+    COUNT(*),
+    SUM(array_length(TRY_CAST(h5_read('test/data/empty_scalar.h5', '/long') AS INTEGER[])))
+FROM range(2050);
+----
+2050	10250
+
+# Exercise runtime-typed numeric vectors across DuckDB's vector boundary. The
+# alternating filenames also make file grouping populate result rows out of
+# order within each output chunk.
+query III
+WITH inputs AS (
+    SELECT
+        CASE WHEN i % 2 = 0 THEN 'test/data/empty_scalar.h5' ELSE 'test/data/types.h5' END AS filename,
+        CASE WHEN i % 2 = 0 THEN '/long' ELSE '/int16' END AS path,
+        i
+    FROM range(2050) t(i)
+), values AS (
+    SELECT i, TRY_CAST(h5_read(filename, path) AS INTEGER[]) AS value
+    FROM inputs
+)
+SELECT
+    COUNT(*),
+    SUM(array_length(value)),
+    SUM(CASE WHEN i % 2 = 0 THEN value[5] ELSE value[3] END)
+FROM values;
+----
+2050	8200	311600
+
+# Exercise the typed VARCHAR leaf vector across DuckDB's vector boundary and
+# populate result rows out of order through filename grouping.
+query III
+WITH inputs AS (
+    SELECT
+        CASE WHEN i % 2 = 0 THEN 'test/data/empty_scalar.h5' ELSE 'test/data/types.h5' END AS filename,
+        CASE WHEN i % 2 = 0 THEN '/array_2d_str' ELSE '/var_strings' END AS path,
+        i
+    FROM range(2050) t(i)
+), values AS (
+    SELECT i, h5_read(filename, path) AS value
+    FROM inputs
+)
+SELECT
+    COUNT(*),
+    SUM(CASE WHEN i % 2 = 0 THEN len(TRY_CAST(value AS VARCHAR[][])) ELSE len(TRY_CAST(value AS VARCHAR[])) END),
+    SUM(
+        CASE
+            WHEN i % 2 = 0 THEN strlen(TRY_CAST(value AS VARCHAR[][])[2][1])
+            ELSE strlen(TRY_CAST(value AS VARCHAR[])[3])
+        END
+    )
+FROM values;
+----
+2050	5125	12300
 
 statement error
 SELECT h5_read('test/data/empty_scalar.h5', '/scalar_int', swmr := true);
@@ -196,6 +359,15 @@ SELECT
 FROM h5_read('test/data/empty_scalar.h5', '/null_strings');
 ----
 0	2
+
+query III
+WITH value(v) AS (
+    SELECT TRY_CAST(h5_read('test/data/empty_scalar.h5', '/null_strings') AS VARCHAR[])
+)
+SELECT strlen(v[1]), strlen(v[2]), strlen(v[3])
+FROM value;
+----
+0	5	0
 
 # =============================================================================
 # Empty datasets should yield zero rows

@@ -40,6 +40,14 @@ FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/nullpad_fixed_interior_
 ----
 3	410042
 
+query I
+SELECT hex(CAST(
+    TRY_CAST(h5_read('test/data/h5_read_string_edge_cases.h5', '/nullpad_fixed_interior_nul') AS VARCHAR[])[1]
+    AS BLOB
+));
+----
+410042
+
 query II
 SELECT strlen(scalar_nullpad_fixed_interior_nul), hex(CAST(scalar_nullpad_fixed_interior_nul AS BLOB))
 FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_nullpad_fixed_interior_nul');
@@ -109,6 +117,16 @@ statement error
 SELECT h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_invalid_utf8_var');
 ----
 IO Error: Invalid unicode (byte sequence mismatch) detected in dataset: /scalar_invalid_utf8_var in file: test/data/h5_read_string_edge_cases.h5
+
+statement error
+SELECT h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var');
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in dataset: /invalid_utf8_var in file: test/data/h5_read_string_edge_cases.h5
+
+statement error
+SELECT h5_read('test/data/h5_read_string_edge_cases.h5', '/fixed_invalid_no_nul');
+----
+IO Error: Invalid unicode (byte sequence mismatch) detected in dataset: /fixed_invalid_no_nul in file: test/data/h5_read_string_edge_cases.h5
 
 statement error
 SELECT *

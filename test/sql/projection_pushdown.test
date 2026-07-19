@@ -1,5 +1,5 @@
 # name: test/sql/projection_pushdown.test
-# description: Test projection pushdown optimization in h5_read
+# description: Test projection pushdown optimization in h5_read, h5_tree, and h5_ls
 # group: [sql]
 
 # Require statement will ensure this test is run with this extension loaded
@@ -348,3 +348,129 @@ SELECT COUNT(*) FROM (
 # Clean up
 statement ok
 DROP TABLE baseline;
+
+# =============================================================================
+# Test 17: Metadata projection with residual filters
+# =============================================================================
+
+# path and dtype are projected and filtered, shape is only projected, and type
+# is only needed by the filter. Keep this matrix identical for h5_tree and
+# h5_ls: both table functions build their HDF5 read requirements from DuckDB's
+# projected column IDs.
+query TTT
+SELECT path, dtype, shape
+FROM h5_tree('test/data/links.h5')
+WHERE type = 'dataset'
+  AND dtype = 'int32'
+  AND path IN ('/hard_link', '/soft_link')
+ORDER BY path;
+----
+/hard_link	int32	[4]
+/soft_link	int32	[4]
+
+query TTT
+SELECT path, dtype, shape
+FROM h5_ls('test/data/links.h5')
+WHERE type = 'dataset'
+  AND dtype = 'int32'
+  AND path IN ('/hard_link', '/soft_link')
+ORDER BY path;
+----
+/hard_link	int32	[4]
+/soft_link	int32	[4]
+
+# Projected attributes use the same column-ID mapping. Here group_int_attr is
+# projected and filtered, group_string_attr is only projected, and path is only
+# needed by the filter.
+query TT
+SELECT group_int_attr, group_string_attr
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path IN ('/dataset_with_attrs', '/group_with_attrs')
+  AND group_int_attr IN (-1, 999)
+ORDER BY group_int_attr;
+----
+-1	unused
+999	I am a group
+
+query TT
+SELECT group_int_attr, group_string_attr
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_attr('group_int_attr', -1::BIGINT),
+    h5_attr('group_string_attr', 'unused'::VARCHAR)
+)
+WHERE path IN ('/dataset_with_attrs', '/group_with_attrs')
+  AND group_int_attr IN (-1, 999)
+ORDER BY group_int_attr;
+----
+-1	unused
+999	I am a group
+
+# A projected attribute can be required by a residual filter without appearing
+# in the SELECT list. Cover that hidden-column path independently for both
+# metadata table functions.
+query T
+SELECT path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('group_int_attr', -1::BIGINT)
+)
+WHERE group_int_attr = 999;
+----
+/group_with_attrs
+
+query T
+SELECT path
+FROM h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_attr('group_int_attr', -1::BIGINT)
+)
+WHERE group_int_attr = 999;
+----
+/group_with_attrs
+
+# =============================================================================
+# Test 18: Metadata projection through a join
+# =============================================================================
+
+# path is required from both scans solely for the join and is not projected.
+# tree.dtype is projected and used by the join, direct.dtype is join-only,
+# direct.shape is projection-only, and each type column is filter-only.
+query TT
+SELECT tree.dtype, direct.shape
+FROM h5_tree('test/data/simple.h5') tree
+JOIN h5_ls('test/data/simple.h5') direct
+  ON tree.path = direct.path AND tree.dtype = direct.dtype
+WHERE tree.type = 'dataset' AND direct.type = 'dataset'
+ORDER BY tree.dtype, direct.shape;
+----
+float64	[10]
+int32	[5, 4]
+int32	[10]
+string	[3]
+
+# A projected attribute can likewise be a join key without being returned.
+# Different defaults make the attribute equality selective for objects without
+# the attribute; only h5_tree.path is selected.
+query T
+SELECT tree.path
+FROM h5_tree(
+    'test/data/with_attrs.h5',
+    h5_attr('group_int_attr', -1::BIGINT)
+) tree
+JOIN h5_ls(
+    'test/data/with_attrs.h5',
+    '/',
+    h5_attr('group_int_attr', 999::BIGINT)
+) direct
+  ON tree.path = direct.path
+ AND tree.group_int_attr = direct.group_int_attr
+ORDER BY tree.path;
+----
+/group_with_attrs

@@ -292,6 +292,36 @@ idx_t ResolveBatchSizeOption(ClientContext &context) {
 	return MinValue<idx_t>(parsed, H5DB_MAX_BATCH_SIZE_BYTES);
 }
 
+idx_t ParseScalarReadMemoryLimitSetting(const Value &setting_value) {
+	auto input = StringUtil::Lower(setting_value.ToString());
+	if (input == "none") {
+		return NumericLimits<idx_t>::Maximum();
+	}
+	if (input.empty() || input[0] == '-') {
+		throw InvalidInputException("Invalid value for h5db_scalar_read_memory_limit: %s", input);
+	}
+
+	idx_t parsed;
+	try {
+		parsed = DBConfig::ParseMemoryLimit(input);
+	} catch (std::exception &) {
+		throw InvalidInputException("Invalid value for h5db_scalar_read_memory_limit: %s", input);
+	}
+	if (parsed == 0 || parsed == DConstants::INVALID_INDEX ||
+	    parsed >= static_cast<idx_t>(NumericLimits<int64_t>::Maximum())) {
+		throw InvalidInputException("Invalid value for h5db_scalar_read_memory_limit: %s", input);
+	}
+	return parsed;
+}
+
+idx_t ResolveScalarReadMemoryLimitOption(ClientContext &context) {
+	Value setting;
+	if (!context.TryGetCurrentSetting("h5db_scalar_read_memory_limit", setting)) {
+		return H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_BYTES;
+	}
+	return ParseScalarReadMemoryLimitSetting(setting);
+}
+
 bool IsInterrupted(ClientContext &context) {
 	return context.interrupted.load(std::memory_order_relaxed);
 }
