@@ -580,7 +580,31 @@ static LogicalType H5BuildNestedListType(LogicalType leaf_type, const vector<idx
 
 template <typename T>
 static hid_t H5GetNativeAttributeMemoryType(hid_t h5_type_id, const std::string &attribute_name,
-                                            H5TypeHandle &owned_memory_type);
+                                            H5TypeHandle &owned_memory_type) {
+	auto memory_type = GetNativeH5Type<T>();
+	auto type_class = H5Tget_class(h5_type_id);
+	if (type_class == H5T_NO_CLASS) {
+		throw IOException("Failed to inspect type for attribute: " + attribute_name);
+	}
+	if (type_class != H5T_ARRAY) {
+		return memory_type;
+	}
+
+	auto ndims = H5Tget_array_ndims(h5_type_id);
+	if (ndims < 0) {
+		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+	}
+	vector<hsize_t> dims(static_cast<idx_t>(ndims));
+	if (H5Tget_array_dims2(h5_type_id, dims.data()) < 0) {
+		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
+	}
+	auto array_type_id = H5Tarray_create2(memory_type, static_cast<unsigned>(ndims), dims.data());
+	if (array_type_id < 0) {
+		throw IOException("Failed to create array memory type for attribute: " + attribute_name);
+	}
+	owned_memory_type = H5TypeHandle::TakeOwnershipOf(array_type_id);
+	return owned_memory_type.get();
+}
 
 static const LogicalType &H5GetNestedListLeafType(const LogicalType &type) {
 	auto current_type = &type;
@@ -1049,34 +1073,6 @@ H5OpenedAttribute H5OpenAttribute(hid_t object_id, const std::string &attribute_
 	}
 	result.space = H5DataspaceHandle::TakeOwnershipOf(space_id);
 	return result;
-}
-
-template <typename T>
-static hid_t H5GetNativeAttributeMemoryType(hid_t h5_type_id, const std::string &attribute_name,
-                                            H5TypeHandle &owned_memory_type) {
-	auto memory_type = GetNativeH5Type<T>();
-	auto type_class = H5Tget_class(h5_type_id);
-	if (type_class == H5T_NO_CLASS) {
-		throw IOException("Failed to inspect type for attribute: " + attribute_name);
-	}
-	if (type_class != H5T_ARRAY) {
-		return memory_type;
-	}
-
-	auto ndims = H5Tget_array_ndims(h5_type_id);
-	if (ndims < 0) {
-		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
-	}
-	vector<hsize_t> dims(static_cast<idx_t>(ndims));
-	if (H5Tget_array_dims2(h5_type_id, dims.data()) < 0) {
-		throw IOException("Failed to inspect array dimensions for attribute: " + attribute_name);
-	}
-	auto array_type_id = H5Tarray_create2(memory_type, static_cast<unsigned>(ndims), dims.data());
-	if (array_type_id < 0) {
-		throw IOException("Failed to create array memory type for attribute: " + attribute_name);
-	}
-	owned_memory_type = H5TypeHandle::TakeOwnershipOf(array_type_id);
-	return owned_memory_type.get();
 }
 
 Value H5ReadAttributeValue(hid_t attr_id, hid_t h5_type_id, hid_t h5_space_id, const LogicalType &resolved_type,
