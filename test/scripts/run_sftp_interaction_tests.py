@@ -77,6 +77,7 @@ class SFTPInteractionTests(unittest.TestCase):
     INTERRUPT_AFTER_SECONDS = 1.0
     INTERRUPT_FINISH_TIMEOUT_SECONDS = 5.0
     TEST_HANG_DELAY_MS = 10_000
+    LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION = "v1.5.4"
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -85,6 +86,12 @@ class SFTPInteractionTests(unittest.TestCase):
         args = PARSED_ARGS
         cls.project_root = Path(__file__).resolve().parents[2]
         cls.duckdb_bin = normalize_host_binary_path(cls.project_root, args.duckdb_bin)
+        version_result = cls.run_sql("SELECT version();")
+        if version_result.returncode != 0:
+            raise RuntimeError(f"Failed to query DuckDB version:\n{version_result.output}")
+        cls.duckdb_version = version_result.stdout.strip()
+        if not cls.duckdb_version:
+            raise RuntimeError("DuckDB returned an empty version string")
         cls.data_dir = str((cls.project_root / "test/data").resolve())
         cls.tempdir = Path(tempfile.mkdtemp(prefix="h5db_sftp_interaction_"))
         cls.mutable_root = cls.tempdir / "mutable_root"
@@ -353,22 +360,23 @@ class SFTPInteractionTests(unittest.TestCase):
                 continue
             server.telemetry.reset()
 
-    def run_sql(self, sql: str, env: dict[str, str] | None = None) -> DuckDBResult:
+    @classmethod
+    def run_sql(cls, sql: str, env: dict[str, str] | None = None) -> DuckDBResult:
         try:
             completed = subprocess.run(
-                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
-                cwd=self.project_root,
+                [cls.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
+                cwd=cls.project_root,
                 env=env,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 capture_output=True,
-                timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+                timeout=cls.SUBPROCESS_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as ex:
             output = ((ex.stdout or "") + (ex.stderr or "")).strip()
             raise AssertionError(
-                f"DuckDB subprocess timed out after {self.SUBPROCESS_TIMEOUT_SECONDS}s.\n"
+                f"DuckDB subprocess timed out after {cls.SUBPROCESS_TIMEOUT_SECONDS}s.\n"
                 f"SQL:\n{sql}\n"
                 f"Partial output:\n{output}"
             ) from ex
@@ -1355,49 +1363,16 @@ class SFTPInteractionTests(unittest.TestCase):
         _, repeated_read_calls = self.password_server.telemetry.snapshot()
         self.assertEqual(repeated_read_calls, baseline_read_calls)
 
-    def test_missing_mtime_validated_metadata_query_does_not_retain_external_cache(self) -> None:
+    def _missing_mtime_metadata_cache_bytes(self, validation_mode: str | None) -> int:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
-        self.password_server.config.stat_omit_mtime = True
-        try:
-            for validation_name, validation_clause in (
-                ("default", ""),
-                ("validate_remote", "SET validate_external_file_cache='VALIDATE_REMOTE';"),
-            ):
-                with self.subTest(validation=validation_name):
-                    sql = textwrap.dedent(
-                        f"""
-                        LOAD h5db;
-                        PRAGMA enable_external_file_cache=true;
-                        {validation_clause}
-                        CREATE OR REPLACE TEMPORARY SECRET metadata_cache_missing_mtime (
-                            TYPE sftp,
-                            SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
-                            USERNAME 'h5db',
-                            PASSWORD 'h5db',
-                            KNOWN_HOSTS_PATH '{self.password_known_hosts}',
-                            PORT {self.password_server.port}
-                        );
-                        SELECT COUNT(*) FROM h5_tree('{url}');
-                        SELECT COALESCE(SUM(nr_bytes), 0)
-                        FROM duckdb_external_file_cache()
-                        WHERE path = '{url}';
-                        """
-                    ).strip()
-                    result = self.run_sql(sql)
-                    self.assertEqual(result.returncode, 0, msg=result.output)
-                    self.assertNumericOutput(result, ["10", "0"])
-        finally:
-            self.password_server.config.stat_omit_mtime = False
-
-    def test_missing_mtime_no_validation_metadata_query_uses_external_cache(self) -> None:
-        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        validation_clause = "" if validation_mode is None else f"SET validate_external_file_cache='{validation_mode}';"
         self.password_server.config.stat_omit_mtime = True
         try:
             sql = textwrap.dedent(
                 f"""
                 LOAD h5db;
                 PRAGMA enable_external_file_cache=true;
-                SET validate_external_file_cache='NO_VALIDATION';
+                {validation_clause}
                 CREATE OR REPLACE TEMPORARY SECRET metadata_cache_missing_mtime (
                     TYPE sftp,
                     SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
@@ -1417,9 +1392,26 @@ class SFTPInteractionTests(unittest.TestCase):
             numeric_lines = self.numeric_stdout_lines(result)
             self.assertEqual(len(numeric_lines), 2, msg=result.output)
             self.assertEqual(numeric_lines[0], "10", msg=result.output)
-            self.assertGreater(int(numeric_lines[1]), 0, msg=result.output)
+            return int(numeric_lines[1])
         finally:
             self.password_server.config.stat_omit_mtime = False
+
+    def test_missing_mtime_validated_metadata_query_does_not_retain_external_cache(self) -> None:
+        if self.duckdb_version == self.LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION:
+            self.skipTest("DuckDB v1.5.4 retains cache entries when validation metadata is missing")
+        for validation_mode in (None, "VALIDATE_REMOTE"):
+            with self.subTest(validation=validation_mode or "default"):
+                self.assertEqual(self._missing_mtime_metadata_cache_bytes(validation_mode), 0)
+
+    def test_duckdb_1_5_4_missing_mtime_validated_metadata_query_uses_external_cache(self) -> None:
+        if self.duckdb_version != self.LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION:
+            self.skipTest("legacy missing-validation-metadata cache behavior applies only to DuckDB v1.5.4")
+        for validation_mode in (None, "VALIDATE_REMOTE"):
+            with self.subTest(validation=validation_mode or "default"):
+                self.assertGreater(self._missing_mtime_metadata_cache_bytes(validation_mode), 0)
+
+    def test_missing_mtime_no_validation_metadata_query_uses_external_cache(self) -> None:
+        self.assertGreater(self._missing_mtime_metadata_cache_bytes("NO_VALIDATION"), 0)
 
     def test_no_validation_warm_cache_avoids_second_sftp_connection(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
