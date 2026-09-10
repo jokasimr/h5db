@@ -4,6 +4,8 @@
 
 namespace duckdb {
 
+static constexpr idx_t H5_REMOTE_CACHE_BLOCK_SIZE = 30ULL * 1024ULL;
+
 struct H5ExpandedFileList;
 
 enum class H5RemoteBackendType : uint8_t { DUCKDB_FS, SFTP };

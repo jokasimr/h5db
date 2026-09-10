@@ -10,11 +10,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 #include <algorithm>
 #include <optional>
 #include <string>
@@ -202,7 +198,8 @@ static bool H5AttributesSchemasMatch(const vector<AttributeInfo> &expected, cons
 }
 
 static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &return_names) {
+	vector<string> names;
 	ThrowIfInterrupted(context);
 	auto swmr = ResolveSwmrOption(context, input.named_parameters);
 	auto filename_option = ResolveFilenameColumnOption(input.named_parameters);
@@ -243,6 +240,7 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 		}
 	}
 
+	return_names = StringsToIdentifiers(names);
 	return result;
 }
 
@@ -311,7 +309,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 		gstate.file_idx++;
 		row_idx++;
 	}
-	output.SetCardinality(row_idx);
+	output.SetChildCardinality(row_idx);
 }
 
 class H5AttributesScalarFileReader {
@@ -355,8 +353,9 @@ struct H5AttributesScalarFileRows {
 	vector<idx_t> row_idxs;
 };
 
-static unique_ptr<FunctionData> H5AttributesScalarBind(ClientContext &context, ScalarFunction &,
-                                                       vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> H5AttributesScalarBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &arguments = input.GetArguments();
 	if (arguments.size() != 2) {
 		throw InvalidInputException("scalar h5_attributes requires exactly 2 arguments: filename and object path");
 	}
@@ -379,8 +378,9 @@ static void H5AttributesScalarWriteFileRows(ClientContext &context, const H5Attr
 }
 
 static void H5AttributesScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	FlatVector::SetSize(result, args.size());
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<H5AttributesScalarBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<H5AttributesScalarBindData>();
 	if (args.size() == 0) {
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 		return;
@@ -390,8 +390,8 @@ static void H5AttributesScalarFunction(DataChunk &args, ExpressionState &state, 
 	auto &path_vec = args.data[1];
 	UnifiedVectorFormat filename_data;
 	UnifiedVectorFormat path_data;
-	filename_vec.ToUnifiedFormat(args.size(), filename_data);
-	path_vec.ToUnifiedFormat(args.size(), path_data);
+	filename_vec.ToUnifiedFormat(filename_data);
+	path_vec.ToUnifiedFormat(path_data);
 	auto filename_ptr = UnifiedVectorFormat::GetData<string_t>(filename_data);
 	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
 	auto &context = state.GetContext();
@@ -414,7 +414,7 @@ static void H5AttributesScalarFunction(DataChunk &args, ExpressionState &state, 
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
+	auto &validity = FlatVector::ValidityMutable(result);
 
 	if (constant_filename) {
 		auto filename_idx = filename_data.sel->get_index(0);
@@ -490,7 +490,8 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	ScalarFunction h5_attributes_scalar("h5_attributes", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                    LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARIANT()),
 	                                    H5AttributesScalarFunction, H5AttributesScalarBind);
-	h5_attributes_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_attributes_scalar.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	h5_attributes_scalar.SetFallible();
 	h5_attributes_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_attributes_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

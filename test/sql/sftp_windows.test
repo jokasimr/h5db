@@ -1,0 +1,27 @@
+# name: test/sql/sftp_windows.test
+# description: SFTP is unavailable on Windows until DuckDB exports the required cache API
+# group: [sql]
+
+require h5db
+
+require windows
+
+query I
+SELECT h5db_version().sftp_library_version IS NULL;
+----
+true
+
+statement error
+SELECT COUNT(*) FROM h5_tree('sftp://example.com/file.h5');
+----
+SFTP support is currently disabled on Windows
+
+statement error
+SELECT COUNT(*) FROM h5_ls('sftp://example.com/*.h5');
+----
+SFTP support is currently disabled on Windows
+
+statement error
+SELECT * FROM h5_read('sftp://example.com/file.h5', '/values');
+----
+SFTP support is currently disabled on Windows

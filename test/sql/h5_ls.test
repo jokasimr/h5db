@@ -7,7 +7,7 @@ require h5db
 statement error
 SELECT COUNT(*) FROM h5_ls(NULL::VARCHAR, '/');
 ----
-Parser Error: h5_ls cannot take NULL list as parameter
+Parser Error: "h5_ls" cannot take NULL list as parameter
 
 query II
 SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'dataset')

@@ -335,7 +335,7 @@ FROM values;
 statement error
 SELECT h5_read('test/data/empty_scalar.h5', '/scalar_int', swmr := true);
 ----
-<REGEX>:.*No function matches the given name and argument types 'h5_read\(STRING_LITERAL, STRING_LITERAL, BOOLEAN\)'.*
+<REGEX>:.*No function matches the given name and argument types 'h5_read\(STRING_LITERAL, STRING_LITERAL, "swmr" := BOOLEAN\)'.*
 
 statement error
 SELECT h5_read(['test/data/empty_scalar.h5'], '/scalar_int');

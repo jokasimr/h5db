@@ -12,13 +12,9 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
@@ -265,7 +261,8 @@ static Value H5LsBuildMapValue(const std::vector<H5TreeNamedRow> &rows,
 }
 
 static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &return_names) {
+	vector<string> names;
 	auto result = make_uniq<H5LsBindData>();
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 	auto expanded = H5ExpandFilePatterns(context, input.inputs[0], "h5_ls");
@@ -297,6 +294,7 @@ static unique_ptr<FunctionData> H5LsBind(ClientContext &context, TableFunctionBi
 		names.push_back(filename_option.column_name);
 		return_types.push_back(LogicalType::VARCHAR);
 	}
+	return_names = StringsToIdentifiers(names);
 	return std::move(result);
 }
 
@@ -334,7 +332,7 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	auto &rows = gstate.batch_rows;
 	if (!gstate.scanner) {
 		D_ASSERT(bind_data.filenames.empty());
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	while (true) {
@@ -346,14 +344,14 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 		D_ASSERT(exhausted);
 		auto next_file_idx = gstate.file_idx + 1;
 		if (next_file_idx >= bind_data.filenames.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		H5LsOpenFileScanner(context, bind_data, next_file_idx, gstate);
 	}
 
 	auto count = rows.size();
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 
 	idx_t total_shape_elems = 0;
 	idx_t shape_offset = 0;
@@ -367,8 +365,8 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 		}
 		auto &shape_vector = output.data[*shape_output_idx];
 		ListVector::Reserve(shape_vector, total_shape_elems);
-		auto &child = ListVector::GetEntry(shape_vector);
-		shape_data = FlatVector::GetData<uint64_t>(child);
+		auto &child = ListVector::GetChildMutable(shape_vector);
+		shape_data = FlatVector::GetDataMutable<uint64_t>(child);
 	}
 
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
@@ -385,7 +383,7 @@ static void H5LsScan(ClientContext &context, TableFunctionInput &input, DataChun
 	H5LsPopulateEmptyColumns(gstate.output_layout.empty_output_idxs, output);
 }
 
-static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, ScalarFunction &bound_function,
+static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, BoundScalarFunction &bound_function,
                                                        vector<unique_ptr<Expression>> &arguments,
                                                        const char *function_name, bool force_swmr) {
 	if (arguments.size() < 2) {
@@ -429,17 +427,21 @@ static unique_ptr<FunctionData> H5LsScalarBindInternal(ClientContext &context, S
 	}
 	auto return_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::STRUCT(std::move(struct_fields)));
 
-	bound_function.return_type = return_type;
+	bound_function.SetReturnType(return_type);
 	return make_uniq<H5LsScalarBindData>(std::move(projected_attributes), swmr);
 }
 
-static unique_ptr<FunctionData> H5LsScalarBind(ClientContext &context, ScalarFunction &bound_function,
-                                               vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> H5LsScalarBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	return H5LsScalarBindInternal(context, bound_function, arguments, "h5_ls", false);
 }
 
-static unique_ptr<FunctionData> H5LsSwmrScalarBind(ClientContext &context, ScalarFunction &bound_function,
-                                                   vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> H5LsSwmrScalarBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	return H5LsScalarBindInternal(context, bound_function, arguments, "h5_ls_swmr", true);
 }
 
@@ -475,8 +477,9 @@ static void H5LsScalarWriteFileRows(ClientContext &context, const H5LsScalarFile
 }
 
 static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	FlatVector::SetSize(result, args.size());
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<H5LsScalarBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<H5LsScalarBindData>();
 	if (args.size() == 0) {
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 		return;
@@ -486,8 +489,8 @@ static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 	auto &path_vec = args.data[1];
 	UnifiedVectorFormat filename_data;
 	UnifiedVectorFormat path_data;
-	filename_vec.ToUnifiedFormat(args.size(), filename_data);
-	path_vec.ToUnifiedFormat(args.size(), path_data);
+	filename_vec.ToUnifiedFormat(filename_data);
+	path_vec.ToUnifiedFormat(path_data);
 	auto filename_ptr = UnifiedVectorFormat::GetData<string_t>(filename_data);
 	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
 
@@ -514,7 +517,7 @@ static void H5LsScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
+	auto &validity = FlatVector::ValidityMutable(result);
 
 	if (constant_filename) {
 		auto filename_idx = filename_data.sel->get_index(0);
@@ -586,8 +589,9 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 
 	ScalarFunction h5_ls_scalar("h5_ls", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalTypeId::MAP,
 	                            H5LsScalarFunction, H5LsScalarBind);
-	h5_ls_scalar.varargs = LogicalType::ANY;
-	h5_ls_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_ls_scalar.SetVarArgs(LogicalType::ANY);
+	h5_ls_scalar.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	h5_ls_scalar.SetFallible();
 	h5_ls_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_ls_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
@@ -598,8 +602,9 @@ void RegisterH5LsFunctions(ExtensionLoader &loader) {
 
 	ScalarFunction h5_ls_swmr_scalar("h5_ls_swmr", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalTypeId::MAP,
 	                                 H5LsScalarFunction, H5LsSwmrScalarBind);
-	h5_ls_swmr_scalar.varargs = LogicalType::ANY;
-	h5_ls_swmr_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_ls_swmr_scalar.SetVarArgs(LogicalType::ANY);
+	h5_ls_swmr_scalar.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	h5_ls_swmr_scalar.SetFallible();
 	h5_ls_swmr_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo swmr_info(std::move(h5_ls_swmr_scalar));
 	swmr_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

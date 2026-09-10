@@ -104,10 +104,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_three_and_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 6000000'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 6000000,');
 ----
 1
 
@@ -139,10 +136,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_chain_same_rse_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2000000'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2000000,');
 ----
 1
 
@@ -178,10 +172,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_chain_multi_rse_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 4000000'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 4000000,');
 ----
 1
 
@@ -214,10 +205,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_chain_rse_index_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 3000000'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 3000000,');
 ----
 1
 
@@ -252,10 +240,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_chain_tight_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500001'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500001,');
 ----
 1
 
@@ -290,10 +275,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_large_chain_empty_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 0'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
 ----
 1
 

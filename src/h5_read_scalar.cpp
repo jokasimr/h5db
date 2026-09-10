@@ -8,14 +8,10 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#if __has_include("duckdb/common/vector/list_vector.hpp")
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -179,12 +175,12 @@ static Vector &H5ReadScalarPrepareNestedListVector(Vector &root, const vector<hs
 		auto dimension = static_cast<idx_t>(h5_dimension);
 		auto child_count = CheckedDatasetSizeProduct(parent_count, dimension, filename, dataset_path);
 		ListVector::Reserve(*current, child_count);
-		auto entries = ListVector::GetData(*current);
+		auto entries = FlatVector::GetDataMutable<list_entry_t>(*current);
 		for (idx_t parent_idx = 0; parent_idx < parent_count; parent_idx++) {
 			entries[parent_idx] = list_entry_t(parent_idx * dimension, dimension);
 		}
 		ListVector::SetListSize(*current, child_count);
-		current = &ListVector::GetEntry(*current);
+		current = &ListVector::GetChildMutable(*current);
 		parent_count = child_count;
 	}
 	return *current;
@@ -276,13 +272,14 @@ static void H5ReadScalarDatasetIntoResult(ClientContext &context, hid_t file, co
 
 	auto source_type = space_class == H5S_SCALAR ? duckdb_type : H5ReadScalarNestedListType(duckdb_type, dims.size());
 	Vector source(source_type, 1);
+	FlatVector::SetSize(source, 1);
 	Vector &leaf =
 	    space_class == H5S_SCALAR ? source : H5ReadScalarPrepareNestedListVector(source, dims, filename, dataset_path);
 	ThrowIfInterrupted(context);
 
 	if (is_string) {
 		idx_t decoded_bytes = 0;
-		auto string_data = FlatVector::GetData<string_t>(leaf);
+		auto string_data = FlatVector::GetDataMutable<string_t>(leaf);
 		ReadHDF5Strings(dataset, h5_type, H5S_ALL, H5S_ALL, element_count, filename, dataset_path,
 		                [&](idx_t string_idx, const string &str) {
 			                if (string_idx % STANDARD_VECTOR_SIZE == 0) {
@@ -309,7 +306,7 @@ static void H5ReadScalarDatasetIntoResult(ClientContext &context, hid_t file, co
 					std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 					H5ErrorSuppressor suppress;
 					status = H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT,
-					                 FlatVector::GetData<T>(leaf));
+					                 FlatVector::GetDataMutable<T>(leaf));
 				}
 				if (status < 0) {
 					throw IOException(FormatRemoteDatasetReadError(filename, dataset_path));
@@ -351,8 +348,9 @@ struct H5ReadScalarFileRows {
 	vector<idx_t> row_idxs;
 };
 
-static unique_ptr<FunctionData> H5ReadScalarBind(ClientContext &context, ScalarFunction &,
-                                                 vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> H5ReadScalarBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &arguments = input.GetArguments();
 	if (arguments.size() != 2) {
 		throw InvalidInputException("scalar h5_read requires exactly 2 arguments: filename and dataset path");
 	}
@@ -375,8 +373,9 @@ static void H5ReadScalarWriteFileRows(ClientContext &context, const H5ReadScalar
 }
 
 static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	FlatVector::SetSize(result, args.size());
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<H5ReadScalarBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<H5ReadScalarBindData>();
 	if (args.size() == 0) {
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 		return;
@@ -386,8 +385,8 @@ static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector
 	auto &path_vec = args.data[1];
 	UnifiedVectorFormat filename_data;
 	UnifiedVectorFormat path_data;
-	filename_vec.ToUnifiedFormat(args.size(), filename_data);
-	path_vec.ToUnifiedFormat(args.size(), path_data);
+	filename_vec.ToUnifiedFormat(filename_data);
+	path_vec.ToUnifiedFormat(path_data);
 	auto filename_ptr = UnifiedVectorFormat::GetData<string_t>(filename_data);
 	auto path_ptr = UnifiedVectorFormat::GetData<string_t>(path_data);
 	auto &context = state.GetContext();
@@ -411,13 +410,13 @@ static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
+	auto &validity = FlatVector::ValidityMutable(result);
 
 	if (constant_filename) {
 		auto filename_idx = filename_data.sel->get_index(0);
 		if (!filename_data.validity.RowIsValid(filename_idx)) {
 			for (idx_t i = 0; i < args.size(); i++) {
-				validity.SetInvalid(i);
+				FlatVector::SetNull(result, i, true);
 			}
 			return;
 		}
@@ -428,7 +427,7 @@ static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector
 		for (idx_t i = 0; i < args.size(); i++) {
 			auto path_idx = path_data.sel->get_index(i);
 			if (!path_data.validity.RowIsValid(path_idx)) {
-				validity.SetInvalid(i);
+				FlatVector::SetNull(result, i, true);
 				continue;
 			}
 			validity.SetValid(i);
@@ -447,7 +446,7 @@ static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector
 		auto filename_idx = filename_data.sel->get_index(i);
 		auto path_idx = path_data.sel->get_index(i);
 		if (!filename_data.validity.RowIsValid(filename_idx) || !path_data.validity.RowIsValid(path_idx)) {
-			validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 		validity.SetValid(i);
@@ -468,7 +467,8 @@ static void H5ReadScalarFunction(DataChunk &args, ExpressionState &state, Vector
 void RegisterH5ReadScalarFunction(ExtensionLoader &loader) {
 	ScalarFunction h5_read_scalar("h5_read", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARIANT(),
 	                              H5ReadScalarFunction, H5ReadScalarBind);
-	h5_read_scalar.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	h5_read_scalar.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	h5_read_scalar.SetFallible();
 	h5_read_scalar.SetStability(FunctionStability::CONSISTENT_WITHIN_QUERY);
 	CreateScalarFunctionInfo scalar_info(std::move(h5_read_scalar));
 	scalar_info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

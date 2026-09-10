@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.14...3.29)
 
 # Set extension name here
 set(TARGET_NAME h5db)
@@ -8,7 +8,9 @@ set(TARGET_NAME h5db)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(HDF5 REQUIRED COMPONENTS C)
 
-find_package(libssh2 CONFIG REQUIRED)
+if(NOT WIN32)
+    find_package(libssh2 CONFIG REQUIRED)
+endif()
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -19,9 +21,11 @@ if(HDF5_FOUND)
     include_directories(${HDF5_INCLUDE_DIRS})
 endif()
 
-# Require C++17 for std::variant
+# Require C++20 for std::atomic::wait.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# The extension does not use C++ modules; avoid dependency scans before compiling.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 set(EXTENSION_SOURCES
     src/h5db_extension.cpp
@@ -48,11 +52,9 @@ if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME} ${HDF5_C_LIBRARIES})
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${HDF5_C_LIBRARIES})
 endif()
-target_link_libraries(${EXTENSION_NAME} libssh2::libssh2)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} libssh2::libssh2)
-if(WIN32)
-    target_link_libraries(${EXTENSION_NAME} ws2_32)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32)
+if(NOT WIN32)
+    target_link_libraries(${EXTENSION_NAME} libssh2::libssh2)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} libssh2::libssh2)
 endif()
 
 install(

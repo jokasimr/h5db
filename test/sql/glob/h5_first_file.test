@@ -208,7 +208,7 @@ IO Error: h5_first_file needs at least one file to read
 statement error
 SELECT h5_first_file([NULL]::VARCHAR[]);
 ----
-Parser Error: h5_first_file reader cannot take NULL input as parameter
+Parser Error: "h5_first_file" reader cannot take NULL input as parameter
 
 statement error
 SELECT h5_first_file(filename)

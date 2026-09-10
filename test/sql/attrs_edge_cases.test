@@ -101,7 +101,7 @@ IO Error: Failed to open HDF5 file: test/data/glob/no_such_*.h5
 statement error
 SELECT h5_attributes('test/data/root_attrs.h5', '/', swmr := true);
 ----
-<REGEX>:.*No function matches the given name and argument types 'h5_attributes\(STRING_LITERAL, STRING_LITERAL, BOOLEAN\)'.*
+<REGEX>:.*No function matches the given name and argument types 'h5_attributes\(STRING_LITERAL, STRING_LITERAL, "swmr" := BOOLEAN\)'.*
 
 statement error
 SELECT h5_attributes(['test/data/root_attrs.h5'], '/');

@@ -107,7 +107,7 @@ FROM h5_tree([
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR[]);
 ----
-Parser Error: h5_tree cannot take NULL list as parameter
+Parser Error: "h5_tree" cannot take NULL list as parameter
 
 statement error
 SELECT * FROM h5_read([
@@ -143,7 +143,7 @@ SELECT COUNT(*) FROM h5_read([
     NULL
 ], '/values');
 ----
-Parser Error: h5_read reader cannot take NULL input as parameter
+Parser Error: "h5_read" reader cannot take NULL input as parameter
 
 statement error
 SELECT COUNT(*) FROM h5_attributes([
@@ -151,4 +151,4 @@ SELECT COUNT(*) FROM h5_attributes([
     NULL
 ], '/target');
 ----
-Parser Error: h5_attributes reader cannot take NULL input as parameter
+Parser Error: "h5_attributes" reader cannot take NULL input as parameter

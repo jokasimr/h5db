@@ -68,10 +68,10 @@ H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &
 		return result;
 	}
 
-	Value boolean_value;
 	string error_message;
-	if (value.DefaultTryCastAs(LogicalType::BOOLEAN, boolean_value, &error_message)) {
-		result.include = BooleanValue::Get(boolean_value);
+	auto boolean_value = value.DefaultTryCastAs(LogicalType::BOOLEAN, &error_message);
+	if (boolean_value) {
+		result.include = BooleanValue::Get(*boolean_value);
 	}
 	return result;
 }
@@ -146,13 +146,13 @@ static std::unordered_set<idx_t> H5GetFilenameColumnRefIndexes(LogicalGet &get,
 	return result;
 }
 
-static bool H5IsFilenameColumnRef(const BoundColumnRefExpression &column_ref, idx_t table_index,
+static bool H5IsFilenameColumnRef(const BoundColumnRefExpression &column_ref, TableIndex table_index,
                                   const std::unordered_set<idx_t> &filename_column_refs) {
-	return column_ref.depth == 0 && column_ref.binding.table_index == table_index &&
-	       filename_column_refs.find(column_ref.binding.column_index) != filename_column_refs.end();
+	return column_ref.Depth() == 0 && column_ref.Binding().table_index == table_index &&
+	       filename_column_refs.find(column_ref.Binding().column_index) != filename_column_refs.end();
 }
 
-static bool H5ExpressionReferencesFilenameColumn(const Expression &expr, idx_t table_index,
+static bool H5ExpressionReferencesFilenameColumn(const Expression &expr, TableIndex table_index,
                                                  const std::unordered_set<idx_t> &filename_column_refs) {
 	bool found = false;
 	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
@@ -164,7 +164,7 @@ static bool H5ExpressionReferencesFilenameColumn(const Expression &expr, idx_t t
 	return found;
 }
 
-static void H5ReplaceFilenameColumnRefs(unique_ptr<Expression> &expr, idx_t table_index,
+static void H5ReplaceFilenameColumnRefs(unique_ptr<Expression> &expr, TableIndex table_index,
                                         const std::unordered_set<idx_t> &filename_column_refs, const string &filename) {
 	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
 	    expr, [&](BoundColumnRefExpression &column_ref, unique_ptr<Expression> &current) {
@@ -175,7 +175,7 @@ static void H5ReplaceFilenameColumnRefs(unique_ptr<Expression> &expr, idx_t tabl
 }
 
 static std::optional<bool> H5TryEvaluateFilenameFilter(ClientContext &context, const Expression &expr,
-                                                       idx_t table_index,
+                                                       TableIndex table_index,
                                                        const std::unordered_set<idx_t> &filename_column_refs,
                                                        const string &filename) {
 	auto filter_copy = expr.Copy();
@@ -194,22 +194,22 @@ static std::optional<bool> H5TryEvaluateFilenameFilter(ClientContext &context, c
 	return result.GetValue<bool>();
 }
 
-static bool H5FilenameFilterRejectsFile(ClientContext &context, const Expression &expr, idx_t table_index,
+static bool H5FilenameFilterRejectsFile(ClientContext &context, const Expression &expr, TableIndex table_index,
                                         const std::unordered_set<idx_t> &filename_column_refs, const string &filename) {
 	auto result = H5TryEvaluateFilenameFilter(context, expr, table_index, filename_column_refs, filename);
 	if (result.has_value()) {
 		return !*result;
 	}
 
-	if (expr.expression_class != ExpressionClass::BOUND_CONJUNCTION) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONJUNCTION) {
 		return false;
 	}
 
 	auto &conjunction = expr.Cast<BoundConjunctionExpression>();
-	if (conjunction.type != ExpressionType::CONJUNCTION_AND) {
+	if (conjunction.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
 		return false;
 	}
-	for (const auto &child : conjunction.children) {
+	for (const auto &child : conjunction.GetChildren()) {
 		if (H5FilenameFilterRejectsFile(context, *child, table_index, filename_column_refs, filename)) {
 			return true;
 		}
@@ -323,7 +323,7 @@ idx_t ResolveScalarReadMemoryLimitOption(ClientContext &context) {
 }
 
 bool IsInterrupted(ClientContext &context) {
-	return context.interrupted.load(std::memory_order_relaxed);
+	return context.IsInterrupted();
 }
 
 void ThrowIfInterrupted(ClientContext &context) {
@@ -377,7 +377,7 @@ std::string H5NormalizeExceptionMessage(const std::string &message) {
 		return message;
 	}
 	try {
-		auto info = StringUtil::ParseJSONMap(message.substr(json_start), true)->Flatten();
+		auto info = StringUtil::ParseJSONMap(message.substr(json_start), true);
 		for (const auto &entry : info) {
 			if (entry.first == "exception_message") {
 				return entry.second;

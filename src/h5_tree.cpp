@@ -7,13 +7,9 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -303,7 +299,8 @@ private:
 };
 
 static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &return_names) {
+	vector<string> names;
 	auto result = make_uniq<H5TreeBindData>();
 	result->swmr = ResolveSwmrOption(context, input.named_parameters);
 	auto expanded = H5ExpandFilePatterns(context, input.inputs[0], "h5_tree");
@@ -325,6 +322,7 @@ static unique_ptr<FunctionData> H5TreeBind(ClientContext &context, TableFunction
 		names.push_back(filename_option.column_name);
 		return_types.push_back(LogicalType::VARCHAR);
 	}
+	return_names = StringsToIdentifiers(names);
 	return std::move(result);
 }
 
@@ -360,7 +358,7 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 	vector<H5TreeRow> rows;
 	if (!gstate.scanner) {
 		D_ASSERT(bind_data.filenames.empty());
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	while (true) {
@@ -370,13 +368,13 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 		}
 		auto next_file_idx = gstate.file_idx + 1;
 		if (next_file_idx >= bind_data.filenames.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		H5TreeOpenFileScanner(context, bind_data, gstate, next_file_idx);
 	}
 
-	output.SetCardinality(rows.size());
+	output.SetChildCardinality(rows.size());
 
 	idx_t total_shape_elems = 0;
 	idx_t shape_offset = 0;
@@ -390,8 +388,8 @@ static void H5TreeScan(ClientContext &context, TableFunctionInput &data, DataChu
 		}
 		auto &shape_vector = output.data[*shape_output_idx];
 		ListVector::Reserve(shape_vector, total_shape_elems);
-		auto &child = ListVector::GetEntry(shape_vector);
-		shape_data = FlatVector::GetData<uint64_t>(child);
+		auto &child = ListVector::GetChildMutable(shape_vector);
+		shape_data = FlatVector::GetDataMutable<uint64_t>(child);
 	}
 
 	for (idx_t row_idx = 0; row_idx < rows.size(); row_idx++) {

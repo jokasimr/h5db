@@ -189,10 +189,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) > 1001
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500,');
 ----
 1
 
@@ -226,10 +223,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -263,10 +257,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500,');
 ----
 1
 
@@ -300,10 +291,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS DECIMAL(21,1)) 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500,');
 ----
 1
 
@@ -337,10 +325,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) >
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -374,10 +359,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) BETWEE
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500,');
 ----
 1
 
@@ -411,10 +393,7 @@ WHERE contains(content, '"Expression": "(CAST(event_time_zero AS HUGEINT) <= 100
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 500'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 500,');
 ----
 1
 
@@ -452,10 +431,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) >
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -489,10 +465,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) >
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -526,10 +499,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) <
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -563,10 +533,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) <
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -600,10 +567,7 @@ WHERE contains(content, '"Expression": "(CAST(int_rse_values AS DECIMAL(11,1)) <
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -641,10 +605,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) > 3.5)
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -678,10 +639,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) >= 3.5
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -715,10 +673,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) < 3.5)
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -752,10 +707,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) <= 3.5
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -789,10 +741,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) BETWEE
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -826,10 +775,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) > 3.5)
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -863,10 +809,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) >= 3.5
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -900,10 +843,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) <= 3.5
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -937,10 +877,7 @@ WHERE contains(content, '"Expression": "(CAST(float_rse_values AS DOUBLE) < 3.5)
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -978,10 +915,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) > 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -1015,10 +949,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) >=
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -1052,10 +983,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) < 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1089,10 +1017,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) <=
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1126,10 +1051,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) BE
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1163,10 +1085,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) >=
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -1200,10 +1119,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) > 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -1237,10 +1153,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) <=
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1274,10 +1187,7 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) < 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1311,10 +1221,7 @@ WHERE contains(content, '"Expression": "(CAST(int64_rse_values AS DECIMAL(20,1))
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1348,10 +1255,7 @@ WHERE contains(content, '"Expression": "(CAST(int64_rse_values AS DECIMAL(20,1))
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1389,10 +1293,7 @@ WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 200'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 200,');
 ----
 1
 
@@ -1426,10 +1327,7 @@ WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 300'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 300,');
 ----
 1
 
@@ -1463,10 +1361,7 @@ WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1500,10 +1395,7 @@ WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 700'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 700,');
 ----
 1
 
@@ -1537,10 +1429,7 @@ WHERE contains(content, '"Expression": "(CAST(leading_null_rse_values AS DECIMAL
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -1578,10 +1467,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) < 1.2)"');
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1
 
@@ -1616,17 +1502,14 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (regular BETWEEN 400 AND 800) AND (float_rse_values <= 4.6))"');
+WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (float_rse_values <= 4.6) AND (regular BETWEEN 400 AND 800))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 200'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 200,');
 ----
 1
 
@@ -1657,17 +1540,14 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(content, '"Expression": "((int_rse_values >= 30) AND (regular BETWEEN 400 AND 699) AND (CAST(int_rse_values AS DECIMAL(11,1)) BETWEEN 20.1 AND 45.0))"');
+WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) BETWEEN 20.1 AND 45.0) AND (int_rse_values >= 30) AND (regular BETWEEN 400 AND 699))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -1698,17 +1578,14 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (regular BETWEEN 400 AND 700) AND (float_rse_values <= 4.0))"');
+WHERE contains(content, '"Expression": "((CAST(int_rse_values AS DECIMAL(11,1)) >= 30.5) AND (float_rse_values <= 4.0) AND (regular BETWEEN 400 AND 700))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 0'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
 ----
 1
 
@@ -1737,17 +1614,14 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(content, '"Expression": "((integers >= 2) AND (CAST(index AS DECIMAL(20,1)) BETWEEN 2.1 AND 6.9))"');
+WHERE contains(content, '"Expression": "((CAST(index AS DECIMAL(20,1)) BETWEEN 2.1 AND 6.9) AND (integers >= 2))"');
 ----
 1
 
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 4'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 4,');
 ----
 1
 
@@ -1781,10 +1655,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) <= 1.2)"')
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1
 
@@ -1818,10 +1689,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) >= 1.2)"')
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 8'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 8,');
 ----
 1
 
@@ -1855,10 +1723,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) > 1.2)"');
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 8'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 8,');
 ----
 1
 
@@ -1892,10 +1757,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) >= 7.2)"')
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1
 
@@ -1929,10 +1791,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) > 7.2)"');
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1
 
@@ -1966,10 +1825,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) <= 7.2)"')
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 8'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 8,');
 ----
 1
 
@@ -2003,10 +1859,7 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) < 7.2)"');
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 8'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 8,');
 ----
 1
 
@@ -2040,9 +1893,6 @@ WHERE contains(content, '"Expression": "(CAST(index AS DECIMAL(20,1)) BETWEEN 1.
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1

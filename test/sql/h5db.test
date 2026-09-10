@@ -6,23 +6,22 @@
 require h5db
 
 # Test basic extension loading
-query III
+query II
 SELECT
     length(struct_extract(h5db_version(), 'h5db_version')) > 0,
-    struct_extract(h5db_version(), 'hdf5_version') LIKE '1.%',
-    length(struct_extract(h5db_version(), 'sftp_library_version')) > 0;
+    struct_extract(h5db_version(), 'hdf5_version') LIKE '1.%';
 ----
-true	true	true
+true	true
 
 statement error
 SELECT COUNT(*) FROM h5_tree(NULL::VARCHAR);
 ----
-Parser Error: h5_tree cannot take NULL list as parameter
+Parser Error: "h5_tree" cannot take NULL list as parameter
 
 statement error
 SELECT * FROM h5_read(NULL::VARCHAR, '/values');
 ----
-Parser Error: h5_read cannot take NULL list as parameter
+Parser Error: "h5_read" cannot take NULL list as parameter
 
 statement error
 SELECT * FROM h5_read('test/data/simple.h5', NULL::VARCHAR);

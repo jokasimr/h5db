@@ -17,7 +17,6 @@
 namespace duckdb {
 
 static constexpr H5FD_class_value_t DUCKDB_VFD_VALUE = 600;
-static constexpr idx_t REMOTE_CACHE_BLOCK_SIZE = 30ULL * 1024ULL;
 static constexpr idx_t REMOTE_CACHE_MAX_BLOCKS = 100;
 static constexpr idx_t REMOTE_LARGE_DATA_CACHE_BUDGET = 200ULL * 1024ULL * 1024ULL;
 static hid_t duckdb_vfd_driver_id = -1;
@@ -90,11 +89,11 @@ static inline const H5FD_duckdb_t *GetFile(const H5FD_t *f) {
 }
 
 static inline idx_t CacheBlockId(idx_t offset) {
-	return offset / REMOTE_CACHE_BLOCK_SIZE;
+	return offset / H5_REMOTE_CACHE_BLOCK_SIZE;
 }
 
 static bool IsContextInterrupted(ClientContext *context) {
-	return context && context->interrupted.load(std::memory_order_relaxed);
+	return context && context->IsInterrupted();
 }
 
 static void ThrowIfContextInterrupted(ClientContext *context) {
@@ -140,8 +139,8 @@ static H5FD_duckdb_t::CachedBlock &LoadCachedBlock(H5FD_duckdb_t &file, idx_t bl
 
 	EvictBlockIfNeeded(file);
 
-	auto block_offset = block_id * REMOTE_CACHE_BLOCK_SIZE;
-	auto bytes_to_read = MinValue<idx_t>(REMOTE_CACHE_BLOCK_SIZE, static_cast<idx_t>(file.eof) - block_offset);
+	auto block_offset = block_id * H5_REMOTE_CACHE_BLOCK_SIZE;
+	auto bytes_to_read = MinValue<idx_t>(H5_REMOTE_CACHE_BLOCK_SIZE, static_cast<idx_t>(file.eof) - block_offset);
 	if (bytes_to_read == 0) {
 		throw IOException("Failed to load remote cache block: zero bytes available");
 	}
@@ -170,7 +169,7 @@ static void ReadFromBlockCache(H5FD_duckdb_t &file, idx_t read_offset, idx_t rea
 		ThrowIfContextInterrupted(file.context);
 		auto block_id = CacheBlockId(current_offset);
 		auto &block = LoadCachedBlock(file, block_id);
-		auto block_offset = block_id * REMOTE_CACHE_BLOCK_SIZE;
+		auto block_offset = block_id * H5_REMOTE_CACHE_BLOCK_SIZE;
 		auto offset_in_block = current_offset - block_offset;
 		if (offset_in_block >= block.valid_bytes) {
 			throw IOException("Failed to read remote cache block: read past valid block data");
@@ -320,7 +319,7 @@ static herr_t DuckDBRead(H5FD_t *file, H5FD_mem_t mem_type, hid_t, haddr_t addr,
 		// VFD block cache for small reads to collapse those requests. For large raw reads, route only a limited number
 		// of requested bytes through ReadExactCached before falling back to ReadExact. This budget controls the VFD's
 		// routing decision, not the exact number of bytes DuckDB's external file cache may admit.
-		if (mem_type == H5FD_MEM_DRAW && read_size >= REMOTE_CACHE_BLOCK_SIZE) {
+		if (mem_type == H5FD_MEM_DRAW && read_size >= H5_REMOTE_CACHE_BLOCK_SIZE) {
 			if (f->query_state->TryConsumeLargeDataCacheBudget(read_size)) {
 				ReadExactCached(*f, read_offset, read_size, buf);
 			} else {
