@@ -45,6 +45,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/wide_shape_a.h5"
   "$PROJECT_ROOT/test/data/wide_shape_b.h5"
   "$PROJECT_ROOT/test/data/wide_shape_mismatch.h5"
+  "$PROJECT_ROOT/test/data/scaled_cache_limit.h5"
   "$PROJECT_ROOT/test/data/links.h5"
   "$PROJECT_ROOT/test/data/complex_links.h5"
   "$PROJECT_ROOT/test/data/h5_tree_traversal_hint_bug.h5"

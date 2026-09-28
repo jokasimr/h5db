@@ -17,6 +17,7 @@ INT32_ROWS = 300_000
 FIXED_CACHE_LIMIT_ROWS = 1_000_001
 FIXED_CACHE_LIMIT_WIDTH = 4096
 LIST_THREADED_ROWS = 100
+SCALED_CACHE_CHUNK_ROWS = 64 * 1024 * 1024 // np.dtype(np.int64).itemsize + 1
 
 
 def make_wide_data(offset: int) -> np.ndarray:
@@ -112,5 +113,14 @@ with h5py.File("wide_few_rows.h5", "w") as f:
 write_shape_fixture("wide_shape_a.h5", (2, LIST_HEIGHT, LIST_WIDTH), 1.0)
 write_shape_fixture("wide_shape_b.h5", (3, LIST_HEIGHT, LIST_WIDTH), 2.0)
 write_shape_fixture("wide_shape_mismatch.h5", (1, 64, 256), 3.0)
+
+with h5py.File("scaled_cache_limit.h5", "w") as f:
+    f.create_dataset(
+        "values",
+        shape=(SCALED_CACHE_CHUNK_ROWS + 1,),
+        dtype=np.int64,
+        chunks=(SCALED_CACHE_CHUNK_ROWS,),
+        fillvalue=-10,
+    )
 
 print("Created wide-row test files successfully!")

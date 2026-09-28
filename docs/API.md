@@ -914,6 +914,13 @@ strings such as `'1MB'`, `'8MB'`, `'512KB'`. Defaults to `'1MB'`. Values above `
 This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` may align cache windows upward to the
 dataset's first-dimension HDF5 chunk size.
 
+The combined cache-window limit for each projected numeric column in an active
+file is `max(128MiB, 4 * h5db_batch_size)`. This allows two chunk-aligned
+windows to each grow to approximately twice the requested target before
+`h5_read` falls back to direct reads. Cache memory is allocated eagerly and is
+not governed by DuckDB's `memory_limit`, so multiple cached columns or active
+file states can use a multiple of this limit.
+
 **Example:**
 ```sql
 SET h5db_batch_size = '4MB';

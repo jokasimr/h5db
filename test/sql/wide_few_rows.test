@@ -195,6 +195,22 @@ LIMIT 1;
 ----
 -9	-9	SMALLINT[][]
 
+# Two windows slightly larger than 64 MiB exceed the 128 MiB minimum cache
+# limit. Raising the target to 33 MiB raises the per-column limit to 132 MiB
+# and admits both windows.
+statement ok
+SET h5db_batch_size='33MiB';
+
+query I
+SELECT values
+FROM h5_read('test/data/scaled_cache_limit.h5', '/values')
+LIMIT 1;
+----
+-10
+
+statement ok
+RESET h5db_batch_size;
+
 # Cache limits apply to fixed ARRAY output too. The HDF5 first chunk dimension
 # would otherwise produce two approximately 4 GiB logical cache windows.
 statement ok

@@ -53,8 +53,11 @@ static T &GetStructChild(unique_ptr<T> &child) {
 }
 
 static constexpr idx_t H5_READ_WIDE_ROW_THRESHOLD_BYTES = 64 * 1024;
-// Bounds the combined storage of a column's one or two cache windows.
-static constexpr idx_t H5_READ_CACHE_LIMIT_BYTES = 128 * 1024 * 1024;
+// Base bound for the combined storage of a column's one or two cache windows.
+static constexpr idx_t H5_READ_BASE_CACHE_LIMIT_BYTES = 128 * 1024 * 1024;
+// Chunk alignment can grow one window to nearly twice the target, and the
+// read-ahead cache retains up to two windows.
+static constexpr idx_t H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER = 4;
 
 // =============================================================================
 // Type-safe index wrappers for projection pushdown
@@ -566,11 +569,20 @@ static idx_t ComputeCacheWindowCount(idx_t window_rows, idx_t total_rows) {
 	return window_rows < total_rows ? RegularColumnCache::MAX_WINDOWS : 1;
 }
 
+static idx_t ComputeCacheLimitBytes(idx_t target_batch_size_bytes) {
+	D_ASSERT(target_batch_size_bytes > 0);
+	auto max_value = NumericLimits<idx_t>::Maximum();
+	auto scaled_limit = target_batch_size_bytes > max_value / H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER
+	                        ? max_value
+	                        : target_batch_size_bytes * H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER;
+	return MaxValue<idx_t>(H5_READ_BASE_CACHE_LIMIT_BYTES, scaled_limit);
+}
+
 static bool H5ReadShouldCreateCache(const RegularColumnSpec &spec, idx_t window_rows, idx_t total_rows,
-                                    idx_t scan_batch_size) {
+                                    idx_t scan_batch_size, idx_t cache_limit_bytes) {
 	D_ASSERT(spec.output_bytes_per_row > 0);
 	auto window_count = ComputeCacheWindowCount(window_rows, total_rows);
-	auto max_window_rows = H5_READ_CACHE_LIMIT_BYTES / window_count / spec.output_bytes_per_row;
+	auto max_window_rows = cache_limit_bytes / window_count / spec.output_bytes_per_row;
 	return window_rows > scan_batch_size && window_rows <= max_window_rows;
 }
 
@@ -1317,6 +1329,7 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 	ThrowIfInterrupted(context);
 	auto result = make_uniq<H5ReadGlobalState>();
 	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
+	auto cache_limit_bytes = ComputeCacheLimitBytes(target_batch_size_bytes);
 
 	result->columns_to_scan = data_column_ids;
 	result->output_column_positions = data_output_positions;
@@ -1384,8 +1397,8 @@ static unique_ptr<H5ReadGlobalState> InitSingleH5ReadState(ClientContext &contex
 				    if (!spec.is_string && spec.output_bytes_per_row > 0) {
 					    auto window_rows = ComputeCacheWindowRows(spec, state.dataset.get(), target_batch_size_bytes,
 					                                              bind_data.num_rows);
-					    if (window_rows > 0 &&
-					        H5ReadShouldCreateCache(spec, window_rows, bind_data.num_rows, result->scan_batch_size)) {
+					    if (window_rows > 0 && H5ReadShouldCreateCache(spec, window_rows, bind_data.num_rows,
+					                                                   result->scan_batch_size, cache_limit_bytes)) {
 						    state.cache = std::make_unique<RegularColumnCache>();
 						    state.cache->window_rows = window_rows;
 
