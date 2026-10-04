@@ -85,6 +85,38 @@ FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=false)
 ----
 test/data/glob/attr_schema_1.h5
 
+# Filename filters skip later files before opening them.
+query III
+SELECT COUNT(*), SUM(a), SUM(b)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/does_not_exist_attributes_filename_pushdown.h5'
+], '/target')
+WHERE filename LIKE '%/attr_schema_1.h5';
+----
+1	1	2
+
+query III
+SELECT COUNT(*), SUM(a), SUM(b)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/does_not_exist_attributes_filename_pushdown.h5'
+], '/target', filename='source')
+WHERE source LIKE '%/attr_schema_1.h5';
+----
+1	1	2
+
+# If pruning removes the schema file, validate the first remaining file.
+statement error
+SELECT COUNT(*)
+FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_type_mismatch.h5'
+], '/target')
+WHERE filename LIKE '%/attr_schema_type_mismatch.h5';
+----
+incompatible attribute schema
+
 statement error
 FROM h5_attributes('test/data/glob/attr_schema_1.h5', '/target', filename=NULL);
 ----
@@ -107,7 +139,7 @@ FROM h5_attributes([
     'test/data/glob/attr_schema_type_mismatch.h5'
 ], '/target');
 ----
-Binder Error: h5_attributes matched file 'test/data/glob/attr_schema_type_mismatch.h5' with an incompatible attribute schema
+IO Error: h5_attributes matched file 'test/data/glob/attr_schema_type_mismatch.h5' with an incompatible attribute schema
 
 statement error
 SELECT COUNT(*)
@@ -116,7 +148,7 @@ FROM h5_attributes([
     'test/data/glob/attr_schema_name_mismatch.h5'
 ], '/target');
 ----
-Binder Error: h5_attributes matched file 'test/data/glob/attr_schema_name_mismatch.h5' with an incompatible attribute schema
+IO Error: h5_attributes matched file 'test/data/glob/attr_schema_name_mismatch.h5' with an incompatible attribute schema
 
 statement error
 SELECT COUNT(*)

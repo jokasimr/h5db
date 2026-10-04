@@ -35,8 +35,9 @@ stack or SFTP.
   Lists only the immediate children of a group. The table form returns the same row shape as `h5_tree`; the scalar
   form returns a `MAP(VARCHAR, STRUCT(...))` keyed by child name.
 - `h5_attributes(filename_or_filenames, object_path)`
-  Reads attributes from an object or the file root. Multi-file reads return one wide row per file and require the same
-  attribute names, types, and order in every matched file. The scalar form returns one attribute set per input row.
+  Reads attributes from an object or the file root. Multi-file reads return one wide row per file. The first file
+  determines the columns; each subsequent file is checked when read and must have the same attribute names and types.
+  The scalar form returns one attribute set per input row.
 
 For a practical guide to the main workflows, see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 For the full API, see [docs/API.md](docs/API.md).

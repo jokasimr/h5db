@@ -10,12 +10,14 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #else
 #include "duckdb/common/types/vector.hpp"
 #endif
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -32,6 +34,39 @@ struct AttributeInfo {
 	LogicalType type;
 };
 
+class H5AttributesQueryBindCache : public ClientContextState {
+public:
+	optional_ptr<H5FileHandle> TryGetFile(const string &filename, bool swmr) {
+		auto key = std::make_pair(filename, swmr);
+		auto entry = files.find(key);
+		if (entry != files.end()) {
+			return entry->second;
+		}
+		// Retain the first files only; additional binds use short-lived handles.
+		if (files.size() >= MAX_CACHED_FILES) {
+			return nullptr;
+		}
+		return files[std::move(key)];
+	}
+
+	void QueryBegin(ClientContext &) override {
+		Clear();
+	}
+
+	void QueryEnd() override {
+		Clear();
+	}
+
+	void Clear() {
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+		files.clear();
+	}
+
+private:
+	static constexpr idx_t MAX_CACHED_FILES = 32;
+	map<std::pair<string, bool>, H5FileHandle> files;
+};
+
 struct H5AttributesScanLayout {
 	vector<std::optional<idx_t>> attribute_output_idxs;
 	vector<idx_t> filename_output_idxs;
@@ -40,6 +75,7 @@ struct H5AttributesScanLayout {
 struct H5AttributesBindData : public TableFunctionData {
 	vector<string> filenames;
 	vector<AttributeInfo> attributes;
+	string schema_filename;
 	std::string object_path;
 	bool swmr = false;
 	std::optional<idx_t> visible_filename_idx;
@@ -154,24 +190,9 @@ static H5AttributesScanLayout H5AttributesBuildOutputLayout(const H5AttributesBi
 	return result;
 }
 
-static vector<AttributeInfo> BindSingleH5AttributesFile(ClientContext &context, const string &filename,
-                                                        const string &object_path, bool swmr) {
-	ThrowIfInterrupted(context);
-
+static vector<AttributeInfo> InspectH5AttributesObject(H5ObjectHandle &obj, const string &filename,
+                                                       const string &object_path) {
 	vector<AttributeInfo> result;
-
-	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
-	H5ErrorSuppressor suppress_errors;
-	H5FileHandle file(&context, filename.c_str(), H5F_ACC_RDONLY, swmr);
-	if (!file.is_valid()) {
-		throw IOException(FormatRemoteFileError("Failed to open HDF5 file", filename));
-	}
-
-	H5ObjectHandle obj(file, object_path.c_str());
-	if (!obj.is_valid()) {
-		throw IOException(FormatHDF5ObjectError("Failed to open object", filename, object_path));
-	}
-
 	hsize_t idx = 0;
 	AttrIterData iter_data;
 	iter_data.attributes = &result;
@@ -189,6 +210,28 @@ static vector<AttributeInfo> BindSingleH5AttributesFile(ClientContext &context, 
 	return result;
 }
 
+static vector<AttributeInfo> BindFirstH5AttributesFile(ClientContext &context, const string &filename,
+                                                       const string &object_path, bool swmr,
+                                                       optional_ptr<H5AttributesQueryBindCache> query_cache) {
+	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+	H5ErrorSuppressor suppress_errors;
+	H5FileHandle local_file;
+	auto cached_file = query_cache ? query_cache->TryGetFile(filename, swmr) : nullptr;
+	auto &file = cached_file ? *cached_file : local_file;
+	if (!file.is_valid()) {
+		file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr);
+	}
+	if (!file.is_valid()) {
+		throw IOException(FormatRemoteFileError("Failed to open HDF5 file", filename));
+	}
+
+	H5ObjectHandle obj(file, object_path.c_str());
+	if (!obj.is_valid()) {
+		throw IOException(FormatHDF5ObjectError("Failed to open object", filename, object_path));
+	}
+	return InspectH5AttributesObject(obj, filename, object_path);
+}
+
 static bool H5AttributesSchemasMatch(const vector<AttributeInfo> &expected, const vector<AttributeInfo> &actual) {
 	if (expected.size() != actual.size()) {
 		return false;
@@ -204,13 +247,18 @@ static bool H5AttributesSchemasMatch(const vector<AttributeInfo> &expected, cons
 static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	ThrowIfInterrupted(context);
+	shared_ptr<H5AttributesQueryBindCache> query_cache;
+	// Standalone Prepare/TryBindRelation calls have no query lifecycle to clean up a cache.
+	if (context.transaction.HasActiveTransaction() && context.transaction.GetActiveQuery() != MAXIMUM_QUERY_ID) {
+		query_cache = context.registered_state->GetOrCreate<H5AttributesQueryBindCache>("h5db_attributes_bind_cache");
+	}
 	auto swmr = ResolveSwmrOption(context, input.named_parameters);
 	auto filename_option = ResolveFilenameColumnOption(input.named_parameters);
 	auto object_path = NormalizeObjectPath(GetRequiredStringArgument(input.inputs[1], "h5_attributes", "path"));
 	auto expanded = H5ExpandFilePatterns(context, input.inputs[0], "h5_attributes");
 	D_ASSERT(!expanded.filenames.empty());
 
-	auto attributes = BindSingleH5AttributesFile(context, expanded.filenames[0], object_path, swmr);
+	auto attributes = BindFirstH5AttributesFile(context, expanded.filenames[0], object_path, swmr, query_cache.get());
 	for (const auto &attr : attributes) {
 		names.push_back(attr.name);
 		return_types.push_back(attr.type);
@@ -228,26 +276,28 @@ static unique_ptr<FunctionData> H5AttributesBind(ClientContext &context, TableFu
 	auto result = make_uniq<H5AttributesBindData>();
 	result->filenames = std::move(expanded.filenames);
 	result->attributes = std::move(attributes);
+	result->schema_filename = result->filenames[0];
 	result->object_path = std::move(object_path);
 	result->swmr = swmr;
 	if (filename_option.include) {
 		result->visible_filename_idx = names.size() - 1;
 	}
 
-	for (idx_t file_idx = 1; file_idx < result->filenames.size(); file_idx++) {
-		auto file_attributes =
-		    BindSingleH5AttributesFile(context, result->filenames[file_idx], result->object_path, swmr);
-		if (!H5AttributesSchemasMatch(result->attributes, file_attributes)) {
-			throw BinderException("h5_attributes matched file '%s' with an incompatible attribute schema",
-			                      result->filenames[file_idx]);
-		}
-	}
-
 	return result;
+}
+
+static void H5AttributesPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                              vector<unique_ptr<Expression>> &filters) {
+	auto &bind_data = bind_data_p->Cast<H5AttributesBindData>();
+	H5ApplyFilenameFilterPushdown(context, get, bind_data.visible_filename_idx, bind_data.filenames, filters);
 }
 
 static unique_ptr<GlobalTableFunctionState> H5AttributesInit(ClientContext &context, TableFunctionInitInput &input) {
 	ThrowIfInterrupted(context);
+	// Release bind handles before execution opens its own files.
+	if (auto query_cache = context.registered_state->Get<H5AttributesQueryBindCache>("h5db_attributes_bind_cache")) {
+		query_cache->Clear();
+	}
 	auto &bind_data = input.bind_data->Cast<H5AttributesBindData>();
 	auto result = make_uniq<H5AttributesGlobalState>();
 	result->output_layout = H5AttributesBuildOutputLayout(bind_data, input.column_ids);
@@ -271,10 +321,10 @@ static Value H5AttributesReadAttributeValue(H5ObjectHandle &obj, const Attribute
 	}
 }
 
-static void H5AttributesWriteFileRow(ClientContext &context, const H5AttributesBindData &bind_data,
-                                     const string &filename, const H5AttributesScanLayout &layout, DataChunk &output,
-                                     idx_t row_idx) {
+static void H5AttributesWriteFileRow(ClientContext &context, const H5AttributesBindData &bind_data, idx_t file_idx,
+                                     const H5AttributesScanLayout &layout, DataChunk &output, idx_t row_idx) {
 	ThrowIfInterrupted(context);
+	const auto &filename = bind_data.filenames[file_idx];
 
 	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
 	H5ErrorSuppressor suppress_errors;
@@ -286,6 +336,14 @@ static void H5AttributesWriteFileRow(ClientContext &context, const H5AttributesB
 	H5ObjectHandle obj(file, bind_data.object_path.c_str());
 	if (!obj.is_valid()) {
 		throw IOException(FormatHDF5ObjectError("Failed to open object", filename, bind_data.object_path));
+	}
+
+	// Reuse the schema only when this is the file inspected during bind. Filename
+	// pruning can make a different file the first one scanned.
+	if ((file_idx != 0 || filename != bind_data.schema_filename) &&
+	    !H5AttributesSchemasMatch(bind_data.attributes,
+	                              InspectH5AttributesObject(obj, filename, bind_data.object_path))) {
+		throw IOException("h5_attributes matched file '%s' with an incompatible attribute schema", filename);
 	}
 
 	for (idx_t attr_idx = 0; attr_idx < bind_data.attributes.size(); attr_idx++) {
@@ -306,7 +364,7 @@ static void H5AttributesScan(ClientContext &context, TableFunctionInput &input, 
 	idx_t row_idx = 0;
 	while (gstate.file_idx < bind_data.filenames.size() && row_idx < STANDARD_VECTOR_SIZE) {
 		auto &filename = bind_data.filenames[gstate.file_idx];
-		H5AttributesWriteFileRow(context, bind_data, filename, gstate.output_layout, output, row_idx);
+		H5AttributesWriteFileRow(context, bind_data, gstate.file_idx, gstate.output_layout, output, row_idx);
 		H5AttributesPopulateFilenameColumns(filename, gstate.output_layout, output, row_idx);
 		gstate.file_idx++;
 		row_idx++;
@@ -477,6 +535,7 @@ void RegisterH5AttributesFunction(ExtensionLoader &loader) {
 	// Projection pushdown is enabled so DuckDB can bind hidden virtual columns.
 	// h5_attributes still intentionally reads every attribute for each emitted row.
 	h5_attributes.projection_pushdown = true;
+	h5_attributes.pushdown_complex_filter = H5AttributesPushdownComplexFilter;
 	h5_attributes.get_virtual_columns = H5AttributesGetVirtualColumns;
 
 	auto h5_attributes_set = MultiFileReader::CreateFunctionSet(std::move(h5_attributes));

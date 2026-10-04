@@ -1,0 +1,252 @@
+# name: test/sql/glob/h5_read_lazy_bind.test
+# description: First-file binding, later-file validation, per-file cast safety, and cardinality estimates
+# group: [glob]
+
+require h5db
+
+statement ok
+SET threads = 1;
+
+# Schema and open errors in later files are deferred until those files are read.
+statement ok
+SELECT * FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values') LIMIT 0;
+
+query I
+SELECT values FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_lazy_bind.h5'
+], '/values') LIMIT 1;
+----
+1
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values');
+----
+incompatible schema
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_lazy_bind.h5'
+], '/values');
+----
+Failed to open HDF5 file
+
+# All requested columns are validated, even when projection drops one of them.
+statement error
+SELECT SUM(more) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values', '/more');
+----
+incompatible schema
+
+# Scalar and 1D datasets share a SQL type but have incompatible row semantics.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/h5_read_schema_scalar.h5',
+    'test/data/h5_read_schema_regular.h5'
+], '/values');
+----
+incompatible schema
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/h5_read_schema_regular.h5',
+    'test/data/h5_read_schema_scalar.h5'
+], '/values');
+----
+incompatible schema
+
+# The first file must still be valid during binding, including LIMIT 0.
+statement error
+SELECT * FROM h5_read([
+    'test/data/does_not_exist_lazy_bind.h5',
+    'test/data/glob/glob_same_1.h5'
+], '/values') LIMIT 0;
+----
+Failed to open HDF5 file
+
+statement error
+SELECT * FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_same_2.h5'
+], '/missing') LIMIT 0;
+----
+Failed to open dataset
+
+# PREPARE must not inspect later files. EXECUTE raises if it reaches a bad file.
+statement ok
+PREPARE lazy_read AS SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values');
+
+statement error
+EXECUTE lazy_read;
+----
+incompatible schema
+
+statement ok
+DEALLOCATE lazy_read;
+
+# After an error, the connection and the next multi-file scan remain usable.
+# An empty first file does not suppress later files, and indices reset per file.
+query III
+SELECT COUNT(*), SUM(values), SUM(idx) FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/values', h5_alias('idx', h5_index()));
+----
+3	60	3
+
+# Row counts use every requested regular dataset, including projected-away
+# columns, in later files as well as the first one.
+query II
+SELECT COUNT(*), SUM(idx) FROM h5_read([
+    'test/data/multidim_mismatch.h5', 'test/data/multidim_mismatch.h5'
+], '/array_2d', '/array_3d', h5_alias('idx', h5_index()));
+----
+8	12
+
+# Reuse bound aliases and both run encodings for later files and pushdown.
+query IIII
+SELECT COUNT(*), SUM(idx), SUM(rse_value), SUM(ree_value) FROM h5_read([
+    'test/data/ree_edge_cases.h5', 'test/data/ree_edge_cases.h5'
+], '/mixed_pushdown/index', h5_alias('idx', h5_index()),
+   h5_alias('rse_value', h5_alias('inner_name', h5_rse('/mixed_pushdown/rse_starts', '/mixed_pushdown/rse_values'))),
+   h5_alias('ree_value', h5_ree('/mixed_pushdown/ree_ends', '/mixed_pushdown/ree_values')))
+WHERE rse_value = 2 AND ree_value = 30;
+----
+2	12	4	60
+
+# The first file fits UTINYINT, but the second has 3000 rows. Unsafe cast
+# predicates must not hide DuckDB's error or cause an internal pushdown error.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values', h5_alias('idx', h5_index()))
+WHERE CAST(idx AS UTINYINT) < 10;
+----
+<REGEX>:.*value 256.*out of range.*UINT8.*idx.*
+
+# Decimal narrowing also needs the actual later-file index domain.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values', h5_alias('idx', h5_index()))
+WHERE CAST(idx AS DECIMAL(3, 1)) < 10;
+----
+Could not cast value
+
+# A separate safe predicate can eliminate overflowing rows before the cast.
+query III
+SELECT COUNT(*), SUM(idx), MAX(idx) FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values', h5_alias('idx', h5_index()))
+WHERE idx < 10 AND CAST(idx AS UTINYINT) < 10;
+----
+13	48	9
+
+# LIST types alone do not encode inner extents; validate those dimensions too.
+statement ok
+SELECT * FROM h5_read([
+    'test/data/wide_shape_a.h5',
+    'test/data/wide_shape_mismatch.h5'
+], '/values') LIMIT 0;
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/wide_shape_a.h5',
+    'test/data/wide_shape_mismatch.h5'
+], '/values');
+----
+incompatible schema
+
+query I
+SELECT COUNT(*) FROM h5_read([
+    'test/data/wide_shape_a.h5',
+    'test/data/wide_shape_b.h5'
+], '/values');
+----
+5
+
+# Single-file cardinality remains exact, using the shortest regular column.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read('test/data/empty_scalar.h5', '/short', '/long');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2".*
+
+# Two 1D columns imply at least 500k rows per file. Scalar and virtual columns
+# do not contribute to the value count. The scalar-only count stays exact.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/empty_scalar.h5', 'test/data/empty_scalar.h5'
+], '/short', '/long', '/scalar_int', h5_index(), filename=true);
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "1000000".*
+
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read('test/data/glob/glob_same_*.h5', '/scale');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2".*
+
+# Count all inner dimensions and round up: each row contains 3 + 2*2 values,
+# giving ceil(1M/7) = 142858 rows per file, or 285716 for two files.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/multidim_mismatch.h5', 'test/data/multidim_mismatch.h5'
+], '/array_2d', '/array_3d');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "285716".*
+
+# Wide rows use the 1000-row floor. Larger known first-file counts take priority.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/wide_few_rows.h5', 'test/data/wide_few_rows.h5'
+], '/extreme_empty');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
+
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/wide_few_rows.h5', 'test/data/wide_few_rows.h5'
+], '/fixed_cache_limit');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000002".*
+
+# Zero-sized inner dimensions must not cause division by zero.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/wide_few_rows.h5', 'test/data/wide_few_rows.h5'
+], '/zero_inner_large');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000000".*
+
+# Scalar broadcasts and file-local indices also work with parallel scanning.
+statement ok
+SET threads = 4;
+
+query III
+SELECT COUNT(*), SUM(values), SUM(idx) FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values', h5_alias('idx', h5_index()));
+----
+3003	4498503	4498503

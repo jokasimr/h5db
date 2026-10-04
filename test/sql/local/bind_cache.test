@@ -1,0 +1,136 @@
+# name: test/sql/local/bind_cache.test
+# description: Query-local bind metadata refreshes between queries and supports large multi-file reads
+# group: [local]
+
+require h5db
+
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+
+statement ok
+BEGIN TRANSACTION;
+
+# The same path is used with different aliases and alongside a scalar.
+query IIT
+SELECT SUM(first.x + second.y), SUM(first.s), typeof(first.x)
+FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x', '/s') first
+JOIN h5_read('__TEST_DIR__/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
+GROUP BY ALL;
+----
+12	21	INTEGER
+
+# QueryEnd must clear the cache even though the transaction remains open.
+unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+
+query RRT
+SELECT SUM(first.x + second.y), SUM(first.s), typeof(first.x)
+FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x', '/s') first
+JOIN h5_read('__TEST_DIR__/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
+GROUP BY ALL;
+----
+305.0	52.5	DOUBLE
+
+statement ok
+COMMIT;
+
+# A failed bind must also release the cached file and metadata.
+statement error
+SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
+UNION ALL SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/missing');
+----
+<REGEX>:.*Failed to open dataset.*\/missing.*
+
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+
+query IIT
+SELECT COUNT(*), SUM(x), typeof(x)
+FROM (
+    SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
+    UNION ALL SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
+) GROUP BY ALL;
+----
+6	12	INTEGER
+
+# Incompatible SWMR opens fail through HDF5 rather than reusing the wrong handle.
+statement error
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read('test/data/swmr_enabled.h5', '/data', swmr=false)
+    UNION ALL SELECT * FROM h5_read('test/data/swmr_enabled.h5', '/data', swmr=true)
+) WHERE false;
+----
+Failed to open HDF5 file
+
+# Different paths to the same physical file follow the same HDF5 restriction.
+statement error
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read('test/data/swmr_enabled.h5', '/data', swmr=false)
+    UNION ALL SELECT * FROM h5_read('test/data/../data/swmr_enabled.h5', '/data', swmr=true)
+) WHERE false;
+----
+Failed to open HDF5 file
+
+# Failed mixed-mode binds must release their handles before the next query.
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read('test/data/swmr_enabled.h5', '/data', swmr=true)
+    UNION ALL SELECT * FROM h5_read('test/data/../data/swmr_enabled.h5', '/data', swmr=true)
+) WHERE false;
+----
+0
+
+# Reused string metadata must preserve decoding for every invocation.
+query II
+SELECT strlen(first.spacepad_fixed), strlen(second.spacepad_fixed)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/spacepad_fixed') first
+JOIN h5_read('test/data/h5_read_string_edge_cases.h5', '/spacepad_fixed') second
+USING (spacepad_fixed)
+ORDER BY 1;
+----
+1	1
+2	2
+
+# A large glob must bind and scan without retaining all its file handles.
+statement ok
+SELECT * FROM h5_read('test/data/glob_many_small/part_*.h5', '/values') LIMIT 0;
+
+query III
+SELECT COUNT(*), SUM(values), COUNT(DISTINCT filename)
+FROM h5_read('test/data/glob_many_small/part_*.h5', '/values');
+----
+3000	4498500	1000
+
+# Repeated reads of the first file reuse its bind metadata alongside the glob.
+query II
+SELECT COUNT(*), SUM(first.values)
+FROM h5_read('test/data/glob_many_small/part_*.h5', '/values') all_files
+JOIN h5_read('test/data/glob_many_small/part_0001.h5', '/values') first USING (values);
+----
+3	3
+
+# Later files are only validated when the scan reaches them.
+statement ok
+SELECT * FROM h5_read([
+    'test/data/glob_many_small/part_*.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values') LIMIT 0;
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_many_small/part_*.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values');
+----
+<REGEX>:.*h5_read matched file '.*glob_mismatch.h5' with an incompatible schema.*
+
+statement ok
+SELECT * FROM h5_read([
+    'test/data/glob_many_small/part_*.h5',
+    'test/data/does_not_exist_bind_cache.h5'
+], '/values') LIMIT 0;
+
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob_many_small/part_*.h5',
+    'test/data/does_not_exist_bind_cache.h5'
+], '/values');
+----
+<REGEX>:.*Failed to open HDF5 file.*does_not_exist_bind_cache.h5.*

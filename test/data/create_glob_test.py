@@ -78,6 +78,7 @@ def write_attribute_schema_file(
     second_name: str = "b",
     second_value=np.int64(2),
     reverse_creation_order: bool = False,
+    extra_attribute: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
@@ -88,6 +89,14 @@ def write_attribute_schema_file(
         else:
             dataset.attrs["a"] = np.int32(1)
             dataset.attrs[second_name] = second_value
+        if extra_attribute:
+            dataset.attrs["c"] = np.int32(3)
+
+
+def write_attribute_schema_empty_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("target", data=np.array([1], dtype=np.int32))
 
 
 def write_large_order_file(path: Path, base_value: int, num_rows: int = 50_000) -> None:
@@ -259,6 +268,8 @@ def main() -> None:
     write_attribute_schema_file(GLOB_DIR / "attr_schema_reverse_order.h5", reverse_creation_order=True)
     write_attribute_schema_file(GLOB_DIR / "attr_schema_name_mismatch.h5", second_name="c")
     write_attribute_schema_file(GLOB_DIR / "attr_schema_type_mismatch.h5", second_value=np.float64(2.5))
+    write_attribute_schema_file(GLOB_DIR / "attr_schema_extra.h5", extra_attribute=True)
+    write_attribute_schema_empty_file(GLOB_DIR / "attr_schema_empty.h5")
 
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_1.h5")
     link_or_copy_file(SOURCE_LARGE_FILE, LARGE_GLOB_DIR / "large_same_2.h5")

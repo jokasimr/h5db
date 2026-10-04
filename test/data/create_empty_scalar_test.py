@@ -67,6 +67,13 @@ create_multifile_edge_file("h5_read_multifile_empty_b.h5", [], 20, None)
 create_multifile_edge_file("h5_read_multifile_empty_c.h5", [10, 20, 30], 30, 30)
 print("Created h5_read_multifile_empty_*.h5 successfully!")
 
+for filename, values in [
+    ("h5_read_schema_scalar.h5", np.int32(5)),
+    ("h5_read_schema_regular.h5", np.array([5, 6], dtype=np.int32)),
+]:
+    with h5py.File(filename, "w") as f:
+        f.create_dataset("values", data=values)
+
 with h5py.File("h5_ls_multifile_empty.h5", "w"):
     pass
 

@@ -592,10 +592,9 @@ WHERE source = 'test/data/glob_order/no_match.h5';
 ----
 0
 
-# Unlike h5_tree/h5_ls, h5_read opens matched files during binding to derive
-# and validate the output schema. Filename filters can filter rows, but they
-# cannot skip a missing file before bind-time schema inspection.
-statement error
+# The first file provides the schema; a filename filter skips later files
+# before opening them.
+query I
 SELECT COUNT(*)
 FROM h5_read([
     'test/data/simple.h5',
@@ -603,7 +602,7 @@ FROM h5_read([
 ], '/integers')
 WHERE filename = 'test/data/simple.h5';
 ----
-<REGEX>:.*Failed to open HDF5 file: (test[\\\\/]data[\\\\/]|sftp://[^/]+/)does_not_exist_filename_pushdown\.h5.*
+10
 
 query III
 SELECT replace(filename, '\', '/') AS filename, idx, values

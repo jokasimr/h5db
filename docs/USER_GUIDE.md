@@ -234,8 +234,9 @@ Useful mental models:
 - `filename := true` adds `filename` to the visible output schema, which is useful when you want it included in
   `SELECT *`
 - a pattern that matches no files raises an error
-- `h5_read(...)` requires compatible column definitions across all matched files
-- `h5_attributes(...)` requires the same attribute names, types, and order across all matched files
+- `h5_read(...)` requires compatible column definitions across files read
+- `h5_attributes(...)` uses the first file's attributes as columns; each subsequent file is checked when read and must
+  have the same attribute names and types
 - scalar `h5_ls(...)`, scalar `h5_read(...)`, and scalar `h5_attributes(...)` accept one filename expression per row
   and do not expand filename lists or glob patterns
 - for local paths and DuckDB-backed remote schemes, glob expansion uses
@@ -246,8 +247,8 @@ Useful mental models:
   readers such as `read_parquet(...)`
 - in particular, recursive `**` does not traverse symlink directories
 
-`h5_tree(...)` and table-valued `h5_ls(...)` can use selective filters on the virtual `filename` column to skip
-expanded files before opening them:
+`h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` can use selective filters on the
+virtual `filename` column to skip expanded files before opening them:
 
 ```sql
 SELECT path, type
@@ -257,12 +258,22 @@ WHERE filename LIKE '%/run_042.h5';
 SELECT filename, path
 FROM h5_ls('runs/run_*.h5', '/entry')
 WHERE filename IN ('runs/run_001.h5', 'runs/run_002.h5');
+
+SELECT filename, counts
+FROM h5_read('runs/run_*.h5', '/counts')
+WHERE filename NOT LIKE '%bad.h5';
+
+SELECT filename, units
+FROM h5_attributes('runs/run_*.h5', '/entry/data')
+WHERE filename NOT LIKE '%bad.h5';
 ```
 
 This works for filename-only filters, and for filename filters combined with other predicates using `AND`, when DuckDB
 pushes the filter into the table function. Filters whose values come from joins, semi-joins, scalar subqueries, or later
-query blocks may still open all expanded files. `h5_read(...)` and `h5_attributes(...)` do not currently use
-`filename` filters to avoid opening files.
+query blocks may still open all expanded files.
+
+`h5_read(...)` and `h5_attributes(...)` require a valid first expanded file to infer the schema before filename
+filtering. Other files are checked when read.
 
 When you need to keep track of which file produced a row, you can select the hidden `filename` column explicitly:
 
@@ -311,8 +322,8 @@ FROM h5_attributes('data.h5', '/measurements');
 This returns one row where each attribute becomes its own column.
 
 Use this when you are inspecting one specific object path and want full detail.
-With multiple files, the object must expose the same attribute names, types, and
-order in every file.
+With multiple files, the first file determines the columns; each subsequent
+file is checked when read and must have the same attribute names and types.
 
 ### Read root attributes
 

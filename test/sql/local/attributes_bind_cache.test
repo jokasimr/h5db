@@ -1,0 +1,74 @@
+# name: test/sql/local/attributes_bind_cache.test
+# description: Query-local attribute bind handles and cleanup
+# group: [local]
+
+require h5db
+
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_attributes_bind_cache.h5
+
+statement ok
+BEGIN TRANSACTION;
+
+# Both calls bind the same file, with no scan to release cached handles.
+statement ok
+SELECT * FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/')
+UNION ALL SELECT * FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/')
+LIMIT 0;
+
+unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_attributes_bind_cache.h5
+
+# QueryEnd releases handles even while the transaction remains open.
+query RT
+SELECT first.a + second.a, typeof(first.a)
+FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/') first
+CROSS JOIN h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/') second;
+----
+21.0	FLOAT
+
+statement ok
+COMMIT;
+
+# Failed binds must release retained handles too.
+statement error
+SELECT * FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/')
+UNION ALL SELECT * FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/missing');
+----
+Failed to open object
+
+unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_attributes_bind_cache.h5
+
+query IT
+SELECT a, typeof(a) FROM h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/');
+----
+7	INTEGER
+
+# Attribute and dataset readers keep their own caches in a mixed query.
+query II
+SELECT SUM(x), SUM(a)
+FROM h5_read('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/x')
+CROSS JOIN h5_attributes('__TEST_DIR__/h5db_attributes_bind_cache.h5', '/');
+----
+6	21
+
+# File reuse must not reuse an object from another h5_attributes invocation.
+query TT
+SELECT first.root_name, second.labels[2]
+FROM h5_attributes('test/data/root_attrs.h5', '/') first
+CROSS JOIN h5_attributes('test/data/root_attrs.h5', '/string_array_attrs') second;
+----
+root	bb
+
+# SWMR mismatches follow HDF5's open restrictions.
+statement error
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_attributes('test/data/swmr_enabled.h5', '/data', swmr=false)
+    UNION ALL SELECT * FROM h5_attributes('test/data/swmr_enabled.h5', '/data', swmr=true)
+) WHERE false;
+----
+Failed to open HDF5 file
+
+# The next query must succeed after the failed mixed-mode bind.
+query I
+SELECT attr FROM h5_attributes('test/data/swmr_enabled.h5', '/data', swmr=true);
+----
+42

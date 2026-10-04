@@ -1,0 +1,101 @@
+# name: test/sql/glob/h5_attributes_lazy_bind.test
+# description: First-file attribute schema inference and scan-time validation
+# group: [glob]
+
+require h5db
+
+# Later schema and file-open errors do not prevent binding.
+statement ok
+SELECT * FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_type_mismatch.h5'
+], '/target') LIMIT 0;
+
+statement ok
+SELECT * FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/does_not_exist_attributes_lazy_bind.h5'
+], '/target') LIMIT 0;
+
+statement error
+SELECT COUNT(*) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/does_not_exist_attributes_lazy_bind.h5'
+], '/target');
+----
+Failed to open HDF5 file
+
+# Validate the whole attribute schema even if only one attribute is projected.
+statement error
+SELECT SUM(a) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_type_mismatch.h5'
+], '/target');
+----
+incompatible attribute schema
+
+statement error
+SELECT SUM(a) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_name_mismatch.h5'
+], '/target');
+----
+incompatible attribute schema
+
+# Extra attributes must also be detected when they are not projected.
+statement error
+SELECT SUM(a) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_extra.h5'
+], '/target');
+----
+incompatible attribute schema
+
+# A later object without attributes still raises when scanned.
+statement ok
+SELECT * FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_empty.h5'
+], '/target') LIMIT 0;
+
+statement error
+SELECT COUNT(*) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_empty.h5'
+], '/target');
+----
+Object has no attributes
+
+# The first file must be valid even when execution produces no rows.
+statement error
+SELECT * FROM h5_attributes([
+    'test/data/does_not_exist_attributes_lazy_bind.h5',
+    'test/data/glob/attr_schema_1.h5'
+], '/target') LIMIT 0;
+----
+Failed to open HDF5 file
+
+# Preparing a multi-file read does not validate later schemas.
+statement ok
+PREPARE lazy_attributes AS SELECT COUNT(*) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_name_mismatch.h5'
+], '/target');
+
+statement error
+EXECUTE lazy_attributes;
+----
+incompatible attribute schema
+
+statement ok
+DEALLOCATE lazy_attributes;
+
+# Compatible files retain their values and duplicate file occurrences.
+query III
+SELECT COUNT(*), SUM(a), SUM(b) FROM h5_attributes([
+    'test/data/glob/attr_schema_1.h5',
+    'test/data/glob/attr_schema_reverse_order.h5',
+    'test/data/glob/attr_schema_1.h5'
+], '/target');
+----
+3	3	6

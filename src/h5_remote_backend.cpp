@@ -625,10 +625,6 @@ public:
 		CleanupStep([&]() { return libssh2_sftp_close_handle(handle); }, deadline);
 	}
 
-	void Close() noexcept {
-		ResetConnectionState();
-	}
-
 private:
 	using KnownHostsPtr = unique_ptr<LIBSSH2_KNOWNHOSTS, decltype(&libssh2_knownhost_free)>;
 
@@ -1308,11 +1304,8 @@ public:
 	}
 
 	void QueryEnd() override {
-		for (auto &entry : connections) {
-			if (entry.second) {
-				entry.second->Close();
-			}
-		}
+		// Retained HDF5 files also own these connections. Let their final owner
+		// close them so QueryEnd callback order cannot invalidate live handles.
 		connections.clear();
 	}
 

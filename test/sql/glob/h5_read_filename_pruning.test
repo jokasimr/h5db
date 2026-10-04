@@ -1,0 +1,130 @@
+# name: test/sql/glob/h5_read_filename_pruning.test
+# description: Filename pruning before scan, schema-file identity, and mixed predicates
+# group: [glob]
+
+require h5db
+
+# NOT LIKE on the hidden filename column skips a missing later file.
+query II
+SELECT COUNT(*), SUM(values) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values')
+WHERE filename NOT LIKE '%does_not_exist_filename_pushdown.h5';
+----
+3	6
+
+# Excluded files do not need to satisfy the inferred schema.
+query II
+SELECT COUNT(*), SUM(values) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values', filename=true)
+WHERE filename NOT LIKE '%glob_mismatch.h5';
+----
+3	6
+
+# Renamed filename columns support IN; duplicates remain duplicates.
+query III
+SELECT COUNT(*), SUM(values), COUNT(DISTINCT source) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_same_2.h5',
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values', filename='source')
+WHERE source IN ('test/data/glob/glob_same_1.h5', 'test/data/glob/glob_same_2.h5');
+----
+8	21	2
+
+# Removing the original first file must use the retained file's row count,
+# scalar values, and per-file indices.
+query IIIII
+SELECT COUNT(*), SUM(values), MIN(idx), MAX(idx), MIN(scale) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_same_2.h5'
+], '/values', '/scale', h5_alias('idx', h5_index()))
+WHERE filename LIKE '%glob_same_2.h5';
+----
+2	9	0	1	200
+
+# File pruning and index-range pruning work together.
+query III
+SELECT COUNT(*), SUM(values), MIN(idx) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_same_2.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values', h5_alias('idx', h5_index()), filename='source')
+WHERE source LIKE '%glob_same_2.h5' AND idx >= 1;
+----
+1	5	1
+
+# The schema remains the one inferred during binding, even when its file is
+# removed. The first retained file must still be validated against it.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/glob/glob_mismatch.h5'
+], '/values')
+WHERE filename LIKE '%glob_mismatch.h5';
+----
+incompatible schema
+
+# Pruning all files produces an empty result without opening later files.
+query I
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values')
+WHERE filename LIKE '%no_match.h5';
+----
+0
+
+# Schema discovery still precedes filename pruning.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/does_not_exist_filename_pushdown.h5',
+    'test/data/glob/glob_same_1.h5'
+], '/values')
+WHERE filename LIKE '%glob_same_1.h5';
+----
+Failed to open HDF5 file
+
+# A disjunction involving dataset values cannot exclude the file from its
+# filename alone.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values')
+WHERE filename LIKE '%glob_same_1.h5' OR values = 1;
+----
+Failed to open HDF5 file
+
+# A data column named filename must not be mistaken for the filename column.
+statement error
+SELECT COUNT(*) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], h5_alias('filename', '/values'))
+WHERE filename = 1;
+----
+Failed to open HDF5 file
+
+# Repeated execution keeps the pruned scan list and the inferred schema valid.
+statement ok
+PREPARE filename_pruned AS
+SELECT COUNT(*), SUM(values) FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_filename_pushdown.h5'
+], '/values')
+WHERE filename LIKE '%glob_same_1.h5';
+
+query II
+EXECUTE filename_pruned;
+----
+3	6
+
+query II
+EXECUTE filename_pruned;
+----
+3	6

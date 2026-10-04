@@ -235,7 +235,7 @@ when two dataset paths or generated columns would otherwise collide.
 - `h5_index()` is the outermost-dimension row index within each matched file.
 - Duplicate filename matches are preserved.
 - `filename` identifies which file produced each row.
-- All matched files must have compatible column definitions.
+- Files read must have compatible column definitions.
 
 **Type Support:**
 - Numeric: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float16, float32, float64
@@ -305,7 +305,8 @@ Reads attributes from an object or the file root.
 - Column types match the attribute types (numeric, string, or arrays)
 - If the target object has no attributes, the function raises `IO Error: Object has no attributes: ... in file: ...`
 - Invalid UTF-8 string attribute values raise an error in table-valued `h5_attributes()`
-- Multiple matched files must have the same attribute names, types, and order.
+- With multiple files, the first file determines the columns; each subsequent file is checked when read and must have
+  the same attribute names and types.
 - Attribute output names must be unique under DuckDB's case-insensitive identifier matching.
 - Hidden virtual column `filename` (VARCHAR), available by explicit reference.
 
@@ -841,9 +842,8 @@ DuckDB filesystem supports globbing.
 - `filename := true` adds `filename` to the visible output schema.
 - `filename := 'source_file'` adds the same visible filename column but uses the provided column name instead of `filename`.
   In that case the column must be referenced as `source_file`; hidden `filename` is not also available.
-- All matched files in `h5_read(...)` must have compatible column definitions.
-- All matched files in `h5_attributes(...)` must expose the same attributes in the same order with the same names and
-  types.
+- Files read by `h5_read(...)` must have compatible column definitions.
+- Files read by `h5_attributes(...)` must have the same attribute names and types.
 - Scalar `h5_ls(...)`, scalar `h5_read(...)`, and scalar `h5_attributes(...)` accept one filename/URL expression per
   row and do not expand filename lists or glob patterns.
 - For local paths and DuckDB-backed remote schemes, glob expansion uses DuckDB's filesystem stack. For `sftp://` URLs,
@@ -856,16 +856,16 @@ DuckDB filesystem supports globbing.
 
 ### Filename Filter Pruning
 
-`h5_tree(...)` and table-valued `h5_ls(...)` can apply selective filters on the virtual `filename` column before
-opening each expanded file. This includes hidden `filename` filters and filters on the visible renamed column when using
-`filename := 'source_file'`.
+`h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` can apply selective filters on the
+virtual `filename` column before opening files. This includes hidden `filename` filters and filters on the visible renamed
+column when using `filename := 'source_file'`.
 
-Useful shapes include simple comparisons, `IN`, `LIKE`, and filename predicates inside `AND` filters, as long as DuckDB
-pushes the filter into the table function and the predicate can be evaluated from the filename alone. Dynamic filters
-whose values come from joins, semi-joins, scalar subqueries, or later query blocks may still open all expanded files.
+Supported shapes include comparisons, `IN`, `LIKE`, `NOT LIKE`, and filename predicates inside `AND` filters, provided
+DuckDB pushes the filter into the table function and the predicate depends only on the filename. Filters whose values
+come from joins, semi-joins, scalar subqueries, or later query blocks may still open all expanded files.
 
-This file-open pruning currently applies only to `h5_tree(...)` and table-valued `h5_ls(...)`. `h5_read(...)` and
-`h5_attributes(...)` do not use `filename` filters to avoid opening files.
+`h5_read(...)` and `h5_attributes(...)` require a valid first expanded file to infer the schema before filename
+filtering. Other files are checked when read.
 
 ### Examples
 
@@ -892,6 +892,10 @@ WHERE filename LIKE '%/run_042.h5';
 SELECT source_file, path
 FROM h5_ls('runs/run_*.h5', '/entry', filename := 'source_file')
 WHERE source_file IN ('runs/run_001.h5', 'runs/run_002.h5');
+
+SELECT filename, counts
+FROM h5_read('runs/run_*.h5', '/counts')
+WHERE filename NOT LIKE '%bad.h5';
 ```
 
 ---
@@ -1022,9 +1026,8 @@ All functions provide clear error messages for common issues:
   to reduce I/O. Supported shapes include `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, bind-time-foldable RHS expressions, and
   comparison-cast forms that normalize to those operators. Unsupported boolean shapes such as `OR`, `!=`,
   `IS DISTINCT FROM`, or expressions like `index + 1 > 10` remain post-scan filters.
-- **`h5_tree`/`h5_ls` filename filter pruning**: Filters on the hidden or visible renamed `filename` column can remove
-  files from expanded glob/list inputs before the file is opened. This applies only to `h5_tree(...)` and table-valued
-  `h5_ls(...)`, not to `h5_read(...)` or `h5_attributes(...)`.
+- **Filename filter pruning**: `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` can
+  skip files using [filename filters](#filename-filter-pruning).
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency
 - **Hyperslab selection**: Uses HDF5's hyperslab selection for efficient partial reads
 - **Run-encoding optimization**: Run-start and run-end encoded data is expanded on-the-fly with O(1) amortized cost per row
