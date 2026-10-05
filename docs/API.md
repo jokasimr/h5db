@@ -919,11 +919,13 @@ This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` ma
 dataset's first-dimension HDF5 chunk size.
 
 The combined cache-window limit for each projected numeric column in an active
-file is `max(128MiB, 4 * h5db_batch_size)`. This allows two chunk-aligned
-windows to each grow to approximately twice the requested target before
-`h5_read` falls back to direct reads. Cache memory is allocated eagerly and is
-not governed by DuckDB's `memory_limit`, so multiple cached columns or active
-file states can use a multiple of this limit.
+file is `max(128MiB, 4 * h5db_batch_size)`. If the required cache windows exceed
+this per-column limit, `h5_read` uses direct reads.
+
+Read-ahead buffers are allocated eagerly. All live buffers count toward DuckDB's
+`memory_limit` and are reported under `EXTENSION` in `duckdb_memory()`. DuckDB
+cannot evict these buffers; if it cannot reserve enough memory, the scan fails
+with an out-of-memory error.
 
 **Example:**
 ```sql

@@ -1,0 +1,46 @@
+# name: test/sql/cache_memory_accounting.test
+# description: DuckDB memory accounting for h5_read read-ahead cache windows
+# group: [sql]
+
+require h5db
+
+# The cached int32 column allocates two 1 MiB windows. The first reservation
+# fits, while the second must be rejected by DuckDB's memory limit.
+statement ok
+SET memory_limit='1536KiB';
+
+statement error
+SELECT sum(int32_cached)
+FROM h5_read('test/data/wide_few_rows.h5', '/int32_cached');
+----
+<REGEX>:.*failed to reserve memory data of size 1.0 MiB.*
+
+# The successful first reservation must be released while unwinding the failed
+# cache construction.
+query I
+SELECT memory_usage_bytes
+FROM duckdb_memory()
+WHERE tag = 'EXTENSION';
+----
+0
+
+# With enough accounted memory available, the same cached scan succeeds and
+# releases its reservation at the end of the query.
+statement ok
+SET memory_limit='4MiB';
+
+query I
+SELECT sum(int32_cached)
+FROM h5_read('test/data/wide_few_rows.h5', '/int32_cached');
+----
+44999850000
+
+query I
+SELECT memory_usage_bytes
+FROM duckdb_memory()
+WHERE tag = 'EXTENSION';
+----
+0
+
+statement ok
+RESET memory_limit;

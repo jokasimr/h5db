@@ -11,6 +11,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
@@ -219,9 +220,45 @@ struct CacheWindow {
 	std::atomic<idx_t> end_row {0};
 };
 
+class H5ReadCacheMemoryReservation {
+public:
+	explicit H5ReadCacheMemoryReservation(BufferManager &buffer_manager_p) : buffer_manager(buffer_manager_p) {
+	}
+
+	H5ReadCacheMemoryReservation(const H5ReadCacheMemoryReservation &) = delete;
+	H5ReadCacheMemoryReservation &operator=(const H5ReadCacheMemoryReservation &) = delete;
+
+	~H5ReadCacheMemoryReservation() {
+		buffer_manager.FreeReservedMemory(size);
+	}
+
+	idx_t GetSize() const {
+		return size;
+	}
+
+	void Resize(idx_t new_size) {
+		if (new_size > size) {
+			buffer_manager.ReserveMemory(new_size - size);
+		} else {
+			buffer_manager.FreeReservedMemory(size - new_size);
+		}
+		size = new_size;
+	}
+
+private:
+	BufferManager &buffer_manager;
+	idx_t size = 0;
+};
+
 struct RegularColumnCache {
 	static constexpr idx_t MAX_WINDOWS = 2;
 
+	explicit RegularColumnCache(BufferManager &buffer_manager) : memory_reservation(buffer_manager) {
+	}
+
+	// Declared before windows so its destructor releases the reservation only
+	// after the window buffers have been destroyed.
+	H5ReadCacheMemoryReservation memory_reservation;
 	idx_t window_rows = 0;
 	CacheWindow windows[MAX_WINDOWS]; // Atomic members prevent std::vector usage
 };
@@ -625,6 +662,27 @@ static idx_t ComputeCacheLimitBytes(idx_t target_batch_size_bytes) {
 	                        ? max_value
 	                        : target_batch_size_bytes * H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER;
 	return MaxValue<idx_t>(H5_READ_BASE_CACHE_LIMIT_BYTES, scaled_limit);
+}
+
+static idx_t CheckedCacheSizeSum(idx_t left, idx_t right, const string &filename, const string &dataset_path) {
+	if (left > NumericLimits<idx_t>::Maximum() - right) {
+		throw IOException(
+		    FormatDatasetError("Dataset dimensions exceed the supported in-memory size", filename, dataset_path));
+	}
+	return left + right;
+}
+
+template <class T>
+static std::vector<T> AllocateCacheBuffer(RegularColumnCache &cache, idx_t buffer_elements, const string &filename,
+                                          const string &dataset_path) {
+	auto previous_size = cache.memory_reservation.GetSize();
+	auto requested_size = CheckedDatasetSizeProduct(buffer_elements, sizeof(T), filename, dataset_path);
+	cache.memory_reservation.Resize(CheckedCacheSizeSum(previous_size, requested_size, filename, dataset_path));
+
+	std::vector<T> result(buffer_elements);
+	auto allocated_size = CheckedDatasetSizeProduct(result.capacity(), sizeof(T), filename, dataset_path);
+	cache.memory_reservation.Resize(CheckedCacheSizeSum(previous_size, allocated_size, filename, dataset_path));
+	return result;
 }
 
 static bool H5ReadShouldCreateCache(const RegularColumnSpec &spec, idx_t window_rows, idx_t total_rows,
@@ -1470,7 +1528,8 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 					                                              metadata.num_rows);
 					    if (window_rows > 0 && H5ReadShouldCreateCache(spec, window_rows, metadata.num_rows,
 					                                                   result->scan_batch_size, cache_limit_bytes)) {
-						    state.cache = std::make_unique<RegularColumnCache>();
+						    state.cache =
+						        std::make_unique<RegularColumnCache>(BufferManager::GetBufferManager(context));
 						    state.cache->window_rows = window_rows;
 
 						    auto window_count = ComputeCacheWindowCount(window_rows, metadata.num_rows);
@@ -1482,7 +1541,8 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 								    auto &window = state.cache->windows[window_idx];
 								    auto buffer_elements = CheckedDatasetSizeProduct(window_rows, spec.elements_per_row,
 								                                                     metadata.filename, spec.path);
-								    window.cache = std::vector<T>(buffer_elements);
+								    window.cache = AllocateCacheBuffer<T>(*state.cache, buffer_elements,
+								                                          metadata.filename, spec.path);
 							    }
 						    });
 
