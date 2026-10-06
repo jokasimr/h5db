@@ -1443,256 +1443,249 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
                                                        const vector<idx_t> &data_output_positions) {
 	ThrowIfInterrupted(context);
 	auto result = make_uniq<H5ReadFileState>();
-	std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
-	const auto &filename = bind_data.filenames[file_idx];
-	const auto swmr = bind_data.swmr;
-	H5ReadFileMetadataCache file_cache;
-	{
-		H5ErrorSuppressor suppress;
-		file_cache.file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr);
-	}
-	if (!file_cache.file.is_valid()) {
-		throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", filename));
-	}
-	if (file_idx == 0 && filename == bind_data.schema_file->filename) {
-		result->metadata = bind_data.schema_file;
-	} else {
-		auto file_metadata = InspectH5ReadFile(filename, GetCanonicalColumns(bind_data), file_cache);
-		if (!H5ReadSchemasMatch(*bind_data.schema_file, file_metadata)) {
-			throw IOException("h5_read matched file '%s' with an incompatible schema", filename);
-		}
-		result->metadata = make_shared_ptr<H5ReadFileMetadata>(std::move(file_metadata));
-	}
-	// Inspection and scanning share the same open handle. Later-file metadata
-	// belongs to this scan state, not the query-local bind cache.
-	result->file = std::move(file_cache.file);
-	const auto &metadata = *result->metadata;
-	auto target_batch_size_bytes = ResolveBatchSizeOption(context);
-	auto cache_limit_bytes = ComputeCacheLimitBytes(target_batch_size_bytes);
-
-	result->columns_to_scan = data_column_ids;
-	result->output_column_positions = data_output_positions;
-	result->scan_batch_size = EstimateScanBatchSize(metadata.columns, data_column_ids, target_batch_size_bytes);
-
-	// Build global-to-local index mapping for projection pushdown
-	// This allows O(1) lookup: global_column_idx -> local_column_states_idx
-	for (idx_t local_idx = 0; local_idx < result->columns_to_scan.size(); local_idx++) {
-		idx_t global_idx = result->columns_to_scan[local_idx];
-		result->global_to_local[global_idx] = local_idx;
-	}
-
-	// Allocate DENSE column_states array - only for scanned columns
-	// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
-	result->column_states.reserve(GetNumScannedColumns(*result));
 	std::vector<CacheRefreshOrderEntry> cache_refresh_entries;
+	{
+		std::lock_guard<std::recursive_mutex> lock(hdf5_global_mutex);
+		const auto &filename = bind_data.filenames[file_idx];
+		const auto swmr = bind_data.swmr;
+		H5ReadFileMetadataCache file_cache;
+		{
+			H5ErrorSuppressor suppress;
+			file_cache.file = H5FileHandle(&context, filename.c_str(), H5F_ACC_RDONLY, swmr);
+		}
+		if (!file_cache.file.is_valid()) {
+			throw IOException(FormatRemoteHDF5Error("Failed to open HDF5 file", filename));
+		}
+		if (file_idx == 0 && filename == bind_data.schema_file->filename) {
+			result->metadata = bind_data.schema_file;
+		} else {
+			auto file_metadata = InspectH5ReadFile(filename, GetCanonicalColumns(bind_data), file_cache);
+			if (!H5ReadSchemasMatch(*bind_data.schema_file, file_metadata)) {
+				throw IOException("h5_read matched file '%s' with an incompatible schema", filename);
+			}
+			result->metadata = make_shared_ptr<H5ReadFileMetadata>(std::move(file_metadata));
+		}
+		// Inspection and scanning share the same open handle. Later-file metadata
+		// belongs to this scan state, not the query-local bind cache.
+		result->file = std::move(file_cache.file);
+		const auto &metadata = *result->metadata;
+		auto target_batch_size_bytes = ResolveBatchSizeOption(context);
+		auto cache_limit_bytes = ComputeCacheLimitBytes(target_batch_size_bytes);
 
-	// Process columns in scan order (builds dense array)
-	for (idx_t i = 0; i < GetNumScannedColumns(*result); i++) {
-		LocalColumnIdx local_idx(i);
-		GlobalColumnIdx global_idx = GetGlobalIdx(*result, local_idx);
-		const auto &col = metadata.columns[global_idx];
-		std::visit(
-		    [&](auto &&spec) {
-			    using T = std::decay_t<decltype(spec)>;
+		result->columns_to_scan = data_column_ids;
+		result->output_column_positions = data_output_positions;
+		result->scan_batch_size = EstimateScanBatchSize(metadata.columns, data_column_ids, target_batch_size_bytes);
 
-			    if constexpr (std::is_same_v<T, RegularColumnSpec>) {
-				    // Regular column - open dataset (with error suppression)
-				    H5DatasetHandle dataset;
-				    {
-					    H5ErrorSuppressor suppress;
-					    dataset = H5DatasetHandle(result->file, spec.path.c_str());
-				    }
+		// Build global-to-local index mapping for projection pushdown
+		// This allows O(1) lookup: global_column_idx -> local_column_states_idx
+		for (idx_t local_idx = 0; local_idx < result->columns_to_scan.size(); local_idx++) {
+			idx_t global_idx = result->columns_to_scan[local_idx];
+			result->global_to_local[global_idx] = local_idx;
+		}
 
-				    if (!dataset.is_valid()) {
-					    throw IOException(FormatDatasetError("Failed to open dataset", metadata.filename, spec.path));
-				    }
+		// Allocate DENSE column_states array - only for scanned columns
+		// Indexed by LOCAL position [0, 1, 2, ...], not global column indices
+		result->column_states.reserve(GetNumScannedColumns(*result));
 
-				    // Cache the file dataspace (reused across all reads)
-				    H5DataspaceHandle file_space(dataset);
-				    if (!file_space.is_valid()) {
-					    throw IOException(
-					        FormatDatasetError("Failed to get dataspace for dataset", metadata.filename, spec.path));
-				    }
+		// Process columns in scan order (builds dense array)
+		for (idx_t i = 0; i < GetNumScannedColumns(*result); i++) {
+			LocalColumnIdx local_idx(i);
+			GlobalColumnIdx global_idx = GetGlobalIdx(*result, local_idx);
+			const auto &col = metadata.columns[global_idx];
+			std::visit(
+			    [&](auto &&spec) {
+				    using T = std::decay_t<decltype(spec)>;
 
-				    RegularColumnState state;
-				    state.dataset = std::move(dataset);
-				    state.file_space = std::move(file_space);
-				    if (spec.is_string) {
-					    state.string_h5_type = GetStringDatasetType(state.dataset, metadata.filename, spec.path);
-				    }
+				    if constexpr (std::is_same_v<T, RegularColumnSpec>) {
+					    // Regular column - open dataset (with error suppression)
+					    H5DatasetHandle dataset;
+					    {
+						    H5ErrorSuppressor suppress;
+						    dataset = H5DatasetHandle(result->file, spec.path.c_str());
+					    }
 
-				    // Create read-ahead cache windows for non-empty cacheable columns when one
-				    // window can serve multiple output batches.
-				    if (!spec.is_string && spec.output_bytes_per_row > 0) {
-					    auto window_rows = ComputeCacheWindowRows(spec, state.dataset.get(), target_batch_size_bytes,
-					                                              metadata.num_rows);
-					    if (window_rows > 0 && H5ReadShouldCreateCache(spec, window_rows, metadata.num_rows,
-					                                                   result->scan_batch_size, cache_limit_bytes)) {
-						    state.cache =
-						        std::make_unique<RegularColumnCache>(BufferManager::GetBufferManager(context));
-						    state.cache->window_rows = window_rows;
+					    if (!dataset.is_valid()) {
+						    throw IOException(
+						        FormatDatasetError("Failed to open dataset", metadata.filename, spec.path));
+					    }
 
-						    auto window_count = ComputeCacheWindowCount(window_rows, metadata.num_rows);
+					    // Cache the file dataspace (reused across all reads)
+					    H5DataspaceHandle file_space(dataset);
+					    if (!file_space.is_valid()) {
+						    throw IOException(FormatDatasetError("Failed to get dataspace for dataset",
+						                                         metadata.filename, spec.path));
+					    }
 
+					    RegularColumnState state;
+					    state.dataset = std::move(dataset);
+					    state.file_space = std::move(file_space);
+					    if (spec.is_string) {
+						    state.string_h5_type = GetStringDatasetType(state.dataset, metadata.filename, spec.path);
+					    }
+
+					    // Determine cache geometry for non-empty cacheable columns when one window
+					    // can serve multiple output batches. Allocate buffers after releasing the HDF5 lock.
+					    if (!spec.is_string && spec.output_bytes_per_row > 0) {
+						    auto window_rows = ComputeCacheWindowRows(spec, state.dataset.get(),
+						                                              target_batch_size_bytes, metadata.num_rows);
+						    if (window_rows > 0 &&
+						        H5ReadShouldCreateCache(spec, window_rows, metadata.num_rows, result->scan_batch_size,
+						                                cache_limit_bytes)) {
+							    state.cache =
+							        std::make_unique<RegularColumnCache>(BufferManager::GetBufferManager(context));
+							    state.cache->window_rows = window_rows;
+
+							    cache_refresh_entries.push_back(
+							        {local_idx, TryGetDatasetReadOrderAddress(spec, state.dataset.get()),
+							         cache_refresh_entries.size()});
+						    }
+					    }
+
+					    // Store in dense array with LOCAL indexing
+					    result->column_states.push_back(std::move(state));
+
+				    } else if constexpr (std::is_same_v<T, ScalarColumnSpec>) {
+					    if (spec.is_null_dataspace) {
+						    result->column_states.push_back(ScalarColumnState {});
+						    return;
+					    }
+
+					    // Scalar column - open dataset and cache value once
+					    H5DatasetHandle dataset;
+					    {
+						    H5ErrorSuppressor suppress;
+						    dataset = H5DatasetHandle(result->file, spec.path.c_str());
+					    }
+
+					    if (!dataset.is_valid()) {
+						    throw IOException(
+						        FormatDatasetError("Failed to open dataset", metadata.filename, spec.path));
+					    }
+
+					    ScalarColumnState scalar_state;
+					    if (spec.column_type.id() == LogicalTypeId::VARCHAR) {
+						    auto type = GetStringDatasetType(dataset, metadata.filename, spec.path);
+						    std::string value;
+						    ReadHDF5Strings(dataset, type, H5S_ALL, H5S_ALL, 1, metadata.filename, spec.path,
+						                    [&](idx_t, const std::string &str) { value = str; });
+						    scalar_state.value = value;
+					    } else {
 						    auto base_type = GetBaseType(spec.column_type);
 						    DispatchOnNumericType(base_type, [&](auto type_tag) {
 							    using T = typename decltype(type_tag)::type;
-							    for (idx_t window_idx = 0; window_idx < window_count; window_idx++) {
-								    auto &window = state.cache->windows[window_idx];
-								    auto buffer_elements = CheckedDatasetSizeProduct(window_rows, spec.elements_per_row,
-								                                                     metadata.filename, spec.path);
-								    window.cache = AllocateCacheBuffer<T>(*state.cache, buffer_elements,
-								                                          metadata.filename, spec.path);
+							    T value {};
+							    H5ErrorSuppressor suppress;
+							    herr_t status =
+							        H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &value);
+							    if (status < 0) {
+								    throw IOException(FormatRemoteDatasetReadError(metadata.filename, spec.path));
 							    }
+							    scalar_state.value = value;
 						    });
-
-						    cache_refresh_entries.push_back({local_idx,
-						                                     TryGetDatasetReadOrderAddress(spec, state.dataset.get()),
-						                                     cache_refresh_entries.size()});
 					    }
-				    }
 
-				    // Store in dense array with LOCAL indexing
-				    result->column_states.push_back(std::move(state));
+					    // Store in dense array with LOCAL indexing
+					    result->column_states.push_back(std::move(scalar_state));
 
-			    } else if constexpr (std::is_same_v<T, ScalarColumnSpec>) {
-				    if (spec.is_null_dataspace) {
-					    result->column_states.push_back(ScalarColumnState {});
-					    return;
-				    }
+				    } else if constexpr (std::is_same_v<T, RunEncodedColumnSpec>) {
+					    // Run-encoded column - load boundaries and values using file metadata
+					    RunEncodedColumnState encoded_col;
 
-				    // Scalar column - open dataset and cache value once
-				    H5DatasetHandle dataset;
-				    {
-					    H5ErrorSuppressor suppress;
-					    dataset = H5DatasetHandle(result->file, spec.path.c_str());
-				    }
-
-				    if (!dataset.is_valid()) {
-					    throw IOException(FormatDatasetError("Failed to open dataset", metadata.filename, spec.path));
-				    }
-
-				    ScalarColumnState scalar_state;
-				    if (spec.column_type.id() == LogicalTypeId::VARCHAR) {
-					    auto type = GetStringDatasetType(dataset, metadata.filename, spec.path);
-					    std::string value;
-					    ReadHDF5Strings(dataset, type, H5S_ALL, H5S_ALL, 1, metadata.filename, spec.path,
-					                    [&](idx_t, const std::string &str) { value = str; });
-					    scalar_state.value = value;
-				    } else {
-					    auto base_type = GetBaseType(spec.column_type);
-					    DispatchOnNumericType(base_type, [&](auto type_tag) {
-						    using T = typename decltype(type_tag)::type;
-						    T value {};
+					    // Open datasets - RAII handles cleanup
+					    H5DatasetHandle boundaries_ds;
+					    H5DatasetHandle values_ds;
+					    {
 						    H5ErrorSuppressor suppress;
-						    herr_t status =
-						        H5Dread(dataset, GetNativeH5Type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, &value);
-						    if (status < 0) {
-							    throw IOException(FormatRemoteDatasetReadError(metadata.filename, spec.path));
+						    boundaries_ds = H5DatasetHandle(result->file, spec.boundaries_path.c_str());
+						    if (!boundaries_ds.is_valid()) {
+							    throw IOException(FormatDatasetError(string("Failed to open ") +
+							                                             RunEncodingName(spec.encoding) + " " +
+							                                             RunBoundaryName(spec.encoding) + " dataset",
+							                                         metadata.filename, spec.boundaries_path));
 						    }
-						    scalar_state.value = value;
-					    });
-				    }
 
-				    // Store in dense array with LOCAL indexing
-				    result->column_states.push_back(std::move(scalar_state));
+						    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
+						    if (!values_ds.is_valid()) {
+							    throw IOException(FormatDatasetError(
+							        string("Failed to open ") + RunEncodingName(spec.encoding) + " values dataset",
+							        metadata.filename, spec.values_path));
+						    }
+					    }
 
-			    } else if constexpr (std::is_same_v<T, RunEncodedColumnSpec>) {
-				    // Run-encoded column - load boundaries and values using file metadata
-				    RunEncodedColumnState encoded_col;
-
-				    // Open datasets - RAII handles cleanup
-				    H5DatasetHandle boundaries_ds;
-				    H5DatasetHandle values_ds;
-				    {
-					    H5ErrorSuppressor suppress;
-					    boundaries_ds = H5DatasetHandle(result->file, spec.boundaries_path.c_str());
-					    if (!boundaries_ds.is_valid()) {
-						    throw IOException(FormatDatasetError(string("Failed to open ") +
+					    // Get array sizes
+					    H5DataspaceHandle boundaries_space(boundaries_ds);
+					    int boundaries_ndims = H5Sget_simple_extent_ndims(boundaries_space);
+					    if (boundaries_ndims < 0) {
+						    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
 						                                             RunEncodingName(spec.encoding) + " " +
 						                                             RunBoundaryName(spec.encoding) + " dataset",
 						                                         metadata.filename, spec.boundaries_path));
 					    }
+					    if (boundaries_ndims != 1) {
+						    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) + " " +
+						                                             RunBoundaryName(spec.encoding) +
+						                                             " must be a 1-dimensional dataset",
+						                                         metadata.filename, spec.boundaries_path));
+					    }
+					    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(boundaries_space);
 
-					    values_ds = H5DatasetHandle(result->file, spec.values_path.c_str());
-					    if (!values_ds.is_valid()) {
-						    throw IOException(FormatDatasetError(string("Failed to open ") +
+					    H5DataspaceHandle values_space(values_ds);
+					    int values_ndims = H5Sget_simple_extent_ndims(values_space);
+					    if (values_ndims < 0) {
+						    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
 						                                             RunEncodingName(spec.encoding) + " values dataset",
 						                                         metadata.filename, spec.values_path));
 					    }
-				    }
+					    if (values_ndims != 1) {
+						    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) +
+						                                             " values must be a 1-dimensional dataset",
+						                                         metadata.filename, spec.values_path));
+					    }
+					    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
 
-				    // Get array sizes
-				    H5DataspaceHandle boundaries_space(boundaries_ds);
-				    int boundaries_ndims = H5Sget_simple_extent_ndims(boundaries_space);
-				    if (boundaries_ndims < 0) {
-					    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
-					                                             RunEncodingName(spec.encoding) + " " +
-					                                             RunBoundaryName(spec.encoding) + " dataset",
-					                                         metadata.filename, spec.boundaries_path));
-				    }
-				    if (boundaries_ndims != 1) {
-					    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) + " " +
-					                                             RunBoundaryName(spec.encoding) +
-					                                             " must be a 1-dimensional dataset",
-					                                         metadata.filename, spec.boundaries_path));
-				    }
-				    hssize_t num_runs_hssize = H5Sget_simple_extent_npoints(boundaries_space);
+					    if (num_runs_hssize < 0) {
+						    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
+						                                             RunEncodingName(spec.encoding) + " " +
+						                                             RunBoundaryName(spec.encoding) + " dataset",
+						                                         metadata.filename, spec.boundaries_path));
+					    }
+					    if (num_values_hssize < 0) {
+						    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
+						                                             RunEncodingName(spec.encoding) + " values dataset",
+						                                         metadata.filename, spec.values_path));
+					    }
 
-				    H5DataspaceHandle values_space(values_ds);
-				    int values_ndims = H5Sget_simple_extent_ndims(values_space);
-				    if (values_ndims < 0) {
-					    throw IOException(FormatDatasetError(string("Failed to get dimensions for ") +
-					                                             RunEncodingName(spec.encoding) + " values dataset",
-					                                         metadata.filename, spec.values_path));
+					    size_t num_runs = static_cast<size_t>(num_runs_hssize);
+					    size_t num_values = static_cast<size_t>(num_values_hssize);
+
+					    // Validate: boundaries and values must have same size
+					    if (num_runs != num_values) {
+						    throw IOException(FormatRunEncodedDatasetPairError(
+						        string(RunEncodingName(spec.encoding)) + " " + RunBoundaryName(spec.encoding) +
+						            " and values must have same size. Got " + std::to_string(num_runs) + " and " +
+						            std::to_string(num_values),
+						        metadata.filename, spec));
+					    }
+
+					    encoded_col.run_starts = LoadRunBoundaries(metadata.filename, spec, boundaries_ds, num_runs,
+					                                               metadata.num_rows, encoded_col.non_null_end);
+					    encoded_col.values = LoadRunEncodedValues(metadata.filename, spec, values_ds, num_values);
+
+					    // Note: encoded column state is stateless (thread-safe)
+					    // No runtime state initialization needed
+
+					    // Store in dense array with LOCAL indexing
+					    result->column_states.push_back(std::move(encoded_col));
+				    } else if constexpr (std::is_same_v<T, IndexColumnSpec>) {
+					    // Virtual index column - no HDF5 state required
+					    result->column_states.push_back(IndexColumnState {});
 				    }
-				    if (values_ndims != 1) {
-					    throw IOException(FormatDatasetError(string(RunEncodingName(spec.encoding)) +
-					                                             " values must be a 1-dimensional dataset",
-					                                         metadata.filename, spec.values_path));
-				    }
-				    hssize_t num_values_hssize = H5Sget_simple_extent_npoints(values_space);
-
-				    if (num_runs_hssize < 0) {
-					    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
-					                                             RunEncodingName(spec.encoding) + " " +
-					                                             RunBoundaryName(spec.encoding) + " dataset",
-					                                         metadata.filename, spec.boundaries_path));
-				    }
-				    if (num_values_hssize < 0) {
-					    throw IOException(FormatDatasetError(string("Failed to get dataset size for ") +
-					                                             RunEncodingName(spec.encoding) + " values dataset",
-					                                         metadata.filename, spec.values_path));
-				    }
-
-				    size_t num_runs = static_cast<size_t>(num_runs_hssize);
-				    size_t num_values = static_cast<size_t>(num_values_hssize);
-
-				    // Validate: boundaries and values must have same size
-				    if (num_runs != num_values) {
-					    throw IOException(FormatRunEncodedDatasetPairError(
-					        string(RunEncodingName(spec.encoding)) + " " + RunBoundaryName(spec.encoding) +
-					            " and values must have same size. Got " + std::to_string(num_runs) + " and " +
-					            std::to_string(num_values),
-					        metadata.filename, spec));
-				    }
-
-				    encoded_col.run_starts = LoadRunBoundaries(metadata.filename, spec, boundaries_ds, num_runs,
-				                                               metadata.num_rows, encoded_col.non_null_end);
-				    encoded_col.values = LoadRunEncodedValues(metadata.filename, spec, values_ds, num_values);
-
-				    // Note: encoded column state is stateless (thread-safe)
-				    // No runtime state initialization needed
-
-				    // Store in dense array with LOCAL indexing
-				    result->column_states.push_back(std::move(encoded_col));
-			    } else if constexpr (std::is_same_v<T, IndexColumnSpec>) {
-				    // Virtual index column - no HDF5 state required
-				    result->column_states.push_back(IndexColumnState {});
-			    }
-		    },
-		    col);
+			    },
+			    col);
+		}
 	}
+
+	const auto &metadata = *result->metadata;
 
 	std::stable_sort(cache_refresh_entries.begin(), cache_refresh_entries.end(),
 	                 [](const CacheRefreshOrderEntry &lhs, const CacheRefreshOrderEntry &rhs) {
@@ -1705,7 +1698,24 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 		                 return lhs.original_order < rhs.original_order;
 	                 });
 	result->cache_refresh_order.reserve(cache_refresh_entries.size());
+	// DuckDB may spill other buffers while reserving memory, so allocate cache
+	// windows outside the HDF5 lock. The file state is still private to this initializer.
 	for (const auto &entry : cache_refresh_entries) {
+		auto global_idx = GetGlobalIdx(*result, entry.local_idx);
+		const auto &spec = std::get<RegularColumnSpec>(metadata.columns[global_idx]);
+		auto &state = std::get<RegularColumnState>(result->column_states[entry.local_idx]);
+		D_ASSERT(state.cache);
+		auto &cache = *state.cache;
+		auto window_count = ComputeCacheWindowCount(cache.window_rows, metadata.num_rows);
+		auto buffer_elements =
+		    CheckedDatasetSizeProduct(cache.window_rows, spec.elements_per_row, metadata.filename, spec.path);
+		DispatchOnNumericType(GetBaseType(spec.column_type), [&](auto type_tag) {
+			using T = typename decltype(type_tag)::type;
+			for (idx_t window_idx = 0; window_idx < window_count; window_idx++) {
+				cache.windows[window_idx].cache =
+				    AllocateCacheBuffer<T>(cache, buffer_elements, metadata.filename, spec.path);
+			}
+		});
 		result->cache_refresh_order.push_back(entry.local_idx);
 	}
 
