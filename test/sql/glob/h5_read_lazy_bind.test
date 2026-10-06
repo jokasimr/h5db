@@ -187,33 +187,33 @@ SELECT * FROM h5_read('test/data/empty_scalar.h5', '/short', '/long');
 ----
 physical_plan	<REGEX>:.*"Estimated Cardinality": "2".*
 
-# Two 1D columns imply at least 500k rows per file. Scalar and virtual columns
-# do not contribute to the value count. The scalar-only count stays exact.
+# Multi-file estimates use at least 1000 rows per file, independent of column
+# count. Scalar and virtual columns do not change this estimate.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read([
     'test/data/empty_scalar.h5', 'test/data/empty_scalar.h5'
 ], '/short', '/long', '/scalar_int', h5_index(), filename=true);
 ----
-physical_plan	<REGEX>:.*"Estimated Cardinality": "1000000".*
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
 
+# Scalar-only reads still have an exact count of one row per file.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read('test/data/glob/glob_same_*.h5', '/scale');
 ----
 physical_plan	<REGEX>:.*"Estimated Cardinality": "2".*
 
-# Count all inner dimensions and round up: each row contains 3 + 2*2 values,
-# giving ceil(1M/7) = 142858 rows per file, or 285716 for two files.
+# Inner dimensions do not change the per-file floor either.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read([
     'test/data/multidim_mismatch.h5', 'test/data/multidim_mismatch.h5'
 ], '/array_2d', '/array_3d');
 ----
-physical_plan	<REGEX>:.*"Estimated Cardinality": "285716".*
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
 
-# Wide rows use the 1000-row floor. Larger known first-file counts take priority.
+# An empty first file still uses the floor for multi-file estimates.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read([
@@ -222,6 +222,7 @@ SELECT * FROM h5_read([
 ----
 physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
 
+# Larger known first-file counts take priority over the floor.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read([
@@ -230,14 +231,14 @@ SELECT * FROM h5_read([
 ----
 physical_plan	<REGEX>:.*"Estimated Cardinality": "2000002".*
 
-# Zero-sized inner dimensions must not cause division by zero.
+# Zero-sized inner dimensions still use the first file's 3000-row count.
 query TT
 EXPLAIN (FORMAT JSON)
 SELECT * FROM h5_read([
     'test/data/wide_few_rows.h5', 'test/data/wide_few_rows.h5'
 ], '/zero_inner_large');
 ----
-physical_plan	<REGEX>:.*"Estimated Cardinality": "2000000".*
+physical_plan	<REGEX>:.*"Estimated Cardinality": "6000".*
 
 # Scalar broadcasts and file-local indices also work with parallel scanning.
 statement ok

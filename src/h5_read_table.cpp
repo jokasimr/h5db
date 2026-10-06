@@ -1339,23 +1339,21 @@ static idx_t EstimateH5ReadCardinality(const H5ReadBindData &bind_data) {
 		return schema_file_rows;
 	}
 
-	static constexpr idx_t MIN_VALUES_PER_FILE = 1000000;
-	static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
-	idx_t values_per_row = 0;
 	bool has_regular_columns = false;
 	for (const auto &column : GetCanonicalColumns(bind_data)) {
-		if (auto regular = std::get_if<RegularColumnSpec>(&column)) {
+		if (std::holds_alternative<RegularColumnSpec>(column)) {
 			has_regular_columns = true;
-			// Saturation avoids overflow; larger widths cannot raise the row estimate.
-			values_per_row += MinValue<idx_t>(regular->elements_per_row, MIN_VALUES_PER_FILE - values_per_row);
+			break;
 		}
 	}
 	if (!has_regular_columns) {
 		// Compatible scalar-only files each produce exactly one row.
 		return file_count;
 	}
-	const auto value_based_rows = 1 + (MIN_VALUES_PER_FILE - 1) / MaxValue<idx_t>(values_per_row, 1);
-	const auto rows_per_file = MaxValue<idx_t>(schema_file_rows, MaxValue<idx_t>(MIN_ROWS_PER_FILE, value_based_rows));
+	// Follow DuckDB's Parquet fallback: extrapolate the first file, with a floor
+	// to avoid severely underestimating when the first file is nearly empty.
+	static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
+	const auto rows_per_file = MaxValue<idx_t>(schema_file_rows, MIN_ROWS_PER_FILE);
 	if (rows_per_file > std::numeric_limits<idx_t>::max() / file_count) {
 		return std::numeric_limits<idx_t>::max();
 	}
