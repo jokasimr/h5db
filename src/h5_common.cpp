@@ -266,20 +266,24 @@ std::string GetRequiredStringArgument(const Value &value, const std::string &fun
 	return value.GetValue<string>();
 }
 
-idx_t ParseBatchSizeSetting(const Value &setting_value) {
+static idx_t ParsePositiveMemorySizeSetting(const Value &setting_value, const char *setting_name) {
 	auto input = setting_value.ToString();
 	idx_t parsed;
 	try {
 		parsed = DBConfig::ParseMemoryLimit(input);
 	} catch (std::exception &) {
-		throw InvalidInputException("Invalid value for h5db_batch_size: %s", input);
+		throw InvalidInputException("Invalid value for %s: %s", setting_name, input);
 	}
 
 	if (parsed == 0 || parsed == DConstants::INVALID_INDEX ||
 	    parsed >= static_cast<idx_t>(NumericLimits<int64_t>::Maximum())) {
-		throw InvalidInputException("Invalid value for h5db_batch_size: %s", input);
+		throw InvalidInputException("Invalid value for %s: %s", setting_name, input);
 	}
 	return parsed;
+}
+
+idx_t ParseBatchSizeSetting(const Value &setting_value) {
+	return ParsePositiveMemorySizeSetting(setting_value, "h5db_batch_size");
 }
 
 idx_t ResolveBatchSizeOption(ClientContext &context) {
@@ -290,6 +294,18 @@ idx_t ResolveBatchSizeOption(ClientContext &context) {
 
 	auto parsed = ParseBatchSizeSetting(setting);
 	return MinValue<idx_t>(parsed, H5DB_MAX_BATCH_SIZE_BYTES);
+}
+
+idx_t ParseCacheLimitPerColumnSetting(const Value &setting_value) {
+	return ParsePositiveMemorySizeSetting(setting_value, "h5db_cache_limit_per_column");
+}
+
+idx_t ResolveCacheLimitPerColumnOption(ClientContext &context) {
+	Value setting;
+	if (!context.TryGetCurrentSetting("h5db_cache_limit_per_column", setting)) {
+		return H5DB_DEFAULT_CACHE_LIMIT_PER_COLUMN_BYTES;
+	}
+	return ParseCacheLimitPerColumnSetting(setting);
 }
 
 idx_t ParseScalarReadMemoryLimitSetting(const Value &setting_value) {

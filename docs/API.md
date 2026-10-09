@@ -31,6 +31,7 @@ This document describes the public SQL functions provided by the h5db extension.
 - [Settings](#settings)
   - [`h5db_swmr_default` (BOOLEAN)](#h5db_swmr_default-boolean)
   - [`h5db_batch_size` (VARCHAR)](#h5db_batch_size-varchar)
+  - [`h5db_cache_limit_per_column` (VARCHAR)](#h5db_cache_limit_per_column-varchar)
   - [`h5db_scalar_read_memory_limit` (VARCHAR)](#h5db_scalar_read_memory_limit-varchar)
 - [Type Mapping](#type-mapping)
   - [HDF5 to DuckDB Type Conversion](#hdf5-to-duckdb-type-conversion)
@@ -912,24 +913,44 @@ SET h5db_swmr_default = true;
 ```
 
 ### `h5db_batch_size` (VARCHAR)
-Target batch size used by `h5_read` for read-ahead caching and scan sizing. Accepts DuckDB memory-size
-strings such as `'1MB'`, `'8MB'`, `'512KB'`. Defaults to `'1MB'`. Values above `1GB` are clamped to `1GB`.
+Target size for read-ahead caching and output batches in table-valued `h5_read`.
+Accepts positive DuckDB memory-size strings such as `'1MB'` and `'512KB'`.
+Defaults to `'1MB'`. Values above `1GiB` are reduced to `1GB`.
 
-This is a target, not a hard memory cap. For HDF5 chunked datasets, `h5_read` may align cache windows upward to the
-dataset's first-dimension HDF5 chunk size.
-
-The combined cache-window limit for each projected numeric column in an active
-file is `max(128MiB, 4 * h5db_batch_size)`. If the required cache windows exceed
-this per-column limit, `h5_read` uses direct reads.
-
-Read-ahead buffers are allocated eagerly. All live buffers count toward DuckDB's
-`memory_limit` and are reported under `EXTENSION` in `duckdb_memory()`. DuckDB
-cannot evict these buffers; if it cannot reserve enough memory, the scan fails
-with an out-of-memory error.
+Read sizes may exceed the target to align with HDF5 chunks. See
+[`h5db_cache_limit_per_column`](#h5db_cache_limit_per_column-varchar) for the cache limit.
 
 **Example:**
+
+If larger reads improve throughput on your storage, increase the target batch size.
+
 ```sql
-SET h5db_batch_size = '4MB';
+SET h5db_batch_size = '8MiB';
+```
+
+### `h5db_cache_limit_per_column` (VARCHAR)
+
+Configures the read-ahead cache limit per numeric column and active file in
+table-valued `h5_read`. Accepts positive DuckDB memory-size strings such as
+`'64MB'` and `'256MiB'`. Defaults to `'128MiB'`.
+
+The effective limit is `max(h5db_cache_limit_per_column, 4 * h5db_batch_size)`. This
+setting lets you adjust the cache allowance independently of the target batch
+size. If caching would exceed the effective limit, the column is read without
+read-ahead caching.
+
+Total cache memory across columns and files can exceed this limit. Cache memory
+counts toward DuckDB's `memory_limit` and appears under `EXTENSION` in
+`duckdb_memory()`. DuckDB cannot evict it; insufficient memory causes an
+out-of-memory error.
+
+**Example:**
+
+If large HDF5 chunks prevent read-ahead caching, raise the per-column cache limit
+to allow chunk-aligned reads without increasing the target batch size.
+
+```sql
+SET h5db_cache_limit_per_column = '256MiB';
 ```
 
 ### `h5db_scalar_read_memory_limit` (VARCHAR)

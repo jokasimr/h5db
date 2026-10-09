@@ -70,6 +70,10 @@ static void SetH5dbBatchSize(ClientContext &context, SetScope scope, Value &para
 	}
 }
 
+static void SetH5dbCacheLimitPerColumn(ClientContext &, SetScope, Value &parameter) {
+	ParseCacheLimitPerColumnSetting(parameter);
+}
+
 static void SetH5dbScalarReadMemoryLimit(ClientContext &, SetScope, Value &parameter) {
 	auto parsed = ParseScalarReadMemoryLimitSetting(parameter);
 	parameter = Value(parsed == NumericLimits<idx_t>::Maximum() ? "none" : parameter.ToString());
@@ -95,6 +99,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("h5db_batch_size", "Target batch size for h5_read read-ahead caching (e.g. 1MB, 8MB)",
 	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_BATCH_SIZE_SETTING), SetH5dbBatchSize);
+	config.AddExtensionOption(
+	    "h5db_cache_limit_per_column", "Per-column h5_read cache limit, raised to at least four times h5db_batch_size",
+	    LogicalType::VARCHAR, Value(H5DB_DEFAULT_CACHE_LIMIT_PER_COLUMN_SETTING), SetH5dbCacheLimitPerColumn);
 	config.AddExtensionOption("h5db_scalar_read_memory_limit",
 	                          "Estimated peak memory limit for scalar h5_read materialization (e.g. 64MB, none)",
 	                          LogicalType::VARCHAR, Value(H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_SETTING),

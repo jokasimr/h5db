@@ -26,6 +26,10 @@ static constexpr idx_t H5DB_MAX_BATCH_SIZE_BYTES = 1 * 1024 * 1024 * 1024;
 static constexpr const char *H5DB_DEFAULT_BATCH_SIZE_SETTING = "1MB";
 static constexpr const char *H5DB_MAX_BATCH_SIZE_SETTING = "1GB";
 
+// Base limit for the combined read-ahead cache windows of each h5_read column.
+static constexpr idx_t H5DB_DEFAULT_CACHE_LIMIT_PER_COLUMN_BYTES = 128 * 1024 * 1024;
+static constexpr const char *H5DB_DEFAULT_CACHE_LIMIT_PER_COLUMN_SETTING = "128MiB";
+
 // Bounds the estimated peak memory used to materialize one scalar h5_read
 // output chunk. "none" disables the guard explicitly.
 static constexpr idx_t H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_BYTES = 64 * 1000 * 1000;
@@ -51,6 +55,10 @@ idx_t ParseBatchSizeSetting(const Value &setting_value);
 
 // Resolve the configured target size for h5_read scan batches and cache windows.
 idx_t ResolveBatchSizeOption(ClientContext &context);
+
+// Parse and resolve the per-column cache limit before batch-size scaling.
+idx_t ParseCacheLimitPerColumnSetting(const Value &setting_value);
+idx_t ResolveCacheLimitPerColumnOption(ClientContext &context);
 
 // Parse and resolve the scalar h5_read materialization guard. The maximum
 // idx_t value represents an explicitly disabled limit.

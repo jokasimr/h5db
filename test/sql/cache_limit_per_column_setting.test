@@ -1,0 +1,147 @@
+# name: test/sql/cache_limit_per_column_setting.test
+# description: Configurable per-column h5_read cache limit and batch-size scaling
+# group: [sql]
+
+require h5db
+
+query TT
+SELECT current_setting('h5db_cache_limit_per_column'), current_setting('h5db_batch_size');
+----
+128MiB	1MB
+
+# The cache limit can exceed the batch setting's 1 GB cap without changing it.
+statement ok
+SET h5db_cache_limit_per_column='2GB';
+
+query TT
+SELECT current_setting('h5db_cache_limit_per_column'), current_setting('h5db_batch_size');
+----
+2GB	1MB
+
+foreach invalid not-a-size 0B -1 none null 16EB
+
+statement error
+SET h5db_cache_limit_per_column='${invalid}';
+----
+Invalid value for h5db_cache_limit_per_column
+
+endloop
+
+statement error
+SET h5db_cache_limit_per_column=NULL;
+----
+Invalid value for h5db_cache_limit_per_column
+
+statement ok
+RESET h5db_cache_limit_per_column;
+
+query T
+SELECT current_setting('h5db_cache_limit_per_column');
+----
+128MiB
+
+# Each window needs 64 MiB + 8 bytes. With the default limit, their combined
+# size exceeds 128 MiB, so direct reads succeed under a small memory limit.
+statement ok
+SET memory_limit='32MiB';
+
+query I
+SELECT values FROM h5_read('test/data/scaled_cache_limit.h5', '/values') LIMIT 1;
+----
+-10
+
+# One byte below the combined window size still selects direct reads.
+statement ok
+SET h5db_cache_limit_per_column='134217743B';
+
+query I
+SELECT values FROM h5_read('test/data/scaled_cache_limit.h5', '/values') LIMIT 1;
+----
+-10
+
+# At the exact combined size, caching is admitted without a larger batch
+# target. DuckDB rejects its memory reservation, proving the cache is used.
+statement ok
+SET h5db_cache_limit_per_column='134217744B';
+
+statement error
+SELECT values FROM h5_read('test/data/scaled_cache_limit.h5', '/values') LIMIT 1;
+----
+<REGEX>:.*failed to reserve memory data of size 64.0 MiB.*
+
+query T
+SELECT current_setting('h5db_batch_size');
+----
+1MB
+
+# A large batch target still raises the effective limit to four times its size.
+statement ok
+SET h5db_cache_limit_per_column='1B';
+
+statement ok
+SET h5db_batch_size='33MiB';
+
+statement error
+SELECT values FROM h5_read('test/data/scaled_cache_limit.h5', '/values') LIMIT 1;
+----
+<REGEX>:.*failed to reserve memory data of size 64.0 MiB.*
+
+# Lowering the configured limit below its default also works. This dataset
+# needs two 256 KiB windows, while four times the batch target is only 256 KiB.
+statement ok
+SET h5db_batch_size='64KiB';
+
+statement ok
+SET h5db_cache_limit_per_column='524287B';
+
+statement ok
+SET memory_limit='384KiB';
+
+query I
+SELECT sum(int32_cached) FROM h5_read('test/data/wide_few_rows.h5', '/int32_cached');
+----
+44999850000
+
+statement ok
+SET h5db_cache_limit_per_column='512KiB';
+
+statement error
+SELECT sum(int32_cached) FROM h5_read('test/data/wide_few_rows.h5', '/int32_cached');
+----
+<REGEX>:.*failed to reserve memory data of size 256.0 KiB.*
+
+# The limit applies separately to each column: both 512 KiB caches are
+# admitted, even though their total exceeds the configured cache limit.
+statement ok
+SET memory_limit='768KiB';
+
+statement error
+SELECT sum(a), sum(b)
+FROM h5_read('test/data/wide_few_rows.h5',
+             h5_alias('a', '/int32_cached'), h5_alias('b', '/int32_cached'));
+----
+<REGEX>:.*failed to reserve memory data of size 256.0 KiB.*
+
+query I
+SELECT memory_usage_bytes FROM duckdb_memory() WHERE tag = 'EXTENSION';
+----
+0
+
+statement ok
+SET memory_limit='4MiB';
+
+query II
+SELECT sum(a), sum(b)
+FROM h5_read('test/data/wide_few_rows.h5',
+             h5_alias('a', '/int32_cached'), h5_alias('b', '/int32_cached'));
+----
+44999850000	44999850000
+
+statement ok
+RESET h5db_batch_size;
+
+statement ok
+RESET h5db_cache_limit_per_column;
+
+statement ok
+RESET memory_limit;

@@ -55,8 +55,6 @@ static T &GetStructChild(unique_ptr<T> &child) {
 }
 
 static constexpr idx_t H5_READ_WIDE_ROW_THRESHOLD_BYTES = 64 * 1024;
-// Base bound for the combined storage of a column's one or two cache windows.
-static constexpr idx_t H5_READ_BASE_CACHE_LIMIT_BYTES = 128 * 1024 * 1024;
 // Chunk alignment can grow one window to nearly twice the target, and the
 // read-ahead cache retains up to two windows.
 static constexpr idx_t H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER = 4;
@@ -655,13 +653,13 @@ static idx_t ComputeCacheWindowCount(idx_t window_rows, idx_t total_rows) {
 	return window_rows < total_rows ? RegularColumnCache::MAX_WINDOWS : 1;
 }
 
-static idx_t ComputeCacheLimitBytes(idx_t target_batch_size_bytes) {
+static idx_t ComputeCacheLimitBytes(idx_t target_batch_size_bytes, idx_t configured_limit_bytes) {
 	D_ASSERT(target_batch_size_bytes > 0);
 	auto max_value = NumericLimits<idx_t>::Maximum();
 	auto scaled_limit = target_batch_size_bytes > max_value / H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER
 	                        ? max_value
 	                        : target_batch_size_bytes * H5_READ_CACHE_LIMIT_BATCH_MULTIPLIER;
-	return MaxValue<idx_t>(H5_READ_BASE_CACHE_LIMIT_BYTES, scaled_limit);
+	return MaxValue<idx_t>(configured_limit_bytes, scaled_limit);
 }
 
 static idx_t CheckedCacheSizeSum(idx_t left, idx_t right, const string &filename, const string &dataset_path) {
@@ -1468,7 +1466,8 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 		result->file = std::move(file_cache.file);
 		const auto &metadata = *result->metadata;
 		auto target_batch_size_bytes = ResolveBatchSizeOption(context);
-		auto cache_limit_bytes = ComputeCacheLimitBytes(target_batch_size_bytes);
+		auto cache_limit_bytes =
+		    ComputeCacheLimitBytes(target_batch_size_bytes, ResolveCacheLimitPerColumnOption(context));
 
 		result->columns_to_scan = data_column_ids;
 		result->output_column_positions = data_output_positions;
