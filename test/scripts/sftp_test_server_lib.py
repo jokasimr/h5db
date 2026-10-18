@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import posixpath
 import socket
@@ -501,6 +502,7 @@ class SFTPTestServer:
 
     def _serve_client(self, client: socket.socket) -> None:
         transport = None
+        phase = "transport initialization"
         try:
             transport = RecordingTransport(client)
             transport.h5db_telemetry = self.telemetry
@@ -518,7 +520,9 @@ class SFTPTestServer:
                 record=record,
             )
             server = AuthServer(self.config, record)
+            phase = "SSH handshake"
             transport.start_server(server=server)
+            phase = "established SSH session"
             while transport.is_active() and not self.stop_event.is_set():
                 if record.negotiated_host_key is None:
                     active_key = transport.get_server_key()
@@ -535,7 +539,7 @@ class SFTPTestServer:
             else:
                 raise
         except (EOFError, OSError):
-            pass
+            logging.getLogger(__name__).warning("SFTP test connection failed during %s", phase, exc_info=True)
         finally:
             if transport is not None:
                 transport.close()

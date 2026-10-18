@@ -1057,7 +1057,7 @@ private:
 		libssh2_session_set_blocking(session, 0);
 		auto rc = RunSessionCall([&]() { return libssh2_session_handshake(session, socket_fd->Get()); });
 		if (rc != 0) {
-			throw IOException("Failed SSH handshake: %s", LastSessionError());
+			throw IOException("Failed SSH handshake: %s (libssh2 error %d)", LastSessionError(), rc);
 		}
 	}
 

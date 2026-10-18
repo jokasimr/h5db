@@ -112,9 +112,14 @@ SERVER_LOG="$TMP_ROOT/h5db_remote_sftp.log"
 SERVER_PID=""
 KNOWN_HOSTS_SQL_PATH="$(native_path_for_host "$KNOWN_HOSTS")"
 cleanup() {
+  local exit_status=$?
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" >/dev/null 2>&1 || true
     wait "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ "$exit_status" -ne 0 && -f "$SERVER_LOG" ]]; then
+    echo "SFTP test server log (test runner exited with status $exit_status):" >&2
+    cat "$SERVER_LOG" >&2 || true
   fi
   rm -rf "$TMP_ROOT"
 }
