@@ -71,6 +71,7 @@ class SFTPServerConfig:
     stat_omit_mtime: bool = False
     auth_delay_ms: int = 0
     read_delay_ms: int = 0
+    fail_read_calls: int = 0
     stat_delay_ms: int = 0
     handle_close_delay_ms: int = 0
     disconnect_on_stat: bool = False
@@ -277,6 +278,9 @@ class RootedSFTPHandle(paramiko.SFTPHandle):
         if self.config.read_delay_ms > 0:
             time.sleep(self.config.read_delay_ms / 1000.0)
         read_call_count = self.telemetry.record_read_call(self.record)
+        if self.config.fail_read_calls > 0:
+            self.config.fail_read_calls -= 1
+            return paramiko.SFTP_FAILURE
         if self.config.disconnect_after_read_calls and read_call_count > self.config.disconnect_after_read_calls:
             self.transport.close()
             return paramiko.SFTP_FAILURE

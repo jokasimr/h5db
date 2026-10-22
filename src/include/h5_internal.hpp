@@ -37,12 +37,12 @@ static constexpr const char *H5DB_DEFAULT_SCALAR_READ_MEMORY_LIMIT_SETTING = "64
 
 // Resolve SWMR read mode from named parameters or default setting.
 // Named parameter "swmr" takes precedence over h5db_swmr_default.
-bool ResolveSwmrOption(ClientContext &context, const named_parameter_map_t &named_parameters);
+bool ResolveSwmrOption(ClientContext &context, const named_argument_map_t &named_parameters);
 struct H5FilenameColumnOption {
 	bool include = false;
 	string column_name = "filename";
 };
-H5FilenameColumnOption ResolveFilenameColumnOption(const named_parameter_map_t &named_parameters);
+H5FilenameColumnOption ResolveFilenameColumnOption(const named_argument_map_t &named_parameters);
 std::string GetRequiredStringArgument(const Value &value, const std::string &function_name,
                                       const std::string &argument_name);
 void H5ApplyFilenameFilterPushdown(ClientContext &context, LogicalGet &get,

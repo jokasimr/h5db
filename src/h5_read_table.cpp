@@ -12,15 +12,11 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
-#if __has_include("duckdb/common/vector/array_vector.hpp")
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -43,16 +39,6 @@
 #include <map>
 
 namespace duckdb {
-
-template <class T>
-static T &GetStructChild(T &child) {
-	return child;
-}
-
-template <class T>
-static T &GetStructChild(unique_ptr<T> &child) {
-	return *child;
-}
 
 static constexpr idx_t H5_READ_WIDE_ROW_THRESHOLD_BYTES = 64 * 1024;
 // Chunk alignment can grow one window to nearly twice the target, and the
@@ -453,7 +439,7 @@ static Vector &GetInnermostArrayVector(Vector &vector, const LogicalType &type) 
 	Vector *current_vector = &vector;
 	LogicalType current_type = type;
 	while (current_type.id() == LogicalTypeId::ARRAY) {
-		current_vector = &ArrayVector::GetEntry(*current_vector);
+		current_vector = &ArrayVector::GetChildMutable(*current_vector);
 		current_type = ArrayType::GetChildType(current_type);
 	}
 	return *current_vector;
@@ -473,13 +459,13 @@ static Vector &PrepareRegularResultVector(Vector &result_vector, const RegularCo
 		auto child_count = CheckedDatasetSizeProduct(parent_count, dimension, filename, spec.path);
 
 		ListVector::Reserve(*current_vector, child_count);
-		auto entries = ListVector::GetData(*current_vector);
+		auto entries = FlatVector::GetDataMutable<list_entry_t>(*current_vector);
 		for (idx_t parent_idx = 0; parent_idx < parent_count; parent_idx++) {
 			entries[parent_idx] = list_entry_t(parent_idx * dimension, dimension);
 		}
 		ListVector::SetListSize(*current_vector, child_count);
 
-		current_vector = &ListVector::GetEntry(*current_vector);
+		current_vector = &ListVector::GetChildMutable(*current_vector);
 		parent_count = child_count;
 	}
 
@@ -839,9 +825,13 @@ static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, Expres
 	Value lhs = value;
 	Value rhs = filter_val;
 	if (comparison_type.IsValid()) {
-		if (!lhs.DefaultTryCastAs(comparison_type, true) || !rhs.DefaultTryCastAs(comparison_type, true)) {
+		auto cast_lhs = lhs.DefaultTryCastAs(comparison_type, nullptr, true);
+		auto cast_rhs = rhs.DefaultTryCastAs(comparison_type, nullptr, true);
+		if (!cast_lhs || !cast_rhs) {
 			return H5ReadFilterEvalResult::UNKNOWN;
 		}
+		lhs = std::move(*cast_lhs);
+		rhs = std::move(*cast_rhs);
 	}
 	if (lhs.IsNull() || rhs.IsNull()) {
 		return H5ReadFilterEvalResult::FALSE;
@@ -1360,7 +1350,8 @@ static idx_t EstimateH5ReadCardinality(const H5ReadBindData &bind_data) {
 
 // Bind expands patterns and inspects only the first file to establish the schema.
 static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &return_names) {
+	vector<string> names;
 	ThrowIfInterrupted(context);
 	shared_ptr<H5ReadQueryBindCache> query_cache;
 	// Standalone Prepare/TryBindRelation calls do not have a query lifecycle.
@@ -1391,6 +1382,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 	}
 	result->estimated_cardinality = EstimateH5ReadCardinality(*result);
 
+	return_names = StringsToIdentifiers(names);
 	return result;
 }
 
@@ -1842,17 +1834,18 @@ static bool H5ReadIndexComparisonTypeIsMonotone(const LogicalType &comparison_ty
 
 static bool ExtractPushdownColumnRef(const Expression &expr, PushdownColumnRef &result) {
 	result.column_ref = nullptr;
-	result.comparison_type = expr.return_type;
+	result.comparison_type = expr.GetReturnType();
 
 	const Expression *current = &expr;
-	if (current->expression_class == ExpressionClass::BOUND_CAST) {
-		auto &cast = current->Cast<BoundCastExpression>();
-		if (cast.try_cast || cast.child->expression_class == ExpressionClass::BOUND_CAST) {
+	if (BoundCastExpression::IsCast(*current)) {
+		auto &cast = current->Cast<BoundFunctionExpression>();
+		auto &child = BoundCastExpression::Child(cast);
+		if (BoundCastExpression::IsTryCast(cast) || BoundCastExpression::IsCast(child)) {
 			return false;
 		}
-		current = cast.child.get();
+		current = &child;
 	}
-	if (current->expression_class != ExpressionClass::BOUND_COLUMN_REF) {
+	if (current->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return false;
 	}
 	result.column_ref = &current->Cast<BoundColumnRefExpression>();
@@ -1863,10 +1856,10 @@ template <typename TableIndexT>
 static bool TryResolvePushdownColumn(const PushdownColumnRef &ref, const TableIndexT &table_index,
                                      const unordered_map<idx_t, idx_t> &get_to_bind_map,
                                      const unordered_set<idx_t> &pushdown_columns, idx_t &bind_data_col_idx) {
-	if (!ref.column_ref || ref.column_ref->binding.table_index != table_index) {
+	if (!ref.column_ref || ref.column_ref->Binding().table_index != table_index) {
 		return false;
 	}
-	auto it = get_to_bind_map.find(ref.column_ref->binding.column_index);
+	auto it = get_to_bind_map.find(ref.column_ref->Binding().column_index);
 	if (it == get_to_bind_map.end() || pushdown_columns.count(it->second) == 0) {
 		return false;
 	}
@@ -1888,8 +1881,7 @@ static bool H5ReadCanClaimComparison(ExpressionType comparison) {
 }
 
 static bool H5ReadValueCanCastTo(const Value &value, const LogicalType &target_type) {
-	Value cast_value = value;
-	return cast_value.DefaultTryCastAs(target_type, true);
+	return value.DefaultTryCastAs(target_type, nullptr, true).has_value();
 }
 
 static bool H5ReadCanClaimPushdownFilter(const ColumnSpec &column, const PushdownColumnRef &ref,
@@ -1929,8 +1921,10 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
                                    const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
                                    vector<ClaimedFilter> &claimed) {
 	// Handle comparison expressions: col > 10, col = 20, 10 < col, etc.
-	if (expr->expression_class == ExpressionClass::BOUND_COMPARISON) {
-		auto &comp = expr->Cast<BoundComparisonExpression>();
+	if (BoundComparisonExpression::IsComparison(*expr)) {
+		auto &comp = expr->Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::Left(comp);
+		auto &right = BoundComparisonExpression::Right(comp);
 
 		const BoundConstantExpression *constant = nullptr;
 		PushdownColumnRef ref;
@@ -1938,61 +1932,63 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 		bool need_flip = false;
 
 		// Determine which side is the column and which is the constant
-		if (comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			found_colref = ExtractPushdownColumnRef(*comp.left, ref);
-			constant = &comp.right->Cast<BoundConstantExpression>();
+		if (right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			found_colref = ExtractPushdownColumnRef(left, ref);
+			constant = &right.Cast<BoundConstantExpression>();
 			need_flip = false;
-		} else if (comp.left->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			found_colref = ExtractPushdownColumnRef(*comp.right, ref);
-			constant = &comp.left->Cast<BoundConstantExpression>();
+		} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			found_colref = ExtractPushdownColumnRef(right, ref);
+			constant = &left.Cast<BoundConstantExpression>();
 			need_flip = true;
 		}
 
 		idx_t bind_data_col_idx;
-		ExpressionType comparison = need_flip ? FlipComparison(comp.type) : comp.type;
+		ExpressionType comparison = need_flip ? FlipComparison(comp.GetExpressionType()) : comp.GetExpressionType();
 		if (!found_colref || !constant || !H5ReadCanClaimComparison(comparison) ||
 		    !TryResolvePushdownColumn(ref, table_index, get_to_bind_map, pushdown_columns, bind_data_col_idx) ||
-		    !H5ReadCanClaimPushdownFilter(columns[bind_data_col_idx], ref, constant->value)) {
+		    !H5ReadCanClaimPushdownFilter(columns[bind_data_col_idx], ref, constant->GetValue())) {
 			return false;
 		}
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, comparison, constant->value, ref.comparison_type);
+		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, comparison, constant->GetValue(), ref.comparison_type);
 		return true;
 	}
 
 	// Handle BETWEEN: col BETWEEN lower AND upper
-	if (expr->expression_class == ExpressionClass::BOUND_BETWEEN) {
-		auto &between = expr->Cast<BoundBetweenExpression>();
+	if (expr->GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+		auto &between = expr->Cast<BoundFunctionExpression>();
+		auto &lower = BoundBetweenExpression::LowerBound(between);
+		auto &upper = BoundBetweenExpression::UpperBound(between);
 		PushdownColumnRef ref;
-		auto found_colref = ExtractPushdownColumnRef(*between.input, ref);
+		auto found_colref = ExtractPushdownColumnRef(BoundBetweenExpression::Input(between), ref);
 
 		idx_t bind_data_col_idx;
-		if (!found_colref || between.lower->expression_class != ExpressionClass::BOUND_CONSTANT ||
-		    between.upper->expression_class != ExpressionClass::BOUND_CONSTANT ||
+		if (!found_colref || lower.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
+		    upper.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
 		    !TryResolvePushdownColumn(ref, table_index, get_to_bind_map, pushdown_columns, bind_data_col_idx)) {
 			return false;
 		}
 
-		auto &lower_const = between.lower->Cast<BoundConstantExpression>();
-		auto &upper_const = between.upper->Cast<BoundConstantExpression>();
-		if (!H5ReadCanClaimPushdownBetween(columns[bind_data_col_idx], ref, lower_const.value, upper_const.value)) {
+		auto &lower_const = lower.Cast<BoundConstantExpression>().GetValue();
+		auto &upper_const = upper.Cast<BoundConstantExpression>().GetValue();
+		if (!H5ReadCanClaimPushdownBetween(columns[bind_data_col_idx], ref, lower_const, upper_const)) {
 			return false;
 		}
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, between.LowerComparisonType(), lower_const.value,
-		                       ref.comparison_type);
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, between.UpperComparisonType(), upper_const.value,
-		                       ref.comparison_type);
+		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, BoundBetweenExpression::LowerComparisonType(between),
+		                       lower_const, ref.comparison_type);
+		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, BoundBetweenExpression::UpperComparisonType(between),
+		                       upper_const, ref.comparison_type);
 		return true;
 	}
 
 	// Handle CONJUNCTION_AND (for other compound filters)
-	if (expr->expression_class == ExpressionClass::BOUND_CONJUNCTION) {
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conj = expr->Cast<BoundConjunctionExpression>();
 
-		if (conj.type == ExpressionType::CONJUNCTION_AND) {
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 			// Try to claim pushdown-eligible filters from all children of a flattened AND
 			vector<ClaimedFilter> temp_claimed;
 			bool claimed_any = false;
-			for (const auto &child : conj.children) {
+			for (const auto &child : conj.GetChildren()) {
 				claimed_any |= TryClaimPushdownFilter(child, table_index, get_to_bind_map, pushdown_columns, columns,
 				                                      temp_claimed);
 			}
@@ -2211,13 +2207,13 @@ static void ScanRunEncodedColumn(const RunEncodedColumnSpec &spec, RunEncodedCol
 			// Tight loop: fill all rows with same value (no conditionals!)
 			if constexpr (std::is_same_v<T, string>) {
 				// VARCHAR: need to call StringVector::AddString for each
-				auto result_data = FlatVector::GetData<string_t>(result_vector);
+				auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
 				for (idx_t j = 0; j < rows_to_fill; j++) {
 					result_data[result_offset + i + j] = StringVector::AddString(result_vector, run_value);
 				}
 			} else {
 				// Numeric types: direct assignment - compiler can vectorize this!
-				auto result_data = FlatVector::GetData<T>(result_vector);
+				auto result_data = FlatVector::GetDataMutable<T>(result_vector);
 				for (idx_t j = 0; j < rows_to_fill; j++) {
 					result_data[result_offset + i + j] = run_value;
 				}
@@ -2272,7 +2268,7 @@ static void CopyFromTypedCache(const CacheWindow::CacheStorage &cache, idx_t buf
 		const auto &typed_cache = std::get<std::vector<T>>(cache);
 
 		// Get result data pointer
-		auto result_data = FlatVector::GetData<T>(result_vector);
+		auto result_data = FlatVector::GetDataMutable<T>(result_vector);
 
 		// Copy from cache to result
 		idx_t buffer_offset = buffer_offset_rows * elements_per_row;
@@ -2419,7 +2415,7 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		// Handle string data using helper
 		ReadHDF5Strings(dataset_id, *state.string_h5_type, mem_space, file_space, to_read, metadata.filename, spec.path,
 		                [&](idx_t i, const std::string &str) {
-			                FlatVector::GetData<string_t>(target_vector)[i] =
+			                FlatVector::GetDataMutable<string_t>(target_vector)[i] =
 			                    StringVector::AddString(target_vector, str);
 		                });
 
@@ -2428,7 +2424,7 @@ static void ScanRegularColumn(ClientContext &context, const RegularColumnSpec &s
 		H5ErrorSuppressor suppress;
 		herr_t status = DispatchOnNumericType(base_type, [&](auto type_tag) {
 			using T = typename decltype(type_tag)::type;
-			void *child_data = FlatVector::GetData<T>(target_vector);
+			void *child_data = FlatVector::GetDataMutable<T>(target_vector);
 			return H5Dread(dataset_id, GetNativeH5Type<T>(), mem_space, file_space, H5P_DEFAULT, child_data);
 		});
 
@@ -2467,12 +2463,13 @@ static void ScanH5ReadFile(ClientContext &context, const H5ReadFileMetadata &met
 
 	auto range_selection = ClaimNextRange(gstate, metadata.num_rows);
 	if (!range_selection.has_data) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	idx_t position = range_selection.position;
 	idx_t to_read = range_selection.to_read;
+	output.SetChildCardinality(to_read);
 
 	// Process only scanned columns (projection pushdown)
 	// Uses LOCAL indexing - both output.data and column_states are indexed [0, 1, 2...]
@@ -2513,7 +2510,7 @@ static void ScanH5ReadFile(ClientContext &context, const H5ReadFileMetadata &met
 		    col_spec, col_state);
 	}
 
-	output.SetCardinality(to_read);
+	output.CheckCardinality(to_read);
 	if (!gstate.cache_refresh_order.empty()) {
 		MarkRangeComplete(gstate, position, to_read);
 	}
@@ -2613,7 +2610,7 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 		if (!lstate.file) {
 			std::lock_guard<std::mutex> lock(gstate.current_file_lock);
 			if (gstate.current_file_idx >= bind_data.filenames.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 			AttachLocalStateToCurrentFile(gstate, lstate);
@@ -2641,32 +2638,34 @@ static void H5ReadScan(ClientContext &context, TableFunctionInput &data, DataChu
 // ==================== h5_rse/h5_ree Scalar Functions ====================
 
 static void H5RunEncodingFunction(DataChunk &args, Vector &result, RunEncodingKind encoding) {
+	FlatVector::SetSize(result, args.size());
 	auto &boundaries_vec = args.data[0];
 	auto &values_vec = args.data[1];
 
 	UnifiedVectorFormat boundaries_data;
 	UnifiedVectorFormat values_data;
-	boundaries_vec.ToUnifiedFormat(args.size(), boundaries_data);
-	values_vec.ToUnifiedFormat(args.size(), values_data);
+	boundaries_vec.ToUnifiedFormat(boundaries_data);
+	values_vec.ToUnifiedFormat(values_data);
 
 	auto boundaries_ptr = UnifiedVectorFormat::GetData<string_t>(boundaries_data);
 	auto values_ptr = UnifiedVectorFormat::GetData<string_t>(values_data);
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
-	auto &encoding_child = GetStructChild(children[0]);
-	auto &boundaries_child = GetStructChild(children[1]);
-	auto &values_child = GetStructChild(children[2]);
+	auto &encoding_child = children[0];
+	auto &boundaries_child = children[1];
+	auto &values_child = children[2];
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto boundaries_idx = boundaries_data.sel->get_index(i);
 		auto values_idx = values_data.sel->get_index(i);
 
-		FlatVector::GetData<string_t>(encoding_child)[i] =
+		FlatVector::GetDataMutable<string_t>(encoding_child)[i] =
 		    StringVector::AddString(encoding_child, RunEncodingTag(encoding));
-		FlatVector::GetData<string_t>(boundaries_child)[i] =
+		FlatVector::GetDataMutable<string_t>(boundaries_child)[i] =
 		    StringVector::AddString(boundaries_child, boundaries_ptr[boundaries_idx]);
-		FlatVector::GetData<string_t>(values_child)[i] = StringVector::AddString(values_child, values_ptr[values_idx]);
+		FlatVector::GetDataMutable<string_t>(values_child)[i] =
+		    StringVector::AddString(values_child, values_ptr[values_idx]);
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
@@ -2716,49 +2715,54 @@ void RegisterH5ReeFunction(ExtensionLoader &loader) {
 // ==================== h5_alias Scalar Function ====================
 
 static void H5AliasFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	FlatVector::SetSize(result, args.size());
 	auto &name_vec = args.data[0];
 	auto &definition_vec = args.data[1];
 
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 3);
-	auto &tag_child = GetStructChild(children[0]);
-	auto &name_child = GetStructChild(children[1]);
-	auto &definition_child = GetStructChild(children[2]);
+	auto &tag_child = children[0];
+	auto &name_child = children[1];
+	auto &definition_child = children[2];
 	definition_child.Reference(definition_vec);
 
 	UnifiedVectorFormat name_data;
-	name_vec.ToUnifiedFormat(args.size(), name_data);
+	name_vec.ToUnifiedFormat(name_data);
 	auto name_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto name_idx = name_data.sel->get_index(i);
-		FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__alias__");
-		FlatVector::GetData<string_t>(name_child)[i] = StringVector::AddString(name_child, name_ptr[name_idx]);
+		FlatVector::GetDataMutable<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__alias__");
+		FlatVector::GetDataMutable<string_t>(name_child)[i] = StringVector::AddString(name_child, name_ptr[name_idx]);
 	}
 
 	bool all_const = definition_vec.GetVectorType() == VectorType::CONSTANT_VECTOR &&
 	                 name_vec.GetVectorType() == VectorType::CONSTANT_VECTOR;
-	result.SetVectorType(all_const ? VectorType::CONSTANT_VECTOR : VectorType::FLAT_VECTOR);
-	result.Verify(args.size());
+	if (all_const) {
+		result.FlattenAndSetConstant();
+	}
+	result.Verify();
 }
 
-static unique_ptr<FunctionData> H5AliasBind(ClientContext &context, ScalarFunction &bound_function,
-                                            vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> H5AliasBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	if (arguments.size() != 2) {
 		throw InvalidInputException("h5_alias() requires two arguments: column name and column definition");
 	}
 	child_list_t<LogicalType> struct_children = {{"tag", LogicalType::VARCHAR},
-	                                             {"column_name", arguments[0]->return_type},
-	                                             {"definition", arguments[1]->return_type}};
-	bound_function.return_type = LogicalType::STRUCT(struct_children);
-	return make_uniq<VariableReturnBindData>(bound_function.return_type);
+	                                             {"column_name", arguments[0]->GetReturnType()},
+	                                             {"definition", arguments[1]->GetReturnType()}};
+	bound_function.SetReturnType(LogicalType::STRUCT(struct_children));
+	return make_uniq<VariableReturnBindData>(bound_function.GetReturnType());
 }
 
 void RegisterH5AliasFunction(ExtensionLoader &loader) {
 	ScalarFunction h5_alias("h5_alias", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalTypeId::STRUCT,
 	                        H5AliasFunction, H5AliasBind);
-	h5_alias.serialize = VariableReturnBindData::Serialize;
-	h5_alias.deserialize = VariableReturnBindData::Deserialize;
+	h5_alias.SetSerializeCallback(VariableReturnBindData::Serialize);
+	h5_alias.SetDeserializeCallback(VariableReturnBindData::Deserialize);
 	CreateScalarFunctionInfo info(std::move(h5_alias));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	info.descriptions.push_back(H5FunctionDescription(
@@ -2770,16 +2774,17 @@ void RegisterH5AliasFunction(ExtensionLoader &loader) {
 // ==================== h5_index Scalar Function ====================
 
 static void H5IndexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	FlatVector::SetSize(result, args.size());
 	auto &children = StructVector::GetEntries(result);
 	D_ASSERT(children.size() == 1);
-	auto &tag_child = GetStructChild(children[0]);
+	auto &tag_child = children[0];
 
 	for (idx_t i = 0; i < args.size(); i++) {
-		FlatVector::GetData<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__index__");
+		FlatVector::GetDataMutable<string_t>(tag_child)[i] = StringVector::AddString(tag_child, "__index__");
 	}
 
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	result.Verify(args.size());
+	result.Verify();
 }
 
 void RegisterH5IndexFunction(ExtensionLoader &loader) {
@@ -2814,9 +2819,9 @@ void RegisterH5ReadTableFunction(ExtensionLoader &loader) {
 	TableFunction h5_read_function("h5_read", {LogicalType::VARCHAR, LogicalType::ANY}, H5ReadScan, H5ReadBind,
 	                               H5ReadInit);
 	// Allow additional ANY arguments for multiple datasets (VARCHAR or STRUCT from h5_rse()/h5_ree())
-	h5_read_function.varargs = LogicalType::ANY;
-	h5_read_function.named_parameters["filename"] = LogicalType::ANY;
-	h5_read_function.named_parameters["swmr"] = LogicalType::BOOLEAN;
+	h5_read_function.GetSignature().AddArgs("args", LogicalType::ANY);
+	h5_read_function.GetSignature().AddTypedKwargs(
+	    "options", TypedKwargs().Add("filename", LogicalType::ANY).Add("swmr", LogicalType::BOOLEAN));
 
 	// Predicate pushdown: claim filters in bind, build row ranges in init,
 	// and scan only matching run-encoded/index ranges while keeping DuckDB's post-scan verification.

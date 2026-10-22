@@ -19,7 +19,7 @@ This guide covers the essential workflows for developing the h5db DuckDB extensi
 
 Before you begin, ensure you have the following installed:
 
-- **C++ compiler**: GCC 9+ or Clang 10+
+- **C++ compiler and standard library**: C++20 support, including `std::atomic::wait`
 - **CMake**: 3.15+
 - **Git**: For cloning repositories
 - **Python 3**: For test data generation
@@ -79,9 +79,9 @@ export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
 cd ../h5db
 ```
 
-**Update the .env file**:
+**Configure a local `.env` file**:
 
-The project includes a `.env` file that needs to be configured with your vcpkg path:
+Create or update `.env` with your vcpkg path. The setup script below configures venv activation to source this file:
 
 ```bash
 # Edit .env to set your vcpkg path
@@ -120,18 +120,14 @@ echo "export GEN=ninja" >> .env
 
 ### 4. Set Up Python Virtual Environment
 
-The project includes a Python virtual environment for running test data generation scripts and the SFTP interaction
-harness:
+Create the development environment for test data generation, SFTP tests, and local tooling:
 
 ```bash
-# The venv is already created, but if you need to recreate it:
-python3 -m venv venv
+./scripts/setup-dev-env.sh
 source venv/bin/activate
-pip install h5py numpy paramiko
-deactivate
 ```
 
-**Note**: The venv is configured to automatically source `.env` when activated.
+The setup script also configures activation to source `.env`. A venv created manually does not include that hook.
 
 ---
 
@@ -139,14 +135,14 @@ deactivate
 
 ### Quick Start
 
-The simplest way to build:
+The source targets the DuckDB v2.0.0 release pinned by the submodule. From the repository root:
 
 ```bash
 # Activate virtual environment (includes all tools and environment variables)
 source venv/bin/activate
 
-# Build the project (uses ninja and ccache automatically)
-make -j8
+# Build the project (set GEN=ninja in .env to select Ninja)
+make -j4
 ```
 
 ### Build Outputs
@@ -161,30 +157,28 @@ build/release/
     └── h5db.duckdb_extension      # Loadable extension binary
 ```
 
+`CMakeLists.txt` uses DuckDB 2.0's `build_extension_library()` helper: h5db sources are compiled once into a static
+archive, which is also used to link the loadable extension. HDF5 and libssh2 dependencies are attached to that
+archive and inherited by its consumers. `extension_config.cmake` keeps h5db preloaded in the shell and test runner.
+
 ### Build Variants
 
 ```bash
 # Release build (default, optimized)
-source venv/bin/activate && make
+make -j4
 
 # Debug build (with debug symbols, no optimization)
-source venv/bin/activate && make debug
+make -j4 debug
 
 # Release with debug info
-source venv/bin/activate && make reldebug
+make -j4 reldebug
 ```
 
 ### First Build vs. Incremental Builds
 
-**First build**:
-- Downloads and compiles all dependencies (HDF5, zlib, etc.)
-- Compiles DuckDB and all extensions
-- Takes ~10-15 minutes with ninja
-
-**Incremental builds** (after making changes):
-- Only recompiles changed files (thanks to ccache)
-- Takes 10-60 seconds depending on changes
-- Extension-only changes: ~10-30 seconds
+The first build installs missing vcpkg dependencies and compiles DuckDB and its configured extensions. Incremental
+builds recompile affected sources and relink their consumers. Shared header and build-configuration changes can
+trigger substantial rebuilds. Build times depend on the machine, dependencies, and compiler-cache state.
 
 ### Clean Build
 
@@ -195,7 +189,7 @@ If you need to start fresh:
 make clean
 
 # Then rebuild
-source venv/bin/activate && make -j8
+source venv/bin/activate && make -j4
 ```
 
 ---
@@ -306,6 +300,38 @@ bash test/scripts/run_sftp_tests.sh --test-glob 'glob/*.test' --skip-interaction
   SFTPInteractionTests.test_sftp_glob_skips_unlistable_literal_directory_component
 ```
 
+### HTTP Caching
+
+The DuckDB filesystem backend opens remote files with `RequestSizing::BY_READER`, since the HDF5 VFD already
+coalesces small reads into requests of 30,000 bytes. Under DuckDB's default `AUTO` request sizing, this avoids rounding
+every read to the 2 MiB cache grid. DuckDB still aligns remote ranges to its minimum block size (4 KiB by default) and
+fetches files that fit within one maximum-size block in full.
+
+All reads use the caching handle, which can fetch missing blocks asynchronously. There is no per-query byte cutoff.
+DuckDB manages cache memory and eviction. With the default `external_file_cache_spill=false`, evicted cache payloads
+are discarded. Enabling spilling lets eligible remote blocks use temporary storage, subject to `max_temp_directory_size`.
+
+### SFTP Caching
+
+The SFTP backend uses DuckDB's external file cache directly. DuckDB does not classify `sftp://` as a remote scheme,
+so h5db applies remote validation, maximum block size, and spill policy explicitly. Cached ranges remain visible in
+`duckdb_external_file_cache()` and use DuckDB's buffer manager for memory accounting and eviction.
+
+Cache misses run synchronously under the HDF5 mutex, preserving serialization of shared libssh2 sessions. The VFD
+continues to coalesce small reads into requests of 30,000 bytes; the external cache stores the requested byte ranges
+without rounding them to another grid. Changing the maximum cache block size does not discard existing ranges. SFTP
+does not apply the remote minimum block size or request-sizing grid. Validated reads require usable modification times;
+`NO_VALIDATION` allows a warm cache to avoid opening another SFTP connection, accepting stale data if the file changes.
+
+Connections are reused within a query and released after the query and its retained HDF5 handles finish. Default
+validation still opens and stats the file for a later query, even if the contents are cached. Matching mtimes must be
+more than ten seconds old to reuse data across opens; newly read ranges can be reused within the same open handle.
+
+The block size matches libssh2's maximum SFTP READ payload. SFTP sockets enable `TCP_NODELAY` to reduce latency for
+small requests.
+
+For the complete read policy and measurement limitations, see [Remote HDF5 Read Paths](../internals/REMOTE_VFD_V2.md).
+
 ### SFTP Interrupt and Cleanup Behavior
 
 The native SFTP backend keeps libssh2 sessions in nonblocking mode. Remote SSH/SFTP operations wait in short slices and
@@ -408,7 +434,7 @@ deactivate
 1. **Make code changes** in `src/`
 2. **Rebuild** the extension:
    ```bash
-   source venv/bin/activate && make -j8
+   source venv/bin/activate && make -j4
    ```
 3. **Run tests** to verify:
    ```bash
@@ -427,23 +453,23 @@ deactivate
 
 ### Code Formatting
 
-The project uses automated code formatting to maintain consistency.
-The formatting targets use tools installed in the repo virtual environment, so activate `venv` before running
-`make format-check` or `make format-fix`.
+The formatting targets delegate to DuckDB's formatter, which creates its own tool environment under
+`duckdb/.cache/prepare-venv`
+and installs missing formatter dependencies. The first run requires network access. The repo venv is used separately
+for test data and SFTP tests.
 
-**One-time setup** (already configured):
+**Optional pre-commit hook**:
 ```bash
-./scripts/setup-dev-env.sh              # Install formatting tools in venv
 ./scripts/install-pre-commit-hook.sh    # Optional: auto-check on commit
 ```
 
 **Before committing**:
 ```bash
 # Check formatting (fast)
-source venv/bin/activate && make format-check
+make format-check
 
 # Auto-fix formatting issues
-source venv/bin/activate && make format-fix
+make format-fix
 ```
 
 **What gets formatted:**
@@ -455,7 +481,7 @@ source venv/bin/activate && make format-fix
 - Automatically runs `make format-check` before each commit
 - Blocks commits with formatting issues
 - To bypass temporarily: `git commit --no-verify`
-- If the hook fails due to missing tools, run `./scripts/setup-dev-env.sh`
+- If formatter setup fails, check the dependency-install output and network access
 
 ### Thread Safety Considerations
 
@@ -520,7 +546,7 @@ source venv/bin/activate && make format-fix
 ```bash
 ./build/release/duckdb
 
-# Turn on profiling
+# Turn on query timing
 D .timer on
 
 # Run queries and inspect results
@@ -652,7 +678,7 @@ Solution: Ensure VCPKG_TOOLCHAIN_PATH is set correctly in .env:
 ```
 Solution: Clean and rebuild:
   make clean
-  source venv/bin/activate && make -j8
+  source venv/bin/activate && make -j4
 ```
 
 **Problem**: Undefined reference errors
@@ -690,15 +716,13 @@ Solution: Regenerate all test data:
 ```
 Solution: Activate the virtual environment first:
   source venv/bin/activate
-  make -j8
+  make -j4
 ```
 
-**Problem**: `make format-fix` fails because `black`, `clang-format`, or `cmake-format` is missing
+**Problem**: Formatter dependency installation fails
 ```
-Solution: Install the dev tools if needed, then activate the virtual environment:
-  ./scripts/setup-dev-env.sh
-  source venv/bin/activate
-  make format-fix
+Solution: Check network access and the pip error from DuckDB's formatter environment, then retry:
+  make format-check
 ```
 
 **Problem**: VCPKG dependencies not found
@@ -722,7 +746,7 @@ Solution: Ensure vcpkg is bootstrapped and path is set:
 
 ```bash
 # Build
-source venv/bin/activate && make -j8
+source venv/bin/activate && make -j4
 
 # Test all suites
 make test
@@ -760,7 +784,7 @@ make clean
 
 ### Environment Variables
 
-These are set in `.env` and automatically loaded when you activate the virtual environment:
+After `scripts/setup-dev-env.sh`, variables in `.env` are loaded when you activate the virtual environment:
 
 - **`VCPKG_TOOLCHAIN_PATH`**: Path to vcpkg CMake toolchain
 - **`GEN`**: Build generator (ninja for fast builds)
@@ -779,7 +803,8 @@ cd /path/to/vcpkg
 export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
 ```
 
-**Note**: When you run `source venv/bin/activate`, the `.env` file is automatically sourced, so you get both the Python environment and all build variables.
+**Note**: The `.env` activation hook is installed by `scripts/setup-dev-env.sh`; a manually created venv needs its
+build variables exported separately.
 
 ### Build Targets
 

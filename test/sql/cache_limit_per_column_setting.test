@@ -4,6 +4,11 @@
 
 require h5db
 
+# Keep the sub-MiB limits focused on h5db's per-column cache. DuckDB's
+# external file cache needs additional memory for remote read buffers.
+statement ok
+SET enable_external_file_cache=false;
+
 query TT
 SELECT current_setting('h5db_cache_limit_per_column'), current_setting('h5db_batch_size');
 ----
@@ -145,3 +150,6 @@ RESET h5db_cache_limit_per_column;
 
 statement ok
 RESET memory_limit;
+
+statement ok
+RESET enable_external_file_cache;

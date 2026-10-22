@@ -27,10 +27,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -57,10 +54,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 400'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
 ----
 1
 
@@ -88,10 +82,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 600'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 
@@ -118,10 +109,7 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 3000'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 3000,');
 ----
 1
 
@@ -156,9 +144,6 @@ PRAGMA disable_profiling;
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
-WHERE contains(
-    substr(content, greatest(strpos(content, '"operator_name": "H5_READ"') - 260, 1), 520),
-    '"operator_cardinality": 2'
-);
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 2,');
 ----
 1

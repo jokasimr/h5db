@@ -2,14 +2,10 @@
 #include "h5_functions.hpp"
 #include "h5_internal.hpp"
 #include "duckdb/common/exception.hpp"
-#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 
 namespace duckdb {
 
@@ -63,24 +59,24 @@ static H5TreeObjectIdentity H5TreeIdentityFromObjectInfo(const H5O_info2_t &info
 }
 
 static void H5TreeWriteOptionalString(Vector &vector, idx_t row_idx, const std::optional<std::string> &value) {
-	auto &validity = FlatVector::Validity(vector);
+	auto &validity = FlatVector::ValidityMutable(vector);
 	if (!value) {
 		validity.SetInvalid(row_idx);
 		return;
 	}
 	validity.SetValid(row_idx);
-	FlatVector::GetData<string_t>(vector)[row_idx] = StringVector::AddString(vector, *value);
+	FlatVector::GetDataMutable<string_t>(vector)[row_idx] = StringVector::AddString(vector, *value);
 }
 
 static void H5TreeWriteString(Vector &vector, idx_t row_idx, const std::string &value) {
-	FlatVector::Validity(vector).SetValid(row_idx);
-	FlatVector::GetData<string_t>(vector)[row_idx] = StringVector::AddString(vector, value);
+	FlatVector::ValidityMutable(vector).SetValid(row_idx);
+	FlatVector::GetDataMutable<string_t>(vector)[row_idx] = StringVector::AddString(vector, value);
 }
 
 static void H5TreeWriteShapeRow(Vector &shape_vector, idx_t row_idx, const H5TreeRow &row, idx_t &shape_offset,
                                 uint64_t *shape_data) {
-	auto entries = ListVector::GetData(shape_vector);
-	auto &validity = FlatVector::Validity(shape_vector);
+	auto entries = FlatVector::GetDataMutable<list_entry_t>(shape_vector);
+	auto &validity = FlatVector::ValidityMutable(shape_vector);
 	if (!row.shape) {
 		validity.SetInvalid(row_idx);
 		entries[row_idx].offset = 0;
@@ -167,14 +163,14 @@ static void H5TreePopulateProjectedAttributeValue(H5TreeProjectedAttributeValue 
 	auto source_type = H5ResolveAttributeLogicalType(opened.type.get(), opened.space.get(), spec.attribute_name);
 	auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
 	                                  spec.attribute_name, H5TreeProjectedAttributeDecodeMode(spec.output_type));
-	Value cast_value;
 	string error_message;
-	if (!value.DefaultTryCastAs(spec.output_type, cast_value, &error_message, false)) {
+	auto cast_value = value.DefaultTryCastAs(spec.output_type, &error_message, false);
+	if (!cast_value) {
 		throw IOException("Attribute '" + spec.attribute_name + "' contains values that cannot be cast to " +
 		                  spec.output_type.ToString());
 	}
 	target.present = true;
-	target.value = std::move(cast_value);
+	target.value = std::move(*cast_value);
 }
 
 struct H5TreeAllAttributesIterData {
@@ -210,11 +206,12 @@ static herr_t H5TreeAllAttributesCallback(hid_t location_id, const char *attr_na
 		auto value = H5ReadAttributeValue(opened.attr, opened.type.get(), opened.space.get(), source_type,
 		                                  attribute_name, H5StringDecodeMode::TEXT_OR_BLOB);
 		string error_message;
-		if (!value.DefaultTryCastAs(LogicalType::VARIANT(), variant_value, &error_message, false)) {
+		auto cast_value = value.DefaultTryCastAs(LogicalType::VARIANT(), &error_message, false);
+		if (!cast_value) {
 			return fail("Attribute '" + attribute_name + "' contains values that cannot be cast to VARIANT");
 		}
 		iter_data.keys->emplace_back(Value(attribute_name));
-		iter_data.values->push_back(std::move(variant_value));
+		iter_data.values->push_back(std::move(*cast_value));
 	} catch (const std::exception &ex) {
 		return fail(H5NormalizeExceptionMessage(ex.what()));
 	}

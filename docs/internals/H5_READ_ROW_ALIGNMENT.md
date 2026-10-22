@@ -47,9 +47,9 @@ two rows. The three trailing values from `/long` are not returned.
 This behavior is documented in the public API reference and covered by tests.
 The core table implementation is in `src/h5_read_table.cpp`:
 
-- `H5ReadSingleFileBindData::num_rows` stores the per-file row count
-- `BindSingleH5ReadFile(...)` tracks the minimum non-scalar regular row count
-- `H5ReadSingleFileScan(...)` scans row ranges bounded by that per-file row
+- `H5ReadFileMetadata::num_rows` stores the per-file row count
+- `GetH5ReadRowCount(...)` computes the minimum non-scalar regular row count
+- `ScanH5ReadFile(...)` scans row ranges bounded by that per-file row
   count
 - `ScanRegularColumn(...)` assumes every regular column can be read for every
   emitted row
@@ -156,7 +156,7 @@ result.
 
 ### Bind-Time Row Count
 
-`BindSingleH5ReadFile(...)` currently tracks `min_rows` across non-scalar
+`GetH5ReadRowCount(...)` currently tracks `min_rows` across non-scalar
 regular datasets. The proposed behavior would change this to `max_rows`.
 
 The bind result would still need a per-file `num_rows`, but the meaning would

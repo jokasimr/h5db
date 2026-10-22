@@ -12,6 +12,20 @@ PRAGMA enable_external_file_cache=true;
 statement ok
 SET enable_http_metadata_cache=true;
 
+# Metadata reads from a file larger than 2 MiB should retain h5db's small
+# requests, rather than fetching DuckDB's default 2 MiB cache grid.
+query I
+SELECT COUNT(*) > 0 FROM h5_tree('test/data/wide_few_rows.h5');
+----
+true
+
+query II
+SELECT COUNT(*) > 0, MAX(nr_bytes) <= 64 * 1024
+FROM duckdb_external_file_cache()
+WHERE path LIKE '%wide_few_rows.h5' AND loaded;
+----
+true	true
+
 statement ok
 CALL enable_logging('HTTP');
 
@@ -137,7 +151,7 @@ SELECT
 true	true
 
 # =============================================================================
-# Large raw scans should use a bounded per-query cache budget
+# Large raw scans should remain cacheable beyond 200 MiB
 # =============================================================================
 
 statement ok
@@ -145,6 +159,9 @@ PRAGMA enable_external_file_cache=true;
 
 statement ok
 SET enable_http_metadata_cache=true;
+
+statement ok
+SET memory_limit='1GiB';
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -184,13 +201,24 @@ SELECT SUM(array_2d[1]) FROM h5_read('test/data/large/large_simple.h5', '/array_
 ----
 199999980000000
 
+# This dataset contains 320,000,000 raw bytes. The former cutoff cached only its prefix.
+query I
+SELECT SUM(nr_bytes) > 256 * 1024 * 1024
+FROM duckdb_external_file_cache()
+WHERE path LIKE '%large_simple.h5' AND loaded;
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
 query I
 SELECT SUM(array_2d[1]) FROM h5_read('test/data/large/large_simple.h5', '/array_2d');
 ----
 199999980000000
 
 query I
-SELECT COUNT(*) > 0
+SELECT COUNT(*) = 0
 FROM duckdb_logs_parsed('HTTP')
 WHERE request.type='GET';
 ----
