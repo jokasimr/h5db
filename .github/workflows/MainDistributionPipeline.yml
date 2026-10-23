@@ -14,36 +14,18 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.6
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@78bd1e4abbd543822166d5b07644751ba1fc6e8d
     with:
-      duckdb_version: v1.5.6
-      ci_tools_version: v1.5.6
-      extension_name: h5db
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
-
-  duckdb-variegata-build:
-    name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.6
-    with:
-      duckdb_version: v1.5-variegata
-      ci_tools_version: v1.5.6
-      extension_name: h5db
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
-
-  duckdb-next-build:
-    name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
-    with:
-      duckdb_version: main
-      ci_tools_version: main
+      duckdb_version: v2.0.0
+      ci_tools_version: 78bd1e4abbd543822166d5b07644751ba1fc6e8d
       extension_name: h5db
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.6
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@78bd1e4abbd543822166d5b07644751ba1fc6e8d
     with:
-      duckdb_version: v1.5.6
-      ci_tools_version: v1.5.6
+      duckdb_version: v2.0.0
+      ci_tools_version: 78bd1e4abbd543822166d5b07644751ba1fc6e8d
       extension_name: h5db
       format_checks: 'format'

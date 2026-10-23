@@ -191,6 +191,8 @@ Use the API reference for exact behavior and options:
 
 ## Build From Source
 
+The source targets DuckDB v2.0.0. Use the release pinned by the submodule when building.
+
 ### Prerequisites
 
 - `vcpkg`
@@ -211,7 +213,7 @@ cd ..
 git clone https://github.com/jokasimr/h5db.git
 cd h5db
 git submodule update --init --recursive
-make -j8
+make -j4
 ```
 
 If you prefer not to export `VCPKG_TOOLCHAIN_PATH` in your shell, put it in a repo-root `.env` file instead. See
@@ -223,7 +225,7 @@ activate the repo venv first:
 ```bash
 ./scripts/setup-dev-env.sh
 source venv/bin/activate
-make -j8
+make -j4
 ```
 
 ### Build Outputs

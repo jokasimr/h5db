@@ -5,13 +5,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
-#if __has_include("duckdb/common/vector/flat_vector.hpp")
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
-#else
-#include "duckdb/common/types/vector.hpp"
-#endif
 
 // External libraries linked through vcpkg
 #include <hdf5.h>
@@ -40,24 +36,10 @@ static void H5dbVersionScalarFun(DataChunk &args, ExpressionState &state, Vector
 	unsigned majnum, minnum, relnum;
 	H5get_libversion(&majnum, &minnum, &relnum);
 	auto hdf5_version = std::to_string(majnum) + "." + std::to_string(minnum) + "." + std::to_string(relnum);
-	auto h5db_version = H5dbExtensionVersionString();
-	auto sftp_library_version = H5dbSftpLibraryVersionString();
-
-	auto &children = StructVector::GetEntries(result);
-	D_ASSERT(children.size() == 3);
-	auto &h5db_child = *children[0];
-	auto &hdf5_child = *children[1];
-	auto &sftp_library_child = *children[2];
-
-	for (idx_t i = 0; i < args.size(); i++) {
-		FlatVector::GetData<string_t>(h5db_child)[i] = StringVector::AddString(h5db_child, h5db_version);
-		FlatVector::GetData<string_t>(hdf5_child)[i] = StringVector::AddString(hdf5_child, hdf5_version);
-		FlatVector::GetData<string_t>(sftp_library_child)[i] =
-		    StringVector::AddString(sftp_library_child, sftp_library_version);
-	}
-
-	result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	result.Verify(args.size());
+	result.Reference(Value::STRUCT({{"h5db_version", Value(H5dbExtensionVersionString())},
+	                                {"hdf5_version", Value(hdf5_version)},
+	                                {"sftp_library_version", Value(H5dbSftpLibraryVersionString())}}),
+	                 count_t(args.size()));
 }
 
 static void SetH5dbBatchSize(ClientContext &context, SetScope scope, Value &parameter) {

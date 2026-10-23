@@ -25,9 +25,8 @@ struct H5FirstFileBindData final : public FunctionData {
 	}
 };
 
-static unique_ptr<FunctionData> H5FirstFileBind(ScalarFunctionBindInput &input, ScalarFunction &,
-                                                vector<unique_ptr<Expression>> &) {
-	return make_uniq<H5FirstFileBindData>(input.binder.macro_binding);
+static unique_ptr<FunctionData> H5FirstFileBind(BindScalarFunctionInput &input) {
+	return make_uniq<H5FirstFileBindData>(input.HasBinder() && input.GetBinder().macro_binding);
 }
 
 static unique_ptr<Expression> H5FirstFileBindExpression(FunctionBindExpressionInput &input) {
@@ -37,7 +36,7 @@ static unique_ptr<Expression> H5FirstFileBindExpression(FunctionBindExpressionIn
 	}
 
 	auto &argument = input.children[0];
-	if (argument->HasParameter() || argument->return_type.id() == LogicalTypeId::UNKNOWN) {
+	if (argument->HasParameter() || argument->GetReturnType().id() == LogicalTypeId::UNKNOWN) {
 		throw ParameterNotResolvedException();
 	}
 
@@ -57,7 +56,7 @@ static unique_ptr<Expression> H5FirstFileBindExpression(FunctionBindExpressionIn
 
 static ScalarFunction CreateH5FirstFileFunction(LogicalType input_type) {
 	ScalarFunction function("h5_first_file", {std::move(input_type)}, LogicalType::VARCHAR, nullptr);
-	function.SetBindExtendedCallback(H5FirstFileBind);
+	function.SetBindCallback(H5FirstFileBind);
 	function.SetBindExpressionCallback(H5FirstFileBindExpression);
 	return function;
 }

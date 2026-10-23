@@ -765,9 +765,14 @@ All h5db functions that open HDF5 files accept local paths or remote URLs as `fi
   and SFTP.
 - The table-valued h5db functions accept `swmr := true` for local files. Remote table-function opens accept the
   parameter, but `H5F_ACC_SWMR_READ` is not used for remote paths.
-- Remote reads use DuckDB's external file cache when `enable_external_file_cache` is enabled. HDF5 metadata reads and
-  other small reads are cached as reusable byte ranges. Large raw dataset reads are routed through cached reads only up
-  to a per-query budget, currently 200 MiB; after that h5db uses direct remote reads for the rest of the query.
+- Remote reads can reuse DuckDB's external file cache when `enable_external_file_cache` is enabled and validation
+  permits reuse. A warm data cache can still require network operations to validate the file.
+- Large scans remain eligible for caching throughout the query. DuckDB manages cache memory and eviction;
+  `external_file_cache_spill` is disabled by default, so evicted cache data is discarded rather than written to disk.
+  See [Remote HDF5 Read Paths](internals/REMOTE_VFD_V2.md) for backend-specific behavior and spill limits.
+- SFTP validates file size and modification time by default. Missing modification times prevent shared-cache reuse
+  under validation. `validate_external_file_cache='NO_VALIDATION'` permits reuse without checking for remote changes
+  and can avoid an SFTP connection when all required ranges are cached.
 
 ### SFTP Secrets
 

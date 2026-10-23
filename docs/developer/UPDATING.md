@@ -4,12 +4,22 @@ When updating h5db to a newer DuckDB release:
 
 - Update submodules:
   - set `./duckdb` to the target tagged DuckDB release
-  - set `./extension-ci-tools` to the matching release branch
-- Update workflow pins in `./github/workflows`:
-  - set the `duckdb_version` input in the `duckdb-stable-build` job in `MainDistributionPipeline.yml`
-  - set the `duckdb_version` input in the `duckdb-stable-deploy` job in `MainDistributionPipeline.yml`
-  - update the reusable workflow reference for `duckdb-stable-build` in
-    `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml`
+  - set `./extension-ci-tools` to a compatible revision
+- Set `OVERRIDE_GIT_DESCRIBE` in `Makefile` to the same DuckDB release tag. DuckDB 2.0 otherwise identifies a source
+  build as a development version, even when the release tag is checked out.
+- Update `.github/workflows/MainDistributionPipeline.yml`:
+  - set `duckdb_version` in both `duckdb-stable-build` and `code-quality-check` to the release tag
+  - pin both reusable workflow references and `ci_tools_version` inputs to the `extension-ci-tools` submodule commit
+- Update the supported version in `README.md`.
+- Run `make -j4`, `make test`, and `make format-check`. Verify that the shell reports the release version and that
+  `h5db_version()` works without an explicit `LOAD h5db`.
+
+The project targets one released DuckDB version. Commit both submodule pointers with the corresponding source,
+workflow, and documentation changes.
+
+`vcpkg.json` pins HDF5 to 1.14.6 while HDF5 2.x chunk-cache performance is evaluated separately. Its
+`builtin-baseline` retains the previously tested dependency baseline; update dependency versions deliberately
+when changing CI tools.
 
 # API Changes
 

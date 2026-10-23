@@ -4,7 +4,6 @@ import base64
 import hashlib
 import logging
 import os
-import queue
 import re
 import signal
 import shutil
@@ -77,7 +76,6 @@ class SFTPInteractionTests(unittest.TestCase):
     INTERRUPT_AFTER_SECONDS = 1.0
     INTERRUPT_FINISH_TIMEOUT_SECONDS = 5.0
     TEST_HANG_DELAY_MS = 10_000
-    LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION = "v1.5.4"
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -86,12 +84,6 @@ class SFTPInteractionTests(unittest.TestCase):
         args = PARSED_ARGS
         cls.project_root = Path(__file__).resolve().parents[2]
         cls.duckdb_bin = normalize_host_binary_path(cls.project_root, args.duckdb_bin)
-        version_result = cls.run_sql("SELECT version();")
-        if version_result.returncode != 0:
-            raise RuntimeError(f"Failed to query DuckDB version:\n{version_result.output}")
-        cls.duckdb_version = version_result.stdout.strip()
-        if not cls.duckdb_version:
-            raise RuntimeError("DuckDB returned an empty version string")
         cls.data_dir = str((cls.project_root / "test/data").resolve())
         cls.tempdir = Path(tempfile.mkdtemp(prefix="h5db_sftp_interaction_"))
         cls.mutable_root = cls.tempdir / "mutable_root"
@@ -364,7 +356,7 @@ class SFTPInteractionTests(unittest.TestCase):
     def run_sql(cls, sql: str, env: dict[str, str] | None = None) -> DuckDBResult:
         try:
             completed = subprocess.run(
-                [cls.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
+                [cls.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent", "-c", sql],
                 cwd=cls.project_root,
                 env=env,
                 text=True,
@@ -430,7 +422,7 @@ class SFTPInteractionTests(unittest.TestCase):
             popen_kwargs["start_new_session"] = True
 
         process = subprocess.Popen(
-            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-c", sql],
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent", "-c", sql],
             **popen_kwargs,
         )
         output_before_interrupt_error = None
@@ -1371,7 +1363,7 @@ class SFTPInteractionTests(unittest.TestCase):
             sql = textwrap.dedent(
                 f"""
                 LOAD h5db;
-                PRAGMA enable_external_file_cache=true;
+                SET enable_external_file_cache=true;
                 {validation_clause}
                 CREATE OR REPLACE TEMPORARY SECRET metadata_cache_missing_mtime (
                     TYPE sftp,
@@ -1396,19 +1388,69 @@ class SFTPInteractionTests(unittest.TestCase):
         finally:
             self.password_server.config.stat_omit_mtime = False
 
+    def test_recent_mtime_cache_reused_within_handle_and_revalidated_on_open(self) -> None:
+        url = f"sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5"
+        self.replace_mutable_fixture("wide_few_rows.h5", int(time.time()))
+        setup_sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            SET validate_external_file_cache='VALIDATE_REMOTE';
+            CREATE TEMPORARY SECRET recent_mtime (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.mutable_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
+                PORT {self.mutable_server.port}
+            );
+            """
+        )
+
+        def read_sql(repetitions: int) -> str:
+            # Different spellings prevent constant folding. All rows read the same contiguous dataset
+            # through one file handle; its 160 KiB exceeds the VFD's small-read cache threshold.
+            paths = ", ".join(
+                "('/wide_contiguous')" if i % 2 == 0 else "('//wide_contiguous')" for i in range(repetitions)
+            )
+            return f"""
+                SELECT SUM((h5_read('{url}', p)::DOUBLE[][][])[1][1][2])::BIGINT
+                FROM (VALUES {paths}) t(p);
+            """
+
+        # A future timestamp exercises the same conservative validation rule without relying on
+        # the test finishing inside the ten-second window on a slow runner.
+        for mtime_offset in (0, 60):
+            with self.subTest(mtime_offset=mtime_offset):
+                read_counts = []
+                for repetitions, opens in ((1, 1), (4, 1), (1, 2)):
+                    mtime = int(time.time()) + mtime_offset
+                    os.utime(self.mutable_file, (mtime, mtime))
+                    self.mutable_server.telemetry.reset()
+                    sql = (
+                        setup_sql
+                        + read_sql(repetitions) * opens
+                        + f"""
+                        SELECT COALESCE(SUM(nr_bytes), 0)
+                        FROM duckdb_external_file_cache() WHERE path = '{url}';
+                    """
+                    )
+                    result = self.run_sql(sql)
+                    self.assertEqual(result.returncode, 0, msg=result.output)
+                    lines = self.numeric_stdout_lines(result)
+                    self.assertEqual(len(lines), opens + 1, msg=result.output)
+                    self.assertEqual(lines[:-1], [str(repetitions)] * opens, msg=result.output)
+                    self.assertGreater(int(lines[-1]), 0, msg=result.output)
+                    _, reads = self.mutable_server.telemetry.snapshot()
+                    read_counts.append(reads)
+                baseline_reads, repeated_reads, reopened_reads = read_counts
+                self.assertGreater(baseline_reads, 0)
+                self.assertEqual(repeated_reads, baseline_reads)
+                self.assertEqual(reopened_reads, 2 * baseline_reads)
+
     def test_missing_mtime_validated_metadata_query_does_not_retain_external_cache(self) -> None:
-        if self.duckdb_version == self.LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION:
-            self.skipTest("DuckDB v1.5.4 retains cache entries when validation metadata is missing")
-        for validation_mode in (None, "VALIDATE_REMOTE"):
+        for validation_mode in (None, "VALIDATE_REMOTE", "VALIDATE_ALL"):
             with self.subTest(validation=validation_mode or "default"):
                 self.assertEqual(self._missing_mtime_metadata_cache_bytes(validation_mode), 0)
-
-    def test_duckdb_1_5_4_missing_mtime_validated_metadata_query_uses_external_cache(self) -> None:
-        if self.duckdb_version != self.LEGACY_MISSING_VALIDATION_METADATA_CACHE_VERSION:
-            self.skipTest("legacy missing-validation-metadata cache behavior applies only to DuckDB v1.5.4")
-        for validation_mode in (None, "VALIDATE_REMOTE"):
-            with self.subTest(validation=validation_mode or "default"):
-                self.assertGreater(self._missing_mtime_metadata_cache_bytes(validation_mode), 0)
 
     def test_missing_mtime_no_validation_metadata_query_uses_external_cache(self) -> None:
         self.assertGreater(self._missing_mtime_metadata_cache_bytes("NO_VALIDATION"), 0)
@@ -1418,7 +1460,7 @@ class SFTPInteractionTests(unittest.TestCase):
         sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            PRAGMA enable_external_file_cache=true;
+            SET enable_external_file_cache=true;
             SET validate_external_file_cache='NO_VALIDATION';
             CREATE OR REPLACE TEMPORARY SECRET metadata_cache_no_validation (
                 TYPE sftp,
@@ -1441,6 +1483,169 @@ class SFTPInteractionTests(unittest.TestCase):
             len(connections), 1, msg=str([(record.auth_method, record.read_calls) for record in connections])
         )
         self.assertGreater(read_calls, 0)
+
+    def test_external_cache_ranges_survive_block_size_changes(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/cache_progress.h5"
+        for async_threads in (0, 4):
+            with self.subTest(async_threads=async_threads):
+                self.password_server.telemetry.reset()
+                sql = textwrap.dedent(
+                    f"""
+                    LOAD h5db;
+                    SET threads=4;
+                    SET async_threads={async_threads};
+                    SET cache_local_files=false;
+                    SET validate_external_file_cache='NO_VALIDATION';
+                    SET external_file_cache_remote_max_block_size=65536;
+                    CREATE TEMPORARY SECRET range_cache (
+                        TYPE sftp,
+                        SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                        USERNAME 'h5db',
+                        PASSWORD 'h5db',
+                        KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                        PORT {self.password_server.port}
+                    );
+                    SELECT SUM(rows_40961) FROM h5_read('{url}', '/rows_40961');
+                    SELECT (SUM(nr_bytes) > 65536 AND MAX(nr_bytes) <= 65536
+                            AND BOOL_OR(location % 65536 != 0))::INTEGER
+                    FROM duckdb_external_file_cache() WHERE path = '{url}';
+                    SET external_file_cache_remote_max_block_size=8192;
+                    SELECT SUM(rows_40961) FROM h5_read('{url}', '/rows_40961');
+                    SET external_file_cache_remote_max_block_size=131072;
+                    SELECT SUM(rows_40961) FROM h5_read('{url}', '/rows_40961');
+                    """
+                ).strip()
+                result = self.run_sql(sql)
+                self.assertEqual(result.returncode, 0, msg=result.output)
+                self.assertEqual(
+                    self.numeric_stdout_lines(result),
+                    ["838881280", "1", "838881280", "838881280"],
+                    msg=result.output,
+                )
+                connections, read_calls = self.password_server.telemetry.snapshot()
+                self.assertEqual(len(connections), 1, msg=str(connections))
+                self.assertGreater(read_calls, 0)
+
+    def test_external_cache_reuses_overlapping_ranges(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/wide_few_rows.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            SET cache_local_files=false;
+            SET validate_external_file_cache='NO_VALIDATION';
+            SET external_file_cache_remote_max_block_size=65536;
+            CREATE TEMPORARY SECRET overlapping_cache (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT SUM(wide_contiguous[1][1])::BIGINT
+            FROM h5_read('{url}', h5_index(), '/wide_contiguous') WHERE index BETWEEN 1 AND 2;
+            SELECT SUM(wide_contiguous[1][1])::BIGINT
+            FROM h5_read('{url}', h5_index(), '/wide_contiguous') WHERE index BETWEEN 0 AND 3;
+            SELECT SUM(wide_contiguous[1][1])::BIGINT
+            FROM h5_read('{url}', h5_index(), '/wide_contiguous');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertEqual(self.numeric_stdout_lines(result), ["300000", "600000", "1000000"], msg=result.output)
+
+    def test_external_cache_retries_after_failed_read(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        self.password_server.config.fail_read_calls = 1
+        try:
+            sql = textwrap.dedent(
+                f"""
+                LOAD h5db;
+                SET validate_external_file_cache='NO_VALIDATION';
+                CREATE TEMPORARY SECRET failed_cache_read (
+                    TYPE sftp,
+                    SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                    USERNAME 'h5db',
+                    PASSWORD 'h5db',
+                    KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                    PORT {self.password_server.port}
+                );
+                SELECT TRY(h5_read('{url}', '/integers')) IS NULL;
+                SELECT SUM(integers) FROM h5_read('{url}', '/integers');
+                """
+            ).strip()
+            result = self.run_sql(sql)
+            self.assertEqual(result.returncode, 0, msg=result.output)
+            # HDF5 may retry the failed signature read itself. Either way, the next query must succeed.
+            self.assertEqual(self.password_server.config.fail_read_calls, 0)
+            self.assertEqual(self.numeric_stdout_lines(result), ["45"], msg=result.output)
+        finally:
+            self.password_server.config.fail_read_calls = 0
+
+    def test_external_cache_spills_and_reloads_sftp_ranges(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/wide_few_rows.h5"
+        spill_directory = (self.tempdir / "cache_spill").as_posix()
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            SET threads=1;
+            SET memory_limit='16MB';
+            SET h5db_batch_size='1MB';
+            SET temp_directory='{spill_directory}';
+            SET external_file_cache_spill=true;
+            SET validate_external_file_cache='NO_VALIDATION';
+            CREATE TEMPORARY SECRET spilling_cache (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT extreme_single[1][1] FROM h5_read('{url}', '/extreme_single');
+            SELECT (COUNT(*) FILTER (WHERE spilled) > 0)::INTEGER
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            SELECT extreme_single[1][1] FROM h5_read('{url}', '/extreme_single');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertEqual(self.numeric_stdout_lines(result), ["11", "1", "11"], msg=result.output)
+
+    def test_external_cache_disable_and_reenable(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        sql = textwrap.dedent(
+            f"""
+            LOAD h5db;
+            SET validate_external_file_cache='NO_VALIDATION';
+            CREATE TEMPORARY SECRET toggle_cache (
+                TYPE sftp,
+                SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                USERNAME 'h5db',
+                PASSWORD 'h5db',
+                KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                PORT {self.password_server.port}
+            );
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT (COALESCE(SUM(nr_bytes), 0) > 0)::INTEGER
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            SET enable_external_file_cache=false;
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT COALESCE(SUM(nr_bytes), 0)
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            SET enable_external_file_cache=true;
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT (COALESCE(SUM(nr_bytes), 0) > 0)::INTEGER
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            """
+        ).strip()
+        result = self.run_sql(sql)
+        self.assertEqual(result.returncode, 0, msg=result.output)
+        self.assertEqual(self.numeric_stdout_lines(result), ["10", "1", "10", "0", "10", "1", "10"], msg=result.output)
+        connections, _ = self.password_server.telemetry.snapshot()
+        self.assertEqual(len(connections), 3, msg=str(connections))
+        self.assertTrue(all(record.read_calls > 0 for record in connections))
 
     def test_single_query_reuses_sftp_connection_across_h5_tree_and_h5_ls(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
@@ -1957,7 +2162,7 @@ class SFTPInteractionTests(unittest.TestCase):
         self.password_server.config.fail_stat_calls = 1
         try:
             process = subprocess.Popen(
-                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init"],
+                [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent"],
                 cwd=self.project_root,
                 text=True,
                 encoding="utf-8",
@@ -2078,12 +2283,13 @@ class SFTPInteractionTests(unittest.TestCase):
         self.assertEqual(key_connections[0].auth_method, "publickey", msg=str(key_connections[0]))
         self.assertGreater(key_read_calls, 0)
 
-    def test_repeated_large_scan_still_reads_uncached_suffix(self) -> None:
+    def test_repeated_large_scan_uses_external_cache_beyond_200_mib(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/large/large_simple.h5"
         baseline_sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            CREATE OR REPLACE TEMPORARY SECRET large_scan_cache_budget_baseline (
+            SET memory_limit='1GiB';
+            CREATE OR REPLACE TEMPORARY SECRET large_scan_cache_baseline (
                 TYPE sftp,
                 SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
                 USERNAME 'h5db',
@@ -2108,7 +2314,8 @@ class SFTPInteractionTests(unittest.TestCase):
         repeated_sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            CREATE OR REPLACE TEMPORARY SECRET large_scan_cache_budget_repeated (
+            SET memory_limit='1GiB';
+            CREATE OR REPLACE TEMPORARY SECRET large_scan_cache_repeated (
                 TYPE sftp,
                 SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
                 USERNAME 'h5db',
@@ -2125,108 +2332,17 @@ class SFTPInteractionTests(unittest.TestCase):
         numeric_lines = [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()]
         self.assertEqual(numeric_lines, ["199999980000000", "199999980000000"], msg=result.output)
         _, repeated_read_calls = self.password_server.telemetry.snapshot()
-        self.assertGreater(repeated_read_calls, baseline_read_calls)
+        self.assertEqual(repeated_read_calls, baseline_read_calls)
 
     def test_mtime_change_invalidates_external_cache(self) -> None:
         now = int(time.time())
         self.replace_mutable_fixture("simple.h5", now - 120)
-
-        process = subprocess.Popen(
-            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init"],
-            cwd=self.project_root,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-
-        def cleanup_process() -> None:
-            if process.poll() is None:
-                process.kill()
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None and not stream.closed:
-                    stream.close()
-
-        self.addCleanup(cleanup_process)
-        self.assertIsNotNone(process.stdin)
-        self.assertIsNotNone(process.stdout)
-        self.assertIsNotNone(process.stderr)
-
-        stdout_queue: queue.Queue[str | None] = queue.Queue()
-        stderr_queue: queue.Queue[str | None] = queue.Queue()
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-        def read_stream(stream, output_queue: queue.Queue[str | None]) -> None:
-            try:
-                for line in stream:
-                    output_queue.put(line)
-            finally:
-                output_queue.put(None)
-
-        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_queue), daemon=True)
-        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_queue), daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
-
-        def drain_queue(output_queue: queue.Queue[str | None], lines: list[str], timeout: float = 0.0) -> bool:
-            deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    if timeout <= 0:
-                        line = output_queue.get_nowait()
-                    else:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            return False
-                        line = output_queue.get(timeout=remaining)
-                except queue.Empty:
-                    return False
-                if line is None:
-                    return True
-                lines.append(line)
-
-        def read_stdout_line(timeout_seconds: float) -> str:
-            deadline = time.monotonic() + timeout_seconds
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.kill_process(process)
-                    drain_queue(stdout_queue, stdout_lines, 1.0)
-                    drain_queue(stderr_queue, stderr_lines, 1.0)
-                    self.fail(
-                        "Timed out waiting for DuckDB output.\n"
-                        f"stdout:\n{''.join(stdout_lines)}\n"
-                        f"stderr:\n{''.join(stderr_lines)}"
-                    )
-                try:
-                    line = stdout_queue.get(timeout=remaining)
-                except queue.Empty:
-                    continue
-                if line is None:
-                    drain_queue(stderr_queue, stderr_lines)
-                    self.fail(
-                        "DuckDB process exited before producing the expected query result.\n"
-                        f"stdout:\n{''.join(stdout_lines)}\n"
-                        f"stderr:\n{''.join(stderr_lines)}"
-                    )
-                stdout_lines.append(line)
-                return line
-
-        def read_next_numeric_line() -> str:
-            while True:
-                line = read_stdout_line(self.SUBPROCESS_TIMEOUT_SECONDS)
-                stripped = line.strip()
-                if stripped.isdigit():
-                    return stripped
-
+        url = f"sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5"
+        completion_marker = "h5db_initial_query_complete"
         setup_sql = textwrap.dedent(
             f"""
             LOAD h5db;
-            PRAGMA enable_external_file_cache=true;
+            SET enable_external_file_cache=true;
             SET validate_external_file_cache='VALIDATE_REMOTE';
             CREATE OR REPLACE TEMPORARY SECRET mutable_mtime (
                 TYPE sftp,
@@ -2236,51 +2352,69 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
                 PORT {self.mutable_server.port}
             );
-            SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT (COALESCE(SUM(nr_bytes), 0) > 0)::INTEGER
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            .print {completion_marker}
             """
-        ).strip()
-        process.stdin.write(setup_sql + "\n")
-        process.stdin.flush()
-
-        first_line = read_next_numeric_line()
-        self.assertEqual(first_line, "10")
-        _, first_read_calls = self.mutable_server.telemetry.snapshot()
-        self.assertGreater(first_read_calls, 0)
-        self.mutable_server.telemetry.reset()
-
-        self.replace_mutable_fixture("with_attrs.h5", now - 60)
-
-        process.stdin.write(
-            textwrap.dedent(
-                f"""
-                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
-                .quit
-                """
-            )
         )
-        process.stdin.flush()
-        process.stdin.close()
 
-        try:
-            process.wait(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as ex:
-            self.kill_process(process)
-            process.wait(timeout=1.0)
-            drain_queue(stdout_queue, stdout_lines, 1.0)
-            drain_queue(stderr_queue, stderr_lines, 1.0)
-            raise AssertionError(
-                "DuckDB subprocess timed out after mutable cache invalidation query.\n"
-                f"stdout:\n{''.join(stdout_lines)}\n"
-                f"stderr:\n{''.join(stderr_lines)}"
-            ) from ex
+        with subprocess.Popen(
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent"],
+            cwd=self.project_root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ) as process:
+            initial_output: list[str] = []
 
-        drain_queue(stdout_queue, stdout_lines, 1.0)
-        drain_queue(stderr_queue, stderr_lines, 1.0)
-        stdout = "".join(stdout_lines)
-        stderr = "".join(stderr_lines)
-        self.assertEqual(process.returncode, 0, msg=stdout + stderr)
-        numeric_lines = [line.strip() for line in stdout.splitlines() if line.strip().isdigit()]
-        self.assertEqual(numeric_lines, ["10", "3"], msg=stdout)
+            def read_initial_output() -> None:
+                for line in process.stdout:
+                    initial_output.append(line)
+                    if line.strip() == completion_marker:
+                        break
+
+            reader = threading.Thread(target=read_initial_output, daemon=True)
+            reader.start()
+            try:
+                process.stdin.write(setup_sql)
+                process.stdin.flush()
+                # Unlike streamed result rows, .print runs after SQL execution and
+                # cleanup finish, so Windows can replace the now-closed file.
+                reader.join(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                self.assertFalse(
+                    reader.is_alive(),
+                    msg="Timed out waiting for initial query completion.\n" + "".join(initial_output),
+                )
+                output = "".join(initial_output)
+                self.assertIn(completion_marker, output.splitlines(), msg=output)
+                _, first_read_calls = self.mutable_server.telemetry.snapshot()
+                self.assertGreater(first_read_calls, 0)
+                self.mutable_server.telemetry.reset()
+
+                self.replace_mutable_fixture("with_attrs.h5", now - 60)
+                try:
+                    remaining_output, _ = process.communicate(
+                        f"SELECT COUNT(*) FROM h5_tree('{url}');\n.quit\n",
+                        timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    remaining_output, _ = process.communicate(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                    self.fail("DuckDB timed out after cache invalidation query.\n" + output + remaining_output)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                reader.join(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+
+        output += remaining_output
+        self.assertEqual(process.returncode, 0, msg=output)
+        numeric_lines = [line.strip() for line in output.splitlines() if line.strip().isdigit()]
+        self.assertEqual(numeric_lines, ["10", "1", "3"], msg=output)
         _, second_read_calls = self.mutable_server.telemetry.snapshot()
         self.assertGreater(second_read_calls, 0)
 

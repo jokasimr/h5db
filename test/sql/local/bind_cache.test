@@ -4,7 +4,7 @@
 
 require h5db
 
-unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+unzip test/data/statement_cache_initial.h5.gz {TEST_DIR}/h5db_bind_cache.h5
 
 statement ok
 BEGIN TRANSACTION;
@@ -12,19 +12,19 @@ BEGIN TRANSACTION;
 # The same path is used with different aliases and alongside a scalar.
 query IIT
 SELECT SUM(first.x + second.y), SUM(first.s), typeof(first.x)
-FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x', '/s') first
-JOIN h5_read('__TEST_DIR__/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
+FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/x', '/s') first
+JOIN h5_read('{TEST_DIR}/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
 GROUP BY ALL;
 ----
 12	21	INTEGER
 
 # QueryEnd must clear the cache even though the transaction remains open.
-unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+unzip test/data/statement_cache_replacement.h5.gz {TEST_DIR}/h5db_bind_cache.h5
 
 query RRT
 SELECT SUM(first.x + second.y), SUM(first.s), typeof(first.x)
-FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x', '/s') first
-JOIN h5_read('__TEST_DIR__/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
+FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/x', '/s') first
+JOIN h5_read('{TEST_DIR}/h5db_bind_cache.h5', h5_alias('y', '/x')) second ON first.x = second.y
 GROUP BY ALL;
 ----
 305.0	52.5	DOUBLE
@@ -34,18 +34,18 @@ COMMIT;
 
 # A failed bind must also release the cached file and metadata.
 statement error
-SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
-UNION ALL SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/missing');
+SELECT * FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/x')
+UNION ALL SELECT * FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/missing');
 ----
 <REGEX>:.*Failed to open dataset.*\/missing.*
 
-unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_bind_cache.h5
+unzip test/data/statement_cache_initial.h5.gz {TEST_DIR}/h5db_bind_cache.h5
 
 query IIT
 SELECT COUNT(*), SUM(x), typeof(x)
 FROM (
-    SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
-    UNION ALL SELECT * FROM h5_read('__TEST_DIR__/h5db_bind_cache.h5', '/x')
+    SELECT * FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/x')
+    UNION ALL SELECT * FROM h5_read('{TEST_DIR}/h5db_bind_cache.h5', '/x')
 ) GROUP BY ALL;
 ----
 6	12	INTEGER

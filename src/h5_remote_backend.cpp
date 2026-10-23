@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
@@ -32,13 +33,19 @@
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/settings.hpp"
-#include "duckdb/storage/caching_file_system.hpp"
+#include "duckdb/common/checksum.hpp"
+#include "duckdb/common/enums/memory_tag.hpp"
+#include "duckdb/storage/buffer/block_handle.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/external_file_cache/caching_file_system.hpp"
 
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <array>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -59,9 +66,11 @@ static bool TryGetDuckDBFsRemoteExtension(const std::string &path, std::string &
 
 class DuckDBFsRemoteBackend : public H5RemoteBackend {
 public:
-	explicit DuckDBFsRemoteBackend(ClientContext &context, const std::string &path)
-	    : file_system(FileSystem::GetFileSystem(context)), caching_fs(CachingFileSystem::Get(context)), path(path),
-	      read_flags(FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO) {
+	explicit DuckDBFsRemoteBackend(ClientContext &context, const std::string &path) {
+		auto caching_fs = CachingFileSystem::Get(context);
+		auto read_flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO;
+		// The VFD already coalesces small reads. Preserve its request sizes.
+		read_flags.SetRequestSizing(RequestSizing::BY_READER);
 		OpenFileInfo open_info(path);
 		cached_handle = caching_fs.OpenFile(QueryContext(context), open_info, read_flags);
 		if (!cached_handle) {
@@ -74,44 +83,16 @@ public:
 		return file_size;
 	}
 
-	void ReadCached(idx_t offset, idx_t size, void *buf) override {
+	void Read(idx_t offset, idx_t size, void *buf) override {
 		if (!cached_handle) {
 			throw IOException("Failed to read remote data: no readable file handle");
 		}
-		data_ptr_t buffer = nullptr;
-		auto pinned_buffer = cached_handle->Read(buffer, size, offset);
-		if (!pinned_buffer.IsValid() || !buffer) {
-			throw IOException("Failed to read remote data: invalid cached buffer");
-		}
-		std::memcpy(buf, buffer, size);
-	}
-
-	void ReadDirect(idx_t offset, idx_t size, void *buf) override {
-		OpenDirectHandleIfNeeded();
-		if (!direct_handle) {
-			throw IOException("Failed to read remote data: no readable direct file handle");
-		}
-		direct_handle->Read(buf, size, offset);
+		auto buffers = cached_handle->Read(size, offset);
+		buffers.CopyTo(static_cast<data_ptr_t>(buf), size);
 	}
 
 private:
-	void OpenDirectHandleIfNeeded() {
-		if (direct_handle) {
-			return;
-		}
-		OpenFileInfo open_info(path);
-		direct_handle = file_system.OpenFile(open_info, read_flags);
-		if (!direct_handle) {
-			throw IOException("Failed to open remote file '%s' for direct reads", path);
-		}
-	}
-
-	FileSystem &file_system;
-	CachingFileSystem caching_fs;
-	std::string path;
-	FileOpenFlags read_flags;
 	unique_ptr<CachingFileHandle> cached_handle;
-	unique_ptr<FileHandle> direct_handle;
 	idx_t file_size = 0;
 };
 
@@ -858,6 +839,12 @@ private:
 #endif
 	}
 
+	static void TryEnableTcpNoDelay(libssh2_socket_t fd) {
+		// Send small SFTP requests promptly instead of waiting for Nagle's algorithm.
+		int enabled = 1;
+		(void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&enabled), sizeof(enabled));
+	}
+
 	SocketWaitOutcome WaitForSocketEventsOnce(bool wait_read, bool wait_write, int timeout_ms) noexcept {
 		D_ASSERT(socket_fd);
 #ifdef _WIN32
@@ -961,6 +948,7 @@ private:
 				continue;
 			}
 			TryDisableSigPipe(fd);
+			TryEnableTcpNoDelay(fd);
 			if (!TrySetSocketNonBlocking(fd)) {
 				LIBSSH2_SOCKET_CLOSE(fd);
 				fd = LIBSSH2_INVALID_SOCKET;
@@ -1972,169 +1960,166 @@ private:
 	timestamp_t last_modified;
 };
 
-class H5SftpFileHandle : public FileHandle {
+// All SFTP backend access is serialized by hdf5_global_mutex. Keep cache misses synchronous:
+// DuckDB's caching filesystem can otherwise dispatch reads against the same libssh2 session concurrently.
+class H5SftpRemoteBackend : public H5RemoteBackend {
 public:
-	H5SftpFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags) : FileHandle(fs, file.path, flags) {
-	}
-
-	void Close() override {
-	}
-
-	idx_t position = 0;
-};
-
-class H5SftpFileSystem : public FileSystem {
-public:
-	H5SftpFileSystem(ClientContext &context_p, const H5SftpUrl &url_p)
-	    : context(context_p), config(ResolveSftpConfig(context_p, url_p)), path(url_p.original_url) {
-	}
-
-protected:
-	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
-	                                        optional_ptr<FileOpener> opener) override {
-		if (file.path != path) {
-			throw InternalException("Unexpected SFTP file open for '%s' on handle bound to '%s'", file.path, path);
+	H5SftpRemoteBackend(ClientContext &context_p, const H5SftpUrl &url)
+	    : context(context_p), config(ResolveSftpConfig(context_p, url)),
+	      external_cache(ExternalFileCache::Get(context_p)),
+	      validate(Settings::Get<ValidateExternalFileCacheSetting>(context_p) != CacheValidationMode::NO_VALIDATION),
+	      cached_file(external_cache.GetOrCreateCachedFile(url.original_url)) {
+		bool needs_open;
+		{
+			const annotated_lock_guard<annotated_mutex> guard(cached_file->map_lock);
+			needs_open = cached_file->blocks.empty();
 		}
-		return make_uniq<H5SftpFileHandle>(*this, file, flags);
+		if (!external_cache.IsEnabled() || validate || needs_open) {
+			auto &file = GetEngine();
+			validation_info.file_size = file.GetFileSize();
+			validation_info.last_modified = file.GetLastModifiedTime();
+			SynchronizeCache(true);
+		} else {
+			const annotated_lock_guard<annotated_mutex> guard(cached_file->meta_lock);
+			validation_info = cached_file->validation_info;
+		}
 	}
 
-	bool SupportsOpenFileExtended() const override {
-		return true;
+	idx_t GetFileSize() const override {
+		return validation_info.file_size;
 	}
 
-public:
-	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override {
-		auto &sftp_handle = handle.Cast<H5SftpFileHandle>();
-		GetOrCreateEngine().Read(location, UnsafeNumericCast<idx_t>(nr_bytes), buffer);
-		sftp_handle.position = location + UnsafeNumericCast<idx_t>(nr_bytes);
-	}
+	void Read(idx_t offset, idx_t size, void *buf) override {
+		if (size == 0) {
+			return;
+		}
+		if (offset > GetFileSize() || size > GetFileSize() - offset) {
+			throw IOException("Unexpected EOF while reading SFTP file");
+		}
+		// SFTP provides neither a version tag nor an expiry. Without a usable mtime, validated reads cannot
+		// retain shared cache data. NO_VALIDATION still permits a warm cache to avoid opening a connection.
+		if (!external_cache.IsEnabled() || (validate && !ExternalFileCache::HasValidationMetadata(validation_info))) {
+			ReadAndProfile(offset, size, buf);
+			return;
+		}
 
-	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override {
-		auto &sftp_handle = handle.Cast<H5SftpFileHandle>();
-		GetOrCreateEngine().Read(sftp_handle.position, UnsafeNumericCast<idx_t>(nr_bytes), buffer);
-		sftp_handle.position += UnsafeNumericCast<idx_t>(nr_bytes);
-		return nr_bytes;
-	}
-
-	int64_t GetFileSize(FileHandle &handle) override {
-		return UnsafeNumericCast<int64_t>(GetOrCreateEngine().GetFileSize());
-	}
-
-	timestamp_t GetLastModifiedTime(FileHandle &handle) override {
-		return GetOrCreateEngine().GetLastModifiedTime();
-	}
-
-	string GetVersionTag(FileHandle &handle) override {
-		return "";
-	}
-
-	void Seek(FileHandle &handle, idx_t location) override {
-		handle.Cast<H5SftpFileHandle>().position = location;
-	}
-
-	idx_t SeekPosition(FileHandle &handle) override {
-		return handle.Cast<H5SftpFileHandle>().position;
-	}
-
-	bool CanHandleFile(const string &fpath) override {
-		return IsSftpPath(fpath);
-	}
-
-	bool CanSeek() override {
-		return true;
-	}
-
-	bool OnDiskFile(FileHandle &handle) override {
-		return false;
-	}
-
-	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener) override {
-		return false;
-	}
-
-	string GetName() const override {
-		return "H5SftpFileSystem";
-	}
-
-	string PathSeparator(const string &path) override {
-		return "/";
+		SynchronizeCache(false);
+		// DuckDB does not classify sftp:// as remote. Select remote policy explicitly, without rounding the
+		// requested range or involving cache_local_files. The VFD already coalesces small reads.
+		const auto max_block_size = Settings::Get<ExternalFileCacheRemoteMaxBlockSizeSetting>(context);
+		auto blocks = external_cache.AcquireBlocks(*cached_file, offset, size, max_block_size);
+		idx_t copied = 0;
+		for (auto &block : blocks) {
+			ThrowIfInterrupted();
+			auto pin = PinOrReadBlock(*block);
+			idx_t valid_bytes;
+			{
+				const annotated_lock_guard<annotated_mutex> guard(block->mtx);
+				valid_bytes = block->nr_bytes;
+			}
+			const auto copy_start = MaxValue(offset, block->location);
+			const auto copy_end = MinValue(offset + size, block->location + valid_bytes);
+			if (copy_end <= copy_start || copy_start != offset + copied) {
+				throw IOException("Invalid cached SFTP range");
+			}
+			const auto copy_size = copy_end - copy_start;
+			memcpy(static_cast<data_ptr_t>(buf) + copied, pin.Ptr() + (copy_start - block->location), copy_size);
+			copied += copy_size;
+		}
+		if (copied != size) {
+			throw IOException("Unexpected EOF while reading cached SFTP data");
+		}
 	}
 
 private:
-	H5SftpFileEngine &GetOrCreateEngine() {
+	void ThrowIfInterrupted() const {
+		if (context.IsInterrupted()) {
+			throw InterruptException();
+		}
+	}
+
+	H5SftpFileEngine &GetEngine() {
 		if (!engine) {
-			auto connection = GetOrCreateCachedSftpConnection(context, config);
-			engine = make_uniq<H5SftpFileEngine>(std::move(connection), config);
+			engine = make_uniq<H5SftpFileEngine>(GetOrCreateCachedSftpConnection(context, config), config);
 		}
 		return *engine;
 	}
 
+	void ReadAndProfile(idx_t offset, idx_t size, void *buf) {
+		GetEngine().Read(offset, size, buf);
+		QueryProfiler::Get(context).TrackBytesRead(size);
+	}
+
+	BufferHandle PinOrReadBlock(CacheBlock &block) {
+		auto &buffer_manager = external_cache.GetBufferManager();
+		{
+			const annotated_lock_guard<annotated_mutex> guard(block.mtx);
+			if (block.state == CacheBlockState::LOADED && block.block_handle) {
+				auto pin = buffer_manager.Pin(block.block_handle);
+				if (pin.IsValid()) {
+#ifdef DEBUG
+					D_ASSERT(Checksum(pin.Ptr(), block.nr_bytes) == block.checksum);
+#endif
+					return pin;
+				}
+			}
+			D_ASSERT(block.state != CacheBlockState::LOADING);
+			block.state = CacheBlockState::LOADING;
+		}
+		try {
+			const auto read_size = MinValue(block.size, GetFileSize() - block.location);
+			// AllocateCacheBuffer selects policy by URL scheme, so it would disable spilling for SFTP.
+			const bool spill = Settings::Get<ExternalFileCacheSpillSetting>(context) &&
+			                   buffer_manager.HasTemporaryDirectory() &&
+			                   read_size >= buffer_manager.GetBlockAllocSize();
+			auto pin = buffer_manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, read_size, !spill);
+			ReadAndProfile(block.location, read_size, pin.GetDataMutable());
+			ThrowIfInterrupted();
+			const annotated_lock_guard<annotated_mutex> guard(block.mtx);
+			block.block_handle = pin.GetBlockHandle();
+			block.nr_bytes = read_size;
+#ifdef DEBUG
+			block.checksum = Checksum(pin.Ptr(), read_size);
+#endif
+			block.state = CacheBlockState::LOADED;
+			block.cv.notify_all();
+			return pin;
+		} catch (...) {
+			const annotated_lock_guard<annotated_mutex> guard(block.mtx);
+			block.state = CacheBlockState::EMPTY;
+			block.cv.notify_all();
+			throw;
+		}
+	}
+
+	void SynchronizeCache(bool validate_on_open) {
+		if (cached_file->generation != external_cache.GetGeneration()) {
+			cached_file = external_cache.GetOrCreateCachedFile(cached_file->path);
+		}
+		// A different open handle may have validated another version of this path. The HDF5 mutex serializes
+		// SFTP reads, so synchronizing here keeps acquired ranges associated with this handle's metadata.
+		const annotated_lock_guard<annotated_mutex> guard(cached_file->meta_lock);
+		auto &cached_info = cached_file->validation_info;
+		// Apply DuckDB's conservative mtime age check when opening the file. Within an open handle,
+		// freshly fetched ranges can be reused as long as the shared cache still matches its metadata.
+		const bool cache_is_valid = validate_on_open
+		                                ? ExternalFileCache::IsValid(validate, cached_info, validation_info)
+		                                : !validate || cached_info.last_modified == validation_info.last_modified;
+		if (cached_info.file_size != validation_info.file_size || !cache_is_valid) {
+			external_cache.DropBlocks(*cached_file);
+		}
+		cached_info = validation_info;
+		cached_file->can_seek = true;
+		cached_file->on_disk_file = false;
+	}
+
 	ClientContext &context;
-	H5SftpConfig config;
-	std::string path;
+	const H5SftpConfig config;
+	ExternalFileCache &external_cache;
+	const bool validate;
+	shared_ptr<ExternalFileCache::CachedFile> cached_file;
 	unique_ptr<H5SftpFileEngine> engine;
-};
-
-class H5SftpRemoteBackend : public H5RemoteBackend {
-public:
-	H5SftpRemoteBackend(ClientContext &context_p, const H5SftpUrl &url_p)
-	    : raw_fs(context_p, url_p), caching_fs(raw_fs, *context_p.db), path(url_p.original_url),
-	      read_flags(FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO) {
-		OpenFileInfo open_info(path);
-		if (Settings::Get<ValidateExternalFileCacheSetting>(context_p) == CacheValidationMode::VALIDATE_REMOTE) {
-			open_info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-			open_info.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(true);
-		}
-		cached_handle = caching_fs.OpenFile(QueryContext(context_p), open_info, read_flags);
-		if (!cached_handle) {
-			throw IOException("Failed to open remote SFTP file '%s'", path);
-		}
-		file_size = cached_handle->GetFileSize();
-	}
-
-	idx_t GetFileSize() const override {
-		return file_size;
-	}
-
-	void ReadCached(idx_t offset, idx_t size, void *buf) override {
-		if (!cached_handle) {
-			throw IOException("Failed to read SFTP data: no readable cached file handle");
-		}
-		data_ptr_t buffer = nullptr;
-		auto pinned_buffer = cached_handle->Read(buffer, size, offset);
-		if (!pinned_buffer.IsValid() || !buffer) {
-			throw IOException("Failed to read SFTP data: invalid cached buffer");
-		}
-		std::memcpy(buf, buffer, size);
-	}
-
-	void ReadDirect(idx_t offset, idx_t size, void *buf) override {
-		OpenDirectHandleIfNeeded();
-		if (!direct_handle) {
-			throw IOException("Failed to read SFTP data: no readable direct file handle");
-		}
-		direct_handle->Read(buf, size, offset);
-	}
-
-private:
-	void OpenDirectHandleIfNeeded() {
-		if (direct_handle) {
-			return;
-		}
-		OpenFileInfo open_info(path);
-		direct_handle = raw_fs.OpenFile(open_info, read_flags);
-		if (!direct_handle) {
-			throw IOException("Failed to open remote SFTP file '%s' for direct reads", path);
-		}
-	}
-
-	H5SftpFileSystem raw_fs;
-	CachingFileSystem caching_fs;
-	std::string path;
-	FileOpenFlags read_flags;
-	unique_ptr<CachingFileHandle> cached_handle;
-	unique_ptr<FileHandle> direct_handle;
-	idx_t file_size = 0;
+	CacheValidationInfo validation_info;
 };
 
 } // namespace

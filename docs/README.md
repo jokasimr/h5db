@@ -17,5 +17,5 @@ Internal design notes:
 - [internals/SCALAR_VALUE_FUNCTIONS.md](internals/SCALAR_VALUE_FUNCTIONS.md)
 - [internals/H5_READ_ROW_ALIGNMENT.md](internals/H5_READ_ROW_ALIGNMENT.md)
 - [internals/REMOTE_METADATA_AND_INTERRUPTS.md](internals/REMOTE_METADATA_AND_INTERRUPTS.md)
-- [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md)
+- [internals/REMOTE_VFD_V2.md](internals/REMOTE_VFD_V2.md): current remote read, cache, and transport behavior
 - [internals/SFTP_SSH_AGENT_AUTH.md](internals/SFTP_SSH_AGENT_AUTH.md)
