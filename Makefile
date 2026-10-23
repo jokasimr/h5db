@@ -9,6 +9,9 @@ OVERRIDE_GIT_DESCRIBE=v2.0.0
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
+# DuckDB 2.0 removed these options; omit them from the shared build flags.
+BUILD_FLAGS := $(filter-out -DENABLE_EXTENSION_AUTOLOADING=% -DENABLE_EXTENSION_AUTOINSTALL=%,$(BUILD_FLAGS))
+
 H5DB_LOCAL_TEST_FILTERS := "test/sql/*" "~test/sql/remote/*"
 
 # Customize the CI tools' test hook for all build variants.

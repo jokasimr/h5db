@@ -26,7 +26,7 @@ SELECT current_setting('h5db_cache_limit_per_column'), current_setting('h5db_bat
 foreach invalid not-a-size 0B -1 none null 16EB
 
 statement error
-SET h5db_cache_limit_per_column='${invalid}';
+SET h5db_cache_limit_per_column='{invalid}';
 ----
 Invalid value for h5db_cache_limit_per_column
 

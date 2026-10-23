@@ -5,26 +5,26 @@
 require h5db
 
 # unzip replaces the file without restarting the connection that owns the prepared statements.
-unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_statement_cache.h5
+unzip test/data/statement_cache_initial.h5.gz {TEST_DIR}/h5db_statement_cache.h5
 
-unzip test/data/statement_cache_initial.h5.gz __TEST_DIR__/h5db_statement_cache_glob_first.h5
+unzip test/data/statement_cache_initial.h5.gz {TEST_DIR}/h5db_statement_cache_glob_first.h5
 
 statement ok
 PREPARE read_file AS
     SELECT COUNT(*), SUM(x), typeof(x)
-    FROM h5_read('__TEST_DIR__/h5db_statement_cache.h5', '/x')
+    FROM h5_read('{TEST_DIR}/h5db_statement_cache.h5', '/x')
     GROUP BY ALL;
 
 statement ok
 PREPARE read_attributes AS
     SELECT a, typeof(a)
-    FROM h5_attributes('__TEST_DIR__/h5db_statement_cache.h5', '/');
+    FROM h5_attributes('{TEST_DIR}/h5db_statement_cache.h5', '/');
 
 statement ok
 PREPARE read_scalar_file AS
     SELECT TRY_CAST(value AS VARCHAR), variant_typeof(value)
     FROM (
-        SELECT h5_read('__TEST_DIR__/h5db_statement_cache.h5', '/s') AS value
+        SELECT h5_read('{TEST_DIR}/h5db_statement_cache.h5', '/s') AS value
     );
 
 statement ok
@@ -33,37 +33,37 @@ PREPARE read_scalar_attributes AS
         TRY_CAST(map_extract_value(attrs, 'a') AS VARCHAR),
         variant_typeof(map_extract_value(attrs, 'a'))
     FROM (
-        SELECT h5_attributes('__TEST_DIR__/h5db_statement_cache.h5', '/') AS attrs
+        SELECT h5_attributes('{TEST_DIR}/h5db_statement_cache.h5', '/') AS attrs
     );
 
 statement ok
 PREPARE tree_file AS
     SELECT dtype, shape::VARCHAR
-    FROM h5_tree('__TEST_DIR__/h5db_statement_cache.h5')
+    FROM h5_tree('{TEST_DIR}/h5db_statement_cache.h5')
     WHERE path = '/x';
 
 statement ok
 PREPARE list_file AS
     SELECT dtype, shape::VARCHAR
-    FROM h5_ls('__TEST_DIR__/h5db_statement_cache.h5', '/')
+    FROM h5_ls('{TEST_DIR}/h5db_statement_cache.h5', '/')
     WHERE path = '/x';
 
 statement ok
 PREPARE list_scalar AS
     SELECT struct_extract(entry, 'dtype'), struct_extract(entry, 'shape')::VARCHAR
     FROM (
-        SELECT map_extract_value(h5_ls('__TEST_DIR__/h5db_statement_cache.h5', '/'), 'x') AS entry
+        SELECT map_extract_value(h5_ls('{TEST_DIR}/h5db_statement_cache.h5', '/'), 'x') AS entry
     );
 
 statement ok
 PREPARE tree_glob AS
     SELECT COUNT(DISTINCT filename)
-    FROM h5_tree('__TEST_DIR__/h5db_statement_cache_glob_*.h5', filename = true);
+    FROM h5_tree('{TEST_DIR}/h5db_statement_cache_glob_*.h5', filename = true);
 
 statement ok
 PREPARE list_glob AS
     SELECT COUNT(DISTINCT filename)
-    FROM h5_ls('__TEST_DIR__/h5db_statement_cache_glob_*.h5', '/', filename = true);
+    FROM h5_ls('{TEST_DIR}/h5db_statement_cache_glob_*.h5', '/', filename = true);
 
 query IIT
 EXECUTE read_file;
@@ -110,9 +110,9 @@ EXECUTE list_glob;
 ----
 1
 
-unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_statement_cache.h5
+unzip test/data/statement_cache_replacement.h5.gz {TEST_DIR}/h5db_statement_cache.h5
 
-unzip test/data/statement_cache_replacement.h5.gz __TEST_DIR__/h5db_statement_cache_glob_second.h5
+unzip test/data/statement_cache_replacement.h5.gz {TEST_DIR}/h5db_statement_cache_glob_second.h5
 
 query IRT
 EXECUTE read_file;
