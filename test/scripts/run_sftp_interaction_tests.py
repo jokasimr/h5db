@@ -4,7 +4,6 @@ import base64
 import hashlib
 import logging
 import os
-import queue
 import re
 import signal
 import shutil
@@ -2338,99 +2337,8 @@ class SFTPInteractionTests(unittest.TestCase):
     def test_mtime_change_invalidates_external_cache(self) -> None:
         now = int(time.time())
         self.replace_mutable_fixture("simple.h5", now - 120)
-
-        process = subprocess.Popen(
-            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent"],
-            cwd=self.project_root,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-
-        def cleanup_process() -> None:
-            if process.poll() is None:
-                process.kill()
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None and not stream.closed:
-                    stream.close()
-
-        self.addCleanup(cleanup_process)
-        self.assertIsNotNone(process.stdin)
-        self.assertIsNotNone(process.stdout)
-        self.assertIsNotNone(process.stderr)
-
-        stdout_queue: queue.Queue[str | None] = queue.Queue()
-        stderr_queue: queue.Queue[str | None] = queue.Queue()
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-        def read_stream(stream, output_queue: queue.Queue[str | None]) -> None:
-            try:
-                for line in stream:
-                    output_queue.put(line)
-            finally:
-                output_queue.put(None)
-
-        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_queue), daemon=True)
-        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_queue), daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
-
-        def drain_queue(output_queue: queue.Queue[str | None], lines: list[str], timeout: float = 0.0) -> bool:
-            deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    if timeout <= 0:
-                        line = output_queue.get_nowait()
-                    else:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            return False
-                        line = output_queue.get(timeout=remaining)
-                except queue.Empty:
-                    return False
-                if line is None:
-                    return True
-                lines.append(line)
-
-        def read_stdout_line(timeout_seconds: float) -> str:
-            deadline = time.monotonic() + timeout_seconds
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.kill_process(process)
-                    drain_queue(stdout_queue, stdout_lines, 1.0)
-                    drain_queue(stderr_queue, stderr_lines, 1.0)
-                    self.fail(
-                        "Timed out waiting for DuckDB output.\n"
-                        f"stdout:\n{''.join(stdout_lines)}\n"
-                        f"stderr:\n{''.join(stderr_lines)}"
-                    )
-                try:
-                    line = stdout_queue.get(timeout=remaining)
-                except queue.Empty:
-                    continue
-                if line is None:
-                    drain_queue(stderr_queue, stderr_lines)
-                    self.fail(
-                        "DuckDB process exited before producing the expected query result.\n"
-                        f"stdout:\n{''.join(stdout_lines)}\n"
-                        f"stderr:\n{''.join(stderr_lines)}"
-                    )
-                stdout_lines.append(line)
-                return line
-
-        def read_next_numeric_line() -> str:
-            while True:
-                line = read_stdout_line(self.SUBPROCESS_TIMEOUT_SECONDS)
-                stripped = line.strip()
-                if stripped.isdigit():
-                    return stripped
-
+        url = f"sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5"
+        completion_marker = "h5db_initial_query_complete"
         setup_sql = textwrap.dedent(
             f"""
             LOAD h5db;
@@ -2444,51 +2352,69 @@ class SFTPInteractionTests(unittest.TestCase):
                 KNOWN_HOSTS_PATH '{self.mutable_known_hosts}',
                 PORT {self.mutable_server.port}
             );
-            SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
+            SELECT COUNT(*) FROM h5_tree('{url}');
+            SELECT (COALESCE(SUM(nr_bytes), 0) > 0)::INTEGER
+            FROM duckdb_external_file_cache() WHERE path = '{url}';
+            .print {completion_marker}
             """
-        ).strip()
-        process.stdin.write(setup_sql + "\n")
-        process.stdin.flush()
-
-        first_line = read_next_numeric_line()
-        self.assertEqual(first_line, "10")
-        _, first_read_calls = self.mutable_server.telemetry.snapshot()
-        self.assertGreater(first_read_calls, 0)
-        self.mutable_server.telemetry.reset()
-
-        self.replace_mutable_fixture("with_attrs.h5", now - 60)
-
-        process.stdin.write(
-            textwrap.dedent(
-                f"""
-                SELECT COUNT(*) FROM h5_tree('sftp://127.0.0.1:{self.mutable_server.port}/mutable.h5');
-                .quit
-                """
-            )
         )
-        process.stdin.flush()
-        process.stdin.close()
 
-        try:
-            process.wait(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as ex:
-            self.kill_process(process)
-            process.wait(timeout=1.0)
-            drain_queue(stdout_queue, stdout_lines, 1.0)
-            drain_queue(stderr_queue, stderr_lines, 1.0)
-            raise AssertionError(
-                "DuckDB subprocess timed out after mutable cache invalidation query.\n"
-                f"stdout:\n{''.join(stdout_lines)}\n"
-                f"stderr:\n{''.join(stderr_lines)}"
-            ) from ex
+        with subprocess.Popen(
+            [self.duckdb_bin, "-csv", "-noheader", "-unsigned", "-no-init", "-no-agent"],
+            cwd=self.project_root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ) as process:
+            initial_output: list[str] = []
 
-        drain_queue(stdout_queue, stdout_lines, 1.0)
-        drain_queue(stderr_queue, stderr_lines, 1.0)
-        stdout = "".join(stdout_lines)
-        stderr = "".join(stderr_lines)
-        self.assertEqual(process.returncode, 0, msg=stdout + stderr)
-        numeric_lines = [line.strip() for line in stdout.splitlines() if line.strip().isdigit()]
-        self.assertEqual(numeric_lines, ["10", "3"], msg=stdout)
+            def read_initial_output() -> None:
+                for line in process.stdout:
+                    initial_output.append(line)
+                    if line.strip() == completion_marker:
+                        break
+
+            reader = threading.Thread(target=read_initial_output, daemon=True)
+            reader.start()
+            try:
+                process.stdin.write(setup_sql)
+                process.stdin.flush()
+                # Unlike streamed result rows, .print runs after SQL execution and
+                # cleanup finish, so Windows can replace the now-closed file.
+                reader.join(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                self.assertFalse(
+                    reader.is_alive(),
+                    msg="Timed out waiting for initial query completion.\n" + "".join(initial_output),
+                )
+                output = "".join(initial_output)
+                self.assertIn(completion_marker, output.splitlines(), msg=output)
+                _, first_read_calls = self.mutable_server.telemetry.snapshot()
+                self.assertGreater(first_read_calls, 0)
+                self.mutable_server.telemetry.reset()
+
+                self.replace_mutable_fixture("with_attrs.h5", now - 60)
+                try:
+                    remaining_output, _ = process.communicate(
+                        f"SELECT COUNT(*) FROM h5_tree('{url}');\n.quit\n",
+                        timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    remaining_output, _ = process.communicate(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                    self.fail("DuckDB timed out after cache invalidation query.\n" + output + remaining_output)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+                reader.join(timeout=self.SUBPROCESS_TIMEOUT_SECONDS)
+
+        output += remaining_output
+        self.assertEqual(process.returncode, 0, msg=output)
+        numeric_lines = [line.strip() for line in output.splitlines() if line.strip().isdigit()]
+        self.assertEqual(numeric_lines, ["10", "1", "3"], msg=output)
         _, second_read_calls = self.mutable_server.telemetry.snapshot()
         self.assertGreater(second_read_calls, 0)
 
