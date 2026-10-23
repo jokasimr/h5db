@@ -15,5 +15,6 @@ test/data/statement_cache_*.h5.gz
 *.csv
 .cache
 .codex
+docs/benchmarks
 
 h5db_*profile.json

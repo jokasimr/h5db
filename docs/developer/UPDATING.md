@@ -17,6 +17,10 @@ When updating h5db to a newer DuckDB release:
 The project targets one released DuckDB version. Commit both submodule pointers with the corresponding source,
 workflow, and documentation changes.
 
+`vcpkg.json` pins HDF5 to 1.14.6 while HDF5 2.x chunk-cache performance is evaluated separately. Its
+`builtin-baseline` retains the previously tested dependency baseline; update dependency versions deliberately
+when changing CI tools.
+
 # API Changes
 
 h5db is built against DuckDB's internal C++ API, which is not guaranteed to be stable across DuckDB releases. After
