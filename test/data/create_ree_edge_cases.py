@@ -80,6 +80,21 @@ with h5py.File('ree_edge_cases.h5', 'w') as f:
         dtype=h5py.string_dtype(),
     )
 
+    grp = f.create_group('string_pushdown')
+    grp.create_dataset('index', data=np.arange(10, dtype=np.int32))
+    grp.create_dataset('rse_boundaries', data=np.array([0, 2, 4, 6, 8], dtype=np.uint64))
+    grp.create_dataset('ree_boundaries', data=np.array([1, 3, 5, 7, 9], dtype=np.uint64))
+    grp.create_dataset(
+        'labels',
+        data=np.array(['sample-λ', r'C:\data\run', r'\x41', r'C:\x64', 'control'], dtype=h5py.string_dtype()),
+    )
+
+    grp = f.create_group('long_string_pushdown')
+    grp.create_dataset('index', data=np.arange(4096, dtype=np.int32))
+    grp.create_dataset('rse_boundaries', data=np.array([0, 2048], dtype=np.uint64))
+    grp.create_dataset('ree_boundaries', data=np.array([2047, 4095], dtype=np.uint64))
+    grp.create_dataset('labels', data=np.array([r'sample-λ\x41' * 32, 'control'], dtype=h5py.string_dtype()))
+
     grp = f.create_group('mixed_pushdown')
     grp.create_dataset('index', data=np.arange(10, dtype=np.int32))
     grp.create_dataset('rse_starts', data=np.array([0, 4, 7], dtype=np.uint64))

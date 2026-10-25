@@ -1,0 +1,73 @@
+# name: test/sql/attribute_value_types.test
+# description: Attribute VARIANT values preserve numeric widths across readers
+# group: [sql]
+
+require h5db
+
+# Scalar attribute maps must preserve the same types as typed table columns.
+query TT rowsort
+SELECT attr.key, variant_typeof(attr.value)
+FROM UNNEST(map_entries(h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs'))) t(attr)
+WHERE attr.key IN (
+    'int8_attr', 'int16_attr', 'int32_attr', 'int64_attr',
+    'uint8_attr', 'uint16_attr', 'uint32_attr', 'uint64_attr',
+    'float32_attr', 'float64_attr', 'string_attr'
+);
+----
+float32_attr	FLOAT
+float64_attr	DOUBLE
+int16_attr	INT16
+int32_attr	INT32
+int64_attr	INT64
+int8_attr	INT8
+string_attr	VARCHAR
+uint16_attr	UINT16
+uint32_attr	UINT32
+uint64_attr	UINT64
+uint8_attr	UINT8
+
+query TTII
+SELECT variant_typeof(int8_attr::VARIANT), variant_typeof(int16_attr::VARIANT), int8_attr, int16_attr
+FROM h5_attributes('test/data/with_attrs.h5', '/dataset_with_attrs');
+----
+INT8	INT16	42	1234
+
+foreach listing h5_tree h5_ls
+
+# Named projected attributes and the complete attribute map both retain widths.
+query TTTTII
+SELECT variant_typeof(int8_attr), variant_typeof(int16_attr),
+       variant_typeof(map_extract_value(h5_attr, 'int8_attr')),
+       variant_typeof(map_extract_value(h5_attr, 'int16_attr')),
+       int8_attr::TINYINT, int16_attr::SMALLINT
+FROM {listing}('test/data/with_attrs.h5', h5_attr('int8_attr'), h5_attr('int16_attr'), h5_attr())
+WHERE path = '/dataset_with_attrs';
+----
+INT8	INT16	INT8	INT16	42	1234
+
+# Type-based filtering must not silently discard the matching dataset.
+query I
+SELECT count(*)
+FROM {listing}('test/data/with_attrs.h5', h5_attr('int8_attr'), h5_attr('int16_attr'))
+WHERE path = '/dataset_with_attrs'
+  AND variant_typeof(int8_attr) = 'INT8'
+  AND variant_typeof(int16_attr) = 'INT16';
+----
+1
+
+endloop
+
+query TTTTII
+WITH children AS (
+    SELECT h5_ls('test/data/with_attrs.h5', '/',
+                 h5_attr('int8_attr'), h5_attr('int16_attr'), h5_attr()) AS entries
+), dataset AS (
+    SELECT map_extract_value(entries, 'dataset_with_attrs') AS item FROM children
+)
+SELECT variant_typeof(item.int8_attr), variant_typeof(item.int16_attr),
+       variant_typeof(map_extract_value(item.h5_attr, 'int8_attr')),
+       variant_typeof(map_extract_value(item.h5_attr, 'int16_attr')),
+       item.int8_attr::TINYINT, item.int16_attr::SMALLINT
+FROM dataset;
+----
+INT8	INT16	INT8	INT16	42	1234

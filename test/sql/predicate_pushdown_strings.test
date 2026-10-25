@@ -1,0 +1,97 @@
+# name: test/sql/predicate_pushdown_strings.test
+# description: RSE and REE string pushdown preserves UTF-8 and literal backslashes
+# group: [sql]
+
+require h5db
+
+foreach encoding rse ree
+
+# These predicates use a run column absent from the output projection.
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = 'sample-λ';
+----
+2	0	1
+
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = 'C:\data\run';
+----
+2	2	3
+
+# These labels are valid BLOB escape syntax, but must remain literal text.
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = '\x41';
+----
+2	4	5
+
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = 'C:\x64';
+----
+2	6	7
+
+# Other runs containing UTF-8 or backslashes must not break ASCII predicates.
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = 'control';
+----
+2	8	9
+
+query III
+SELECT count(*), min(index), sum(index)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels >= '\x41';
+----
+6	0	27
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/ree_edge_cases.h5', '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels BETWEEN 'sample-λ' AND 'sample-ω';
+----
+2
+
+# Intersect string predicates with virtual index pushdown.
+query III
+SELECT count(*), min(index), max(index)
+FROM h5_read('test/data/ree_edge_cases.h5', h5_alias('idx', h5_index()), '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels >= '\x41' AND idx BETWEEN 1 AND 4;
+----
+2	1	4
+
+# Duplicate file inputs preserve multiplicity after string and index filtering.
+query III
+SELECT count(*), min(index), sum(index)
+FROM h5_read(['test/data/ree_edge_cases.h5', 'test/data/ree_edge_cases.h5'],
+    h5_alias('idx', h5_index()), '/string_pushdown/index',
+    h5_{encoding}('/string_pushdown/{encoding}_boundaries', '/string_pushdown/labels'))
+WHERE labels = 'C:\x64' AND idx >= 6;
+----
+4	6	26
+
+# Long strings require an owned heap buffer. Constructing the filter value must
+# preserve both its contents and the run value used by the projected column.
+query III
+SELECT count(*), sum(index), (min(labels) = repeat('sample-λ\x41', 32))::INTEGER
+FROM h5_read('test/data/ree_edge_cases.h5', '/long_string_pushdown/index',
+    h5_{encoding}('/long_string_pushdown/{encoding}_boundaries', '/long_string_pushdown/labels'))
+WHERE labels = repeat('sample-λ\x41', 32);
+----
+2048	2096128	1
+
+endloop

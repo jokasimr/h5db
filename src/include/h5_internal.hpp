@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <optional>
+#include <utility>
 
 namespace duckdb {
 
@@ -147,10 +148,14 @@ auto DispatchOnNumericType(LogicalType logical_type, Func &&func) {
 	}
 }
 
-// DuckDB's generic Value constructors do not preserve unsigned integer width for all C++ unsigned types.
+// Preserve integer widths instead of relying on implicit C++ conversions to Value constructors.
 template <typename T>
 Value H5CreateDuckDBValue(T value) {
-	if constexpr (std::is_same_v<T, uint8_t>) {
+	if constexpr (std::is_same_v<T, int8_t>) {
+		return Value::TINYINT(value);
+	} else if constexpr (std::is_same_v<T, int16_t>) {
+		return Value::SMALLINT(value);
+	} else if constexpr (std::is_same_v<T, uint8_t>) {
 		return Value::UTINYINT(value);
 	} else if constexpr (std::is_same_v<T, uint16_t>) {
 		return Value::USMALLINT(value);
@@ -159,7 +164,8 @@ Value H5CreateDuckDBValue(T value) {
 	} else if constexpr (std::is_same_v<T, uint64_t>) {
 		return Value::UBIGINT(value);
 	} else {
-		return Value(value);
+		// Transfer owned string payloads to VARCHAR values without copying them again.
+		return Value(std::move(value));
 	}
 }
 

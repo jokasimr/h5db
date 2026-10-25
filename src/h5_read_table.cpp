@@ -879,7 +879,7 @@ static vector<RowRange> BuildRangesForRunEncodedColumn(const RunEncodedColumnSpe
 
 		for (size_t i = 0; i < typed_values.size(); i++) {
 			const T &value = typed_values[i];
-			Value run_value = Value::CreateValue(value);
+			Value run_value = H5CreateDuckDBValue(value);
 			idx_t run_start = encoded_state.run_starts[i];
 
 			// Check if this run's value satisfies ALL filters
