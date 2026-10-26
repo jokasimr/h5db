@@ -1,0 +1,106 @@
+# name: test/sql/predicate_pushdown_cast_context.test
+# description: Run-encoded predicate pushdown preserves bound cast context
+# group: [sql]
+
+require h5db
+
+require icu
+
+foreach timezone,offset UTC,+00 Europe/Stockholm,+01
+
+statement ok
+SET TimeZone = '{timezone}';
+
+foreach encoding rse ree
+
+# Both optimizer settings must produce the same rows. Keep the filter directly
+# on h5_read: a view/subquery can prevent a throwing cast from reaching the scan.
+foreach disabled '' 'filter_pushdown'
+
+statement ok
+SET disabled_optimizers = {disabled};
+
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE stamp::TIMESTAMPTZ = TIMESTAMPTZ '2026-01-01 12:00:00{offset}';
+----
+3	0	2
+
+# The constant on the left exercises comparison reversal.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE TIMESTAMPTZ '2026-01-01 12:30:00{offset}' > stamp::TIMESTAMPTZ;
+----
+3	0	2
+
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE stamp::TIMESTAMPTZ BETWEEN TIMESTAMPTZ '2026-01-01 11:30:00{offset}'
+                            AND TIMESTAMPTZ '2026-01-01 12:30:00{offset}';
+----
+3	0	2
+
+# Later files need independent mutable cast execution state, using the same
+# bound timezone. Also intersect a cast predicate with an index predicate.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read(['test/data/predicate_pushdown_cast_context.h5',
+              'test/data/predicate_pushdown_cast_context.h5'],
+    h5_index(), '/row_id', h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE stamp::TIMESTAMPTZ = TIMESTAMPTZ '2026-01-01 12:00:00{offset}'
+  AND index >= 1;
+----
+4	1	2
+
+# A failed bound cast must leave the run eligible so the normal SQL filter
+# reports the conversion error instead of silently discarding it.
+statement error
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/bad_stamp'))
+WHERE bad_stamp::TIMESTAMPTZ = TIMESTAMPTZ '2026-01-01 12:00:00{offset}';
+----
+<REGEX>:.*invalid timestamp field format.*not-a-timestamp.*
+
+endloop
+
+# Correctness must not be achieved merely by declining to push down the cast.
+statement ok
+RESET disabled_optimizers;
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_pushdown_cast_context_profile.json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE stamp::TIMESTAMPTZ = TIMESTAMPTZ '2026-01-01 12:00:00{offset}';
+----
+3
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*)
+FROM read_text('h5db_pushdown_cast_context_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 3,');
+----
+1
+
+endloop
+
+endloop
+
+statement ok
+RESET TimeZone;
