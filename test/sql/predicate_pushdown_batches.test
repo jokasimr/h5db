@@ -1,0 +1,169 @@
+# name: test/sql/predicate_pushdown_batches.test
+# description: Batched run filtering preserves ranges, casts, and failures across vector boundaries
+# group: [sql]
+
+require h5db
+
+foreach encoding rse ree
+
+foreach disabled '' 'filter_pushdown'
+
+statement ok
+SET disabled_optimizers = {disabled};
+
+# 4113 runs span two full vectors and a final partial vector. Each run has
+# three rows. A matching range must remain open across both vector boundaries.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number BETWEEN 2000 AND 4100;
+----
+6303	6000	12302
+
+# Exercise all comparison directions with the constant on the left.
+foreach comparison,count >,6144 >=,6147 <,6192 <=,6195 =,3
+
+query I
+SELECT (count(*) = {count})::INTEGER
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE 2048 {comparison} number;
+----
+1
+
+endloop
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number >= 0;
+----
+12339
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number < 0;
+----
+0
+
+# Unsorted small unsigned values produce many separate ranges.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/cycle'))
+WHERE cycle = 2;
+----
+2469
+
+# Long strings exercise the reusable string heap, both directly and through casts.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE text BETWEEN lpad('2000', 30, '0') AND lpad('4100', 30, '0');
+----
+6303	6000	12302
+
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE text::BIGINT BETWEEN 2000 AND 4100;
+----
+6303	6000	12302
+
+# Nested cast results contain NULL children. Reusing their buffers must retain
+# DuckDB's nested comparison semantics and clear prior batches' child data.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/lists'))
+WHERE lists::BIGINT[] >= [4095, NULL]::BIGINT[];
+----
+54	12285	12338
+
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/lists'))
+WHERE lists::BIGINT[] = [2048, NULL]::BIGINT[];
+----
+3	6144	6146
+
+# Failed casts must remain eligible for the normal SQL filter, including a
+# failure inside a nested value whose parent is not necessarily NULL.
+statement error
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/bad_text'))
+WHERE bad_text::BIGINT >= 2000;
+----
+Could not convert string 'not-a-number'
+
+statement error
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/bad_lists'))
+WHERE bad_lists::BIGINT[] >= [2000, NULL]::BIGINT[];
+----
+Could not convert string 'bad'
+
+# An index predicate excludes the malformed runs. The last batch follows two
+# failed batch casts and must still produce the correct matches.
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', h5_index(), '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/bad_text'),
+    h5_{encoding}('/{encoding}_boundaries', '/bad_lists'))
+WHERE index >= 6147
+  AND bad_text::BIGINT >= 4095
+  AND bad_lists::BIGINT[] <= [4112, NULL]::BIGINT[];
+----
+54	12285	12338
+
+# A false predicate still eliminates runs with failed casts.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_batches.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/bad_text'))
+WHERE bad_text = 'missing' AND bad_text::BIGINT > 0;
+----
+0
+
+endloop
+
+statement ok
+RESET disabled_optimizers;
+
+# Verify actual pruning after intersecting predicates on different columns and
+# opening/closing ranges around a vector boundary, including a later file.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_pushdown_batches_profile.json';
+
+query III
+SELECT count(*), min(row_id), max(row_id)
+FROM h5_read(['test/data/predicate_pushdown_batches.h5', 'test/data/predicate_pushdown_batches.h5'],
+    '/row_id', h5_{encoding}('/{encoding}_boundaries', '/text'),
+    h5_{encoding}('/{encoding}_boundaries', '/cycle'))
+WHERE text::BIGINT BETWEEN 2046 AND 2051 AND cycle >= 2;
+----
+18	6141	6149
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*)
+FROM read_text('h5db_pushdown_batches_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 18,');
+----
+1
+
+endloop

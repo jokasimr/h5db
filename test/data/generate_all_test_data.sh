@@ -94,6 +94,10 @@ echo -e "${GREEN}Generating predicate_pushdown_cast_context.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_predicate_pushdown_cast_context.py)
 
 echo ""
+echo -e "${GREEN}Generating predicate_pushdown_batches.h5${NC}"
+(cd test/data && "$PYTHON_BIN" create_predicate_pushdown_batches.py)
+
+echo ""
 echo -e "${GREEN}[6/28] Generating rse_edge_cases.h5${NC}"
 (cd test/data && "$PYTHON_BIN" create_rse_edge_cases.py)
 

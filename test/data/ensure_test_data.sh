@@ -17,6 +17,7 @@ required_files=(
   "$PROJECT_ROOT/test/data/multithreading_test.h5"
   "$PROJECT_ROOT/test/data/pushdown_test.h5"
   "$PROJECT_ROOT/test/data/predicate_pushdown_cast_context.h5"
+  "$PROJECT_ROOT/test/data/predicate_pushdown_batches.h5"
   "$PROJECT_ROOT/test/data/rse_edge_cases.h5"
   "$PROJECT_ROOT/test/data/rse_invalid.h5"
   "$PROJECT_ROOT/test/data/ree_edge_cases.h5"

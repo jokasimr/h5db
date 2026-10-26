@@ -3,6 +3,8 @@
 #include "h5_read_shared.hpp"
 #include "h5_raii.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
+#include "duckdb/common/types/vector_cache.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/cast/default_casts.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -34,6 +36,7 @@
 #include <variant>
 #include <optional>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
@@ -881,6 +884,48 @@ static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const 
 	return result ? H5ReadFilterEvalResult::TRUE : H5ReadFilterEvalResult::FALSE;
 }
 
+static void EvaluateRunComparison(Vector &source, const ClaimedFilterState &state, Vector &cast_result,
+                                  Vector &result) {
+	const auto &filter = state.filter;
+	if (filter.bound_cast) {
+		string error_message;
+		CastParameters parameters(filter.bound_cast->GetCastData(), false, &error_message, state.cast_state.get());
+		if (!filter.bound_cast->Cast(source, cast_result, source.size(), parameters)) {
+			// A failed batch cast does not identify every failing row (in particular
+			// for nested targets). Fall back to scalar evaluation for this batch,
+			// keeping UNKNOWN runs for DuckDB's post-scan filter to evaluate.
+			FlatVector::SetSize(result, source.size());
+			auto matches = FlatVector::GetDataMutable<bool>(result);
+			for (idx_t i = 0; i < source.size(); i++) {
+				matches[i] = EvaluateValueComparison(source.GetValue(i), state, filter.comparison) !=
+				             H5ReadFilterEvalResult::FALSE;
+			}
+			return;
+		}
+	}
+	auto &lhs = filter.bound_cast ? cast_result : source;
+	Vector rhs(filter.constant, count_t(source.size()));
+	switch (filter.comparison) {
+	case ExpressionType::COMPARE_EQUAL:
+		VectorOperations::Equals(lhs, rhs, result);
+		break;
+	case ExpressionType::COMPARE_GREATERTHAN:
+		VectorOperations::GreaterThan(lhs, rhs, result);
+		break;
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		VectorOperations::GreaterThanEquals(lhs, rhs, result);
+		break;
+	case ExpressionType::COMPARE_LESSTHAN:
+		VectorOperations::LessThan(lhs, rhs, result);
+		break;
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		VectorOperations::LessThanEquals(lhs, rhs, result);
+		break;
+	default:
+		throw InternalException("Unsupported h5_read run comparison");
+	}
+}
+
 static vector<RowRange> BuildRangesForRunEncodedColumn(const RunEncodedColumnSpec &encoded_spec,
                                                        const RunEncodedColumnState &encoded_state,
                                                        const vector<ClaimedFilterState> &col_filters) {
@@ -888,42 +933,71 @@ static vector<RowRange> BuildRangesForRunEncodedColumn(const RunEncodedColumnSpe
 		using T = typename decltype(type_tag)::type;
 		auto &typed_values = std::get<std::vector<T>>(encoded_state.values);
 		D_ASSERT(encoded_state.run_starts.size() == typed_values.size());
+		if (typed_values.empty()) {
+			return {};
+		}
+
+		// Reuse input and cast buffers across batches. Uncast filters need no
+		// cast buffer, but retain a slot so the indices match col_filters.
+		vector<LogicalType> types {encoded_spec.column_type};
+		vector<bool> initialize {true};
+		for (const auto &state : col_filters) {
+			types.push_back(state.filter.comparison_type);
+			initialize.push_back(bool(state.filter.bound_cast));
+		}
+		auto capacity = MinValue<idx_t>(STANDARD_VECTOR_SIZE, typed_values.size());
+		auto &allocator = Allocator::DefaultAllocator();
+		DataChunk batch;
+		batch.Initialize(allocator, types, initialize, capacity);
+		VectorCache comparison_cache(allocator, LogicalType::BOOLEAN, capacity);
 
 		// Loop through runs, building ranges where ALL filters are satisfied
 		vector<RowRange> col_result;
-		idx_t current_start = 0;
+		idx_t current_start = encoded_state.run_starts[0];
 		bool in_range = false;
 
-		// Leading NULL segment (if any) never satisfies comparison filters.
-		if (!encoded_state.run_starts.empty()) {
-			current_start = encoded_state.run_starts[0];
-		}
+		for (idx_t offset = 0; offset < typed_values.size(); offset += capacity) {
+			auto count = MinValue<idx_t>(capacity, typed_values.size() - offset);
+			batch.Reset();
+			batch.SetChildCardinality(count);
+			auto &source = batch.data[0];
+			if constexpr (std::is_same_v<T, string>) {
+				auto data = FlatVector::GetDataMutable<string_t>(source);
+				for (idx_t i = 0; i < count; i++) {
+					data[i] = StringVector::AddString(source, typed_values[offset + i]);
+				}
+			} else {
+				std::copy_n(typed_values.data() + offset, count, FlatVector::GetDataMutable<T>(source));
+			}
 
-		for (size_t i = 0; i < typed_values.size(); i++) {
-			const T &value = typed_values[i];
-			Value run_value = H5CreateDuckDBValue(value);
-			idx_t run_start = encoded_state.run_starts[i];
-
-			// Check if this run's value satisfies ALL filters
-			bool satisfies_all = true;
-			for (const auto &state : col_filters) {
-				auto result = EvaluateValueComparison(run_value, state, state.filter.comparison);
-				if (result == H5ReadFilterEvalResult::FALSE) {
-					satisfies_all = false;
+			std::array<bool, STANDARD_VECTOR_SIZE> matches;
+			matches.fill(true);
+			for (idx_t filter_idx = 0; filter_idx < col_filters.size(); filter_idx++) {
+				Vector comparison_result(comparison_cache);
+				EvaluateRunComparison(source, col_filters[filter_idx], batch.data[filter_idx + 1], comparison_result);
+				bool any_matches = false;
+				for (auto match : comparison_result.Values<bool>()) {
+					matches[match.GetIndex()] &= match.IsValid() && match.GetValue();
+					any_matches |= matches[match.GetIndex()];
+				}
+				if (!any_matches) {
 					break;
 				}
 			}
 
-			if (satisfies_all && !in_range) {
-				// Start new range
-				current_start = run_start;
-				in_range = true;
-			} else if (!satisfies_all && in_range) {
-				// End current range
-				if (current_start < run_start) {
-					col_result.push_back({current_start, run_start});
+			// Carry an open range across batch boundaries. Leading NULLs and rows
+			// after non_null_end never satisfy these comparison filters.
+			for (idx_t i = 0; i < count; i++) {
+				auto run_start = encoded_state.run_starts[offset + i];
+				if (matches[i] && !in_range) {
+					current_start = run_start;
+					in_range = true;
+				} else if (!matches[i] && in_range) {
+					if (current_start < run_start) {
+						col_result.push_back({current_start, run_start});
+					}
+					in_range = false;
 				}
-				in_range = false;
 			}
 		}
 
@@ -1760,22 +1834,6 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 	return result;
 }
 
-// Helper: Flip comparison for when constant is on left side (e.g., 10 < col becomes col > 10)
-static ExpressionType FlipComparison(ExpressionType type) {
-	switch (type) {
-	case ExpressionType::COMPARE_LESSTHAN:
-		return ExpressionType::COMPARE_GREATERTHAN;
-	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return ExpressionType::COMPARE_GREATERTHANOREQUALTO;
-	case ExpressionType::COMPARE_GREATERTHAN:
-		return ExpressionType::COMPARE_LESSTHAN;
-	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return ExpressionType::COMPARE_LESSTHANOREQUALTO;
-	default:
-		return type; // EQUAL stays EQUAL
-	}
-}
-
 static idx_t H5ReadDecimalDigitCount(idx_t value) {
 	idx_t digits = 1;
 	while (value >= 10) {
@@ -1963,7 +2021,8 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 		}
 
 		idx_t bind_data_col_idx;
-		ExpressionType comparison = need_flip ? FlipComparison(comp.GetExpressionType()) : comp.GetExpressionType();
+		ExpressionType comparison =
+		    need_flip ? FlipComparisonExpression(comp.GetExpressionType()) : comp.GetExpressionType();
 		if (!found_colref || !constant || !H5ReadCanClaimComparison(comparison) ||
 		    !TryResolvePushdownColumn(ref, table_index, get_to_bind_map, pushdown_columns, bind_data_col_idx) ||
 		    !H5ReadCanClaimPushdownFilter(columns[bind_data_col_idx], ref, constant->GetValue())) {
