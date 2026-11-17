@@ -1,0 +1,234 @@
+# name: test/sql/h5_read_statistics.test
+# description: Metadata-backed nullability and single-file index statistics
+# group: [sql]
+
+require h5db
+
+# Bounds use the shortest requested regular dataset, including one that is
+# projected away. Index statistics also survive aliases and projection order.
+query IIIII
+SELECT s.min, s.max, s.approx_unique, s.has_null, s.has_no_null
+FROM (
+    SELECT stats(idx) AS s
+    FROM h5_read('test/data/empty_scalar.h5', '/long',
+                 h5_alias('idx', h5_index()), '/short') LIMIT 1
+);
+----
+0	1	2	false	true
+
+# Nullability comes from dataset semantics, without inventing value bounds.
+query IIIIIIII
+SELECT r.has_null, r.min, r.max, v.has_null, n.has_null, n.has_no_null,
+       f.has_null, a.has_null
+FROM (
+    SELECT stats(long) AS r, stats(scalar_int) AS v, stats(null_int) AS n,
+           stats(filename) AS f, stats(array_2d_int) AS a
+    FROM h5_read('test/data/empty_scalar.h5', '/long', '/scalar_int',
+                 '/null_int', '/array_2d_int') LIMIT 1
+);
+----
+false	NULL	NULL	false	true	false	false	false
+
+# Empty strings are valid values; null string dataspaces are SQL NULLs.
+query IIII
+SELECT COUNT(null_strings), COUNT(null_str), COUNT(array_2d_int), COUNT(scalar_str)
+FROM h5_read('test/data/empty_scalar.h5', '/null_strings', '/null_str',
+             '/array_2d_int', '/scalar_str');
+----
+2	0	2	2
+
+# String-value validation remains at scan time; null dataspaces need no read.
+query IIII
+SELECT r.has_null, v.has_null, n.has_null, n.has_no_null FROM (
+    SELECT stats(null_strings) AS r, stats(scalar_str) AS v, stats(null_str) AS n
+    FROM h5_read('test/data/empty_scalar.h5', '/null_strings', '/scalar_str', '/null_str') LIMIT 1
+);
+----
+true	true	true	false
+
+statement error
+SELECT COUNT(invalid_utf8_var)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/invalid_utf8_var');
+----
+Invalid unicode
+
+statement error
+SELECT COUNT(*)
+FROM h5_read('test/data/h5_read_string_edge_cases.h5', '/scalar_invalid_utf8_var')
+WHERE scalar_invalid_utf8_var IS NULL;
+----
+Invalid unicode
+
+# A non-null column can be counted without reading its values.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT COUNT(long) FROM h5_read('test/data/empty_scalar.h5', '/long');
+----
+physical_plan	<REGEX>:.*count_star.*
+
+# Known nullability can eliminate an impossible predicate.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read('test/data/empty_scalar.h5', '/null_int', '/long')
+WHERE null_int IS NOT NULL;
+----
+physical_plan	<REGEX>:.*EMPTY_RESULT.*
+
+# A predicate outside the index range is impossible, even when the index and
+# the shortest dataset are not selected in the output.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT long FROM h5_read('test/data/empty_scalar.h5', '/long', '/short', h5_index())
+WHERE index >= 2;
+----
+physical_plan	<REGEX>:.*EMPTY_RESULT.*
+
+# Scalar-only reads produce one index value.
+query III
+SELECT s.min, s.max, s.approx_unique
+FROM (SELECT stats(index) AS s FROM h5_read('test/data/empty_scalar.h5', '/scalar_int', h5_index()));
+----
+0	0	1
+
+# Empty scans have no index extrema and must not underflow N - 1.
+query III
+SELECT COUNT(index), MIN(index), MAX(index)
+FROM h5_read('test/data/empty_scalar.h5', '/empty_1d', h5_index());
+----
+0	NULL	NULL
+
+# Index filters reduce the scanned rows. Their unfiltered distinct count must
+# not be advertised for the subset.
+query I
+SELECT s.approx_unique IS NULL
+FROM (
+    SELECT stats(index) AS s FROM h5_read('test/data/empty_scalar.h5', '/long', h5_index())
+    WHERE index >= 3 LIMIT 1
+);
+----
+true
+
+query IIII
+SELECT COUNT(*), COUNT(DISTINCT index), MIN(index), MAX(index)
+FROM h5_read('test/data/empty_scalar.h5', '/long', h5_index()) WHERE index >= 3;
+----
+2	2	3	4
+
+# Run-encoded filters also reduce index distinctness; run columns remain
+# nullable because their coverage is not inspected at bind time.
+query III
+SELECT s.approx_unique IS NULL, r.has_null, r.has_no_null
+FROM (
+    SELECT stats(idx) AS s, stats(values) AS r
+    FROM h5_read('test/data/ree_edge_cases.h5', '/trailing_nulls/index',
+                 h5_alias('idx', h5_index()),
+                 h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values'))
+    WHERE idx >= 0 LIMIT 1
+);
+----
+true	true	true
+
+query I
+SELECT s.approx_unique IS NULL
+FROM (
+    SELECT stats(idx) AS s
+    FROM h5_read('test/data/ree_edge_cases.h5', '/trailing_nulls/index',
+                 h5_alias('idx', h5_index()),
+                 h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values'))
+    WHERE values = 20 LIMIT 1
+);
+----
+true
+
+query III
+SELECT COUNT(*), COUNT(values), COUNT(*) FILTER (WHERE values IS NULL)
+FROM h5_read('test/data/ree_edge_cases.h5', '/trailing_nulls/index',
+             h5_ree('/trailing_nulls/run_ends', '/trailing_nulls/values'));
+----
+6	5	1
+
+# Duplicate paths still represent multiple scans; indices are not globally unique.
+query IIII
+SELECT s.min, s.max, s.approx_unique, s.has_null
+FROM (
+    SELECT stats(index) AS s FROM h5_read([
+        'test/data/empty_scalar.h5', 'test/data/empty_scalar.h5'
+    ], '/long', h5_index()) LIMIT 1
+);
+----
+NULL	NULL	NULL	false
+
+# Later files can be larger than the schema file.
+query III
+SELECT COUNT(*), MIN(index), MAX(index) FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_c.h5'
+], '/values', h5_index()) WHERE index >= 2;
+----
+1	2	2
+
+# Pruning back to the inspected file allows its metadata to be used.
+query III
+SELECT s.min, s.max, s.approx_unique FROM (
+    SELECT stats(index) AS s FROM h5_read([
+        'test/data/h5_read_multifile_empty_a.h5',
+        'test/data/does_not_exist_statistics.h5'
+    ], '/values', h5_index(), filename='source')
+    WHERE source LIKE '%empty_a.h5' LIMIT 1
+);
+----
+0	1	2
+
+# Pruning to an uninspected file must not reuse the original file's bounds.
+query III
+SELECT s.min, s.max, s.approx_unique FROM (
+    SELECT stats(index) AS s FROM h5_read([
+        'test/data/h5_read_multifile_empty_a.h5',
+        'test/data/h5_read_multifile_empty_c.h5'
+    ], '/values', h5_index()) WHERE filename LIKE '%empty_c.h5' LIMIT 1
+);
+----
+NULL	NULL	NULL
+
+# Scalar dataspaces can change between files while retaining the same type.
+# Check both orders: neither the non-null nor the all-null first file is global.
+query III
+SELECT COUNT(*), COUNT(nullable_scalar), COUNT(*) FILTER (WHERE nullable_scalar IS NULL)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_b.h5'
+], '/nullable_scalar');
+----
+2	1	1
+
+query III
+SELECT COUNT(*), COUNT(nullable_scalar), COUNT(*) FILTER (WHERE nullable_scalar IS NULL)
+FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_a.h5'
+], '/nullable_scalar');
+----
+2	1	1
+
+query II
+SELECT COUNT(*), COUNT(nullable_scalar) FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/h5_read_multifile_empty_b.h5'
+], '/nullable_scalar') WHERE filename LIKE '%empty_b.h5';
+----
+1	0
+
+query II
+SELECT COUNT(*), COUNT(nullable_scalar) FROM h5_read([
+    'test/data/h5_read_multifile_empty_b.h5',
+    'test/data/h5_read_multifile_empty_a.h5'
+], '/nullable_scalar') WHERE filename LIKE '%empty_a.h5';
+----
+1	1
+
+# Statistics must not cause extra files to be opened during planning.
+statement ok
+EXPLAIN SELECT COUNT(values), MIN(index) FROM h5_read([
+    'test/data/h5_read_multifile_empty_a.h5',
+    'test/data/does_not_exist_statistics.h5'
+], '/values', h5_index());

@@ -1,0 +1,93 @@
+# name: test/sql/glob/h5_read_cardinality.test
+# description: Known cardinality bounds remove redundant limits without treating estimates as bounds
+# group: [glob]
+
+require h5db
+
+# The shortest regular dataset bounds a single-file scan.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read('test/data/empty_scalar.h5', '/short', '/long') LIMIT 3;
+----
+physical_plan	<!REGEX>:.*LIMIT.*
+
+# A smaller limit must still apply.
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read('test/data/empty_scalar.h5', '/short', '/long') LIMIT 1
+);
+----
+1
+
+# Scalar-only files produce at most one row each, including virtual columns.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read('test/data/glob/glob_same_*.h5', '/scale', h5_index(), filename=true) LIMIT 3;
+----
+physical_plan	<!REGEX>:.*LIMIT.*
+
+# Pruning to the original schema file restores its known bound.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_cardinality.h5'
+], '/values')
+WHERE filename LIKE '%glob_same_1.h5' LIMIT 4;
+----
+physical_plan	<!REGEX>:.*LIMIT.*
+
+# Pruning every file gives a known bound of zero.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/glob/glob_same_1.h5',
+    'test/data/does_not_exist_cardinality.h5'
+], '/values')
+WHERE filename LIKE '%no_match.h5' LIMIT 1;
+----
+physical_plan	<!REGEX>:.*LIMIT.*
+
+# The multi-file estimate is 2000, but the actual count is 3003.
+# A limit exceeding the estimate must remain and constrain the result.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values') LIMIT 2001;
+----
+physical_plan	<REGEX>:.*LIMIT.*
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read([
+        'test/data/glob_many_small/part_0001.h5',
+        'test/data/glob_many_small/combined.h5'
+    ], '/values') LIMIT 2001
+);
+----
+2001
+
+# A single remaining file is still unknown if it is not the schema file.
+# Its estimate is 1000, while it actually contains 3000 rows.
+query TT
+EXPLAIN (FORMAT JSON)
+SELECT * FROM h5_read([
+    'test/data/glob_many_small/part_0001.h5',
+    'test/data/glob_many_small/combined.h5'
+], '/values')
+WHERE filename LIKE '%combined.h5' LIMIT 1001;
+----
+physical_plan	<REGEX>:.*LIMIT.*
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM h5_read([
+        'test/data/glob_many_small/part_0001.h5',
+        'test/data/glob_many_small/combined.h5'
+    ], '/values')
+    WHERE filename LIKE '%combined.h5' LIMIT 1001
+);
+----
+1001

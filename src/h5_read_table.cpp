@@ -15,6 +15,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -320,7 +321,7 @@ struct H5ReadBindData : public TableFunctionData {
 	vector<string> filenames;
 	shared_ptr<const H5ReadFileMetadata> schema_file; // Original first file, even if pruned from the scan
 	bool swmr = false;
-	idx_t estimated_cardinality = 0;
+	NodeStatistics cardinality_stats;
 	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
 	std::optional<idx_t> visible_filename_idx;
 
@@ -1412,14 +1413,14 @@ static idx_t EstimateScanBatchSize(const vector<ColumnSpec> &columns, const vect
 	return MinValue<idx_t>(target_batch_size_bytes / estimated_output_bytes_per_row, STANDARD_VECTOR_SIZE);
 }
 
-static idx_t EstimateH5ReadCardinality(const H5ReadBindData &bind_data) {
+static NodeStatistics GetH5ReadCardinalityStatistics(const H5ReadBindData &bind_data) {
 	const auto file_count = bind_data.filenames.size();
 	if (file_count == 0) {
-		return 0;
+		return NodeStatistics(0, 0);
 	}
 	const auto schema_file_rows = static_cast<idx_t>(bind_data.schema_file->num_rows);
 	if (file_count == 1 && bind_data.filenames[0] == bind_data.schema_file->filename) {
-		return schema_file_rows;
+		return NodeStatistics(schema_file_rows, schema_file_rows);
 	}
 
 	bool has_regular_columns = false;
@@ -1431,16 +1432,17 @@ static idx_t EstimateH5ReadCardinality(const H5ReadBindData &bind_data) {
 	}
 	if (!has_regular_columns) {
 		// Compatible scalar-only files each produce exactly one row.
-		return file_count;
+		return NodeStatistics(file_count, file_count);
 	}
 	// Follow DuckDB's Parquet fallback: extrapolate the first file, with a floor
 	// to avoid severely underestimating when the first file is nearly empty.
 	static constexpr idx_t MIN_ROWS_PER_FILE = 1000;
 	const auto rows_per_file = MaxValue<idx_t>(schema_file_rows, MIN_ROWS_PER_FILE);
 	if (rows_per_file > std::numeric_limits<idx_t>::max() / file_count) {
-		return std::numeric_limits<idx_t>::max();
+		return NodeStatistics(std::numeric_limits<idx_t>::max());
 	}
-	return rows_per_file * file_count;
+	// Extrapolated counts are estimates, not guaranteed upper bounds.
+	return NodeStatistics(rows_per_file * file_count);
 }
 
 // Bind expands patterns and inspects only the first file to establish the schema.
@@ -1475,7 +1477,7 @@ static unique_ptr<FunctionData> H5ReadBind(ClientContext &context, TableFunction
 		return_types.push_back(LogicalType::VARCHAR);
 		result->visible_filename_idx = names.size() - 1;
 	}
-	result->estimated_cardinality = EstimateH5ReadCardinality(*result);
+	result->cardinality_stats = GetH5ReadCardinalityStatistics(*result);
 
 	return_names = StringsToIdentifiers(names);
 	return result;
@@ -2094,7 +2096,7 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
                                         vector<unique_ptr<Expression>> &filters) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
 	H5ApplyFilenameFilterPushdown(context, get, bind_data.visible_filename_idx, bind_data.filenames, filters);
-	bind_data.estimated_cardinality = EstimateH5ReadCardinality(bind_data);
+	bind_data.cardinality_stats = GetH5ReadCardinalityStatistics(bind_data);
 	const auto &columns = GetCanonicalColumns(bind_data);
 
 	// Build set of pushdown-eligible column indices (run-encoded or index)
@@ -2882,7 +2884,54 @@ void RegisterH5IndexFunction(ExtensionLoader &loader) {
 // Known row counts are exact; other files use a schema-based estimate.
 static unique_ptr<NodeStatistics> H5ReadCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<H5ReadBindData>();
-	return make_uniq<NodeStatistics>(bind_data.estimated_cardinality);
+	return make_uniq<NodeStatistics>(bind_data.cardinality_stats);
+}
+
+static unique_ptr<BaseStatistics> H5ReadStatistics(ClientContext &, TableFunctionGetStatisticsInput &input) {
+	if (!input.bind_data || !input.column_index.HasPrimaryIndex() || input.column_index.IsPushdownExtract()) {
+		return nullptr;
+	}
+	auto &bind_data = input.bind_data->Cast<H5ReadBindData>();
+	const auto column_id = input.column_index.GetPrimaryIndex();
+	if (H5ReadIsFilenameColumn(bind_data, column_id)) {
+		auto stats = BaseStatistics::CreateUnknown(LogicalType::VARCHAR);
+		stats.Set(StatsInfo::CANNOT_HAVE_NULL_VALUES);
+		return stats.ToUnique();
+	}
+	if (!H5ReadIsDataColumn(bind_data, column_id)) {
+		return nullptr;
+	}
+	// Only the original schema file was inspected at bind. A different file left
+	// after filename pruning can have different row counts and scalar dataspaces.
+	const bool single_schema_file =
+	    bind_data.filenames.size() == 1 && bind_data.filenames[0] == bind_data.schema_file->filename;
+	const auto &column = GetCanonicalColumns(bind_data)[column_id];
+	const auto scalar = std::get_if<ScalarColumnSpec>(&column);
+	if (std::holds_alternative<RunEncodedColumnSpec>(column) || (scalar && !single_schema_file)) {
+		// Run coverage (including NULL gaps) is only known during scan initialization.
+		return nullptr;
+	}
+	auto stats = std::visit([](const auto &spec) { return BaseStatistics::CreateUnknown(spec.column_type); }, column);
+	if (stats.GetType().id() == LogicalTypeId::VARCHAR && !(scalar && scalar->is_null_dataspace)) {
+		// String values are validated when read. Non-null statistics could prune
+		// that read (e.g. WHERE value IS NULL) and hide an invalid UTF-8 error.
+		return nullptr;
+	}
+	// Regular datasets and generated indices never emit top-level NULLs.
+	stats.Set(scalar && scalar->is_null_dataspace ? StatsInfo::CANNOT_HAVE_VALID_VALUES
+	                                              : StatsInfo::CANNOT_HAVE_NULL_VALUES);
+	if (std::holds_alternative<IndexColumnSpec>(column) && single_schema_file) {
+		const auto num_rows = bind_data.schema_file->num_rows;
+		if (num_rows > 0 && num_rows - 1 <= static_cast<hsize_t>(std::numeric_limits<int64_t>::max())) {
+			NumericStats::SetMin(stats, Value::BIGINT(0));
+			NumericStats::SetMax(stats, Value::BIGINT(static_cast<int64_t>(num_rows - 1)));
+			// Bounds remain valid for a subset, but its distinct count is not known.
+			if (bind_data.claimed_filters.empty()) {
+				stats.SetDistinctCount(static_cast<idx_t>(num_rows));
+			}
+		}
+	}
+	return stats.ToUnique();
 }
 
 static virtual_column_map_t H5ReadGetVirtualColumns(ClientContext &, optional_ptr<FunctionData> bind_data_p) {
@@ -2917,6 +2966,7 @@ void RegisterH5ReadTableFunction(ExtensionLoader &loader) {
 
 	// Set cardinality function for query optimizer
 	h5_read_function.cardinality = H5ReadCardinality;
+	h5_read_function.statistics_extended = H5ReadStatistics;
 	h5_read_function.init_local = H5ReadInitLocal;
 	// Do not register get_partition_data for now. The previous implementation
 	// derived batch indexes from logical partitions owned by a local scan state
