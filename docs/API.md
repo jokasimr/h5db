@@ -1050,10 +1050,12 @@ All functions provide clear error messages for common issues:
 
 - **`h5_read` projection pushdown**: Only reads columns actually used by your query, skipping unused datasets entirely
   for significant performance gains
-- **`h5_read` predicate pushdown**: Range-like filters with static constants are applied during scan for run-encoded and `h5_index()` columns
-  to reduce I/O. Supported shapes include `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, bind-time-foldable RHS expressions, and
-  comparison-cast forms that normalize to those operators. Unsupported boolean shapes such as `OR`, `!=`,
-  `IS DISTINCT FROM`, or expressions like `index + 1 > 10` remain post-scan filters.
+- **`h5_read` predicate pushdown**: Filters on `h5_rse()` and `h5_ree()` columns can reduce I/O by skipping row ranges.
+  Supported filters include comparisons and deterministic scalar expressions over one run column, such as
+  `make_timestamp(ts) > TIMESTAMP '2026-05-12'`, `contains(label, 'sample')`, `IN`, and same-column `OR`.
+  See [Filtering run-encoded columns](RSE_USAGE.md#filtering-run-encoded-columns) for examples and limits.
+  [`h5_index()`](#h5_index) supports comparisons with constants (`=`, `<`, `<=`, `>`, `>=`, `BETWEEN`),
+  including constant expressions and supported comparison casts.
 - **Filename filter pruning**: `h5_tree(...)`, table-valued `h5_ls(...)`, `h5_read(...)`, and `h5_attributes(...)` can
   skip files using [filename filters](#filename-filter-pruning).
 - **Chunked reading**: Data is read in chunks with optimized cache management for memory efficiency

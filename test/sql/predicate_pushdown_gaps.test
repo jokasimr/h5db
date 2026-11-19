@@ -1,0 +1,100 @@
+# name: test/sql/predicate_pushdown_gaps.test
+# description: Run pruning merges small gaps using the effective scan batch size
+# group: [sql]
+
+require h5db
+
+statement ok
+SET threads = 1;
+
+foreach encoding rse ree
+
+foreach file_count 1 2
+
+# row_id is an eight-byte regular column. These budgets give scan batches of
+# 8, 6, 2, and 1 rows. The three-row excluded gap merges only for the first:
+# a gap equal to half the batch size must remain excluded.
+foreach budget '64B' '48B' '16B' '8B'
+
+statement ok
+SET h5db_batch_size = {budget};
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_run_gap_profile.json';
+
+# Index bounds cut through runs at either end. Force row_id into the projection
+# so its width determines the scan batch size; scalar columns must still work.
+# Both encodings retain five rows per file, with a three-row gap between them.
+query I
+SELECT count(*) = 5 * {file_count}
+   AND sum(row_id) = (CASE WHEN '{encoding}' = 'rse' THEN 39 ELSE 46 END) * {file_count}
+   AND max(scalar) = 42
+FROM h5_read(
+    CASE WHEN {file_count} = 1
+        THEN ['test/data/predicate_pushdown_expressions_clean.h5']
+        ELSE ['test/data/predicate_pushdown_expressions_clean.h5',
+              'test/data/predicate_pushdown_expressions_bad.h5'] END,
+    '/row_id', '/scalar', h5_index(),
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number BETWEEN 0 AND 4 AND number % 2 = 0
+  AND index >= 4 AND index < 14;
+----
+true
+
+statement ok
+PRAGMA disable_profiling;
+
+# Merging reads eight rows per file; exact pruning reads five. This also checks
+# that neither index-excluded rows nor leading/trailing run gaps are added.
+query I
+SELECT count(*) FROM read_text('h5db_run_gap_profile.json')
+WHERE regexp_matches(content,
+    '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": '
+    || ((CASE WHEN {budget} = '64B' THEN 8 ELSE 5 END) * {file_count})::VARCHAR || ',');
+----
+1
+
+# Several short gaps form two merged ranges, separated by a six-row gap that
+# must remain excluded. This exercises repeated merging after keeping a gap.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*) = 18 * {file_count}
+   AND sum(row_id) = (CASE WHEN '{encoding}' = 'rse' THEN 333 ELSE 279 END) * {file_count}
+FROM h5_read(
+    CASE WHEN {file_count} = 1
+        THEN ['test/data/predicate_pushdown_expressions_clean.h5']
+        ELSE ['test/data/predicate_pushdown_expressions_clean.h5',
+              'test/data/predicate_pushdown_expressions_bad.h5'] END,
+    '/row_id', '/scalar', h5_index(),
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number IN (0, 2, 3, 6, 8, 10);
+----
+true
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_gap_profile.json')
+WHERE regexp_matches(content,
+    '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": '
+    || ((CASE WHEN {budget} = '64B' THEN 27 ELSE 18 END) * {file_count})::VARCHAR || ',');
+----
+1
+
+endloop
+
+endloop
+
+endloop
+
+statement ok
+RESET h5db_batch_size;
+
+statement ok
+RESET threads;

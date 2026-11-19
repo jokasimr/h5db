@@ -28,6 +28,15 @@ WHERE stamp::TIMESTAMPTZ = TIMESTAMPTZ '2026-01-01 12:00:00{offset}';
 ----
 3	0	2
 
+# General expressions must preserve the same session-dependent bound casts.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_cast_context.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/stamp'))
+WHERE date_trunc('hour', stamp::TIMESTAMPTZ) = TIMESTAMPTZ '2026-01-01 12:00:00{offset}';
+----
+3
+
 # The constant on the left exercises comparison reversal.
 query III
 SELECT count(*), min(row_id), max(row_id)

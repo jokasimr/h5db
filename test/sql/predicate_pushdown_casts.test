@@ -1051,10 +1051,11 @@ WHERE contains(content, '"Expression": "(CAST(float_nan_rse_values AS DOUBLE) BE
 ----
 1
 
+# Read through the 200-row NaN gap; the residual BETWEEN still returns 400 rows.
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_pushdown_cast_profile.json')
-WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 400,');
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 600,');
 ----
 1
 

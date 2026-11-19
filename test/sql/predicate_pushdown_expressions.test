@@ -1,0 +1,412 @@
+# name: test/sql/predicate_pushdown_expressions.test
+# description: Conservative single-column run-expression pruning
+# group: [sql]
+
+require h5db
+
+foreach encoding rse ree
+
+foreach disabled '' 'filter_pushdown'
+
+statement ok
+SET disabled_optimizers = {disabled};
+
+# Timestamp conversion is fallible, but valid data must still prune.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/ts'))
+WHERE make_timestamp(ts) >= TIMESTAMP '2026-05-12 01:08:20';
+----
+39
+
+# Repeated references and disjunction across vector boundaries.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE (number % 2 = 0 AND number BETWEEN 2046 AND 2050) OR number % 4112 = 0;
+----
+15
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/label'))
+WHERE contains(label, '410');
+----
+42
+
+# NOT/IN uses ordinary DuckDB NULL semantics.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE NOT (number % 3 IN (0, 1));
+----
+4113
+
+# A partial batch followed by full batches must reset the scanner's selection.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number >= 2047;
+----
+6198
+
+# Both bounds share the run column and span multiple batches.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number >= 2047 AND number <= 4100;
+----
+6162
+
+# TRY_CAST excludes invalid values without raising an error.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_bad.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE TRY_CAST(text AS BIGINT) > 4100;
+----
+36
+
+# NULL regions must be evaluated, not unconditionally excluded.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE coalesce(number, -1) = -1;
+----
+3
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number IS NULL OR number % 4112 = 0;
+----
+9
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/empty_boundaries', '/empty_values'))
+WHERE coalesce(empty_values, -1) = -1;
+----
+12342
+
+# A failed general expression still raises its original SQL error.
+statement error
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_bad.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE abs(text::BIGINT) > 4100;
+----
+Could not convert string 'not-a-number'
+
+# Volatile expressions must not be evaluated speculatively over run values.
+statement ok
+CREATE OR REPLACE SEQUENCE run_expression_sequence;
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number + nextval('run_expression_sequence') > 0;
+----
+12339
+
+query I
+SELECT currval('run_expression_sequence');
+----
+12342
+
+# Cross-column comparisons and disjunctions remain residual filters.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'),
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE number + 1 = text::BIGINT;
+----
+0
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'),
+    h5_{encoding}('/{encoding}_boundaries', '/label'))
+WHERE number = 0 OR contains(label, '4112');
+----
+6
+
+# Aliases and index filters can be combined with a run expression.
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_alias('renamed', h5_{encoding}('/{encoding}_boundaries', '/number')), h5_index())
+WHERE renamed % 2 = 1 AND index < 9;
+----
+3
+
+endloop
+
+statement ok
+RESET disabled_optimizers;
+
+# Check actual scan cardinality, not merely final results.
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='h5db_run_expression_profile.json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/ts'))
+WHERE make_timestamp(ts) >= TIMESTAMP '2026-05-12 01:08:20';
+----
+39
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 39,');
+----
+1
+
+# Different casts keep both predicates in the grouped expression.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE number::DOUBLE > 4100.5 AND number::DECIMAL(18,2) < 4106.5;
+----
+18
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 18,');
+----
+1
+
+# The cheaper comparison runs first and excludes run 4000's conversion error
+# from the later expression's input.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_bad.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'),
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE abs(text::BIGINT) > 4100 AND number < 10;
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
+----
+1
+
+# Cost ordering must put number before the cast despite the projection order.
+# Without restricting the cast's input, run 4000 fails the batch containing 4001
+# and leaves three rows for the residual filter instead of pruning them here.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_bad.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'),
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE abs(text::BIGINT) > 4100 AND number = 4001;
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
+----
+1
+
+# Index pruning alone must also exclude the bad run from speculative evaluation.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_bad.h5', '/row_id', h5_index(),
+    h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE abs(text::BIGINT) > 4100 AND index >= 12006 AND index < 12009;
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
+----
+1
+
+# Keep the failed middle batch (runs 2048..4095), but prune successful batches both
+# before and after it. The other column selects runs 2410 and 3410 from the retained
+# batch. Fresh executor state must work in the following batch and the next file.
+# The clean file prunes to zero; the bad file emits 6 rows.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read(['test/data/predicate_pushdown_expressions_bad.h5',
+              'test/data/predicate_pushdown_expressions_clean.h5'], '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/text'),
+    h5_{encoding}('/{encoding}_boundaries', '/label'))
+WHERE abs(text::BIGINT) > 4110 AND contains(label, '410');
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 6,');
+----
+1
+
+# Index pruning removes NULL coverage for both RSE and REE, so the overflowing
+# synthetic NULL expression need not be evaluated at all.
+statement ok
+PRAGMA enable_profiling='json';
+
+query I
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id', h5_index(),
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE abs(coalesce(number, -9223372036854775808)) > 5000
+  AND index >= 3 AND index < 12339;
+----
+0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT count(*) FROM read_text('h5db_run_expression_profile.json')
+WHERE regexp_matches(content, '"Function": "H5_READ"[^}]*\},\s*"intermediate_rows": 0,');
+----
+1
+
+# Without the index filter, retained NULL coverage must still raise the SQL error.
+statement error
+SELECT count(*)
+FROM h5_read('test/data/predicate_pushdown_expressions_clean.h5', '/row_id',
+    h5_{encoding}('/{encoding}_boundaries', '/number'))
+WHERE abs(coalesce(number, -9223372036854775808)) > 5000;
+----
+Overflow on abs
+
+endloop
+
+# Compare complete rows against an unfiltered, materialized scan. The two run
+# columns have different boundaries, including empty runs and long runs that
+# overlap many disjoint candidates. Exercise both single-file and multi-file scans.
+foreach encoding rse ree
+
+foreach files 'test/data/predicate_pushdown_expressions_clean.h5' ['test/data/predicate_pushdown_expressions_clean.h5','test/data/predicate_pushdown_expressions_bad.h5']
+
+statement ok
+CREATE OR REPLACE TEMP VIEW surviving_scan AS
+SELECT * FROM h5_read({files}, '/row_id', '/scalar', h5_index(),
+    h5_{encoding}('/{encoding}_boundaries', '/number'),
+    h5_{encoding}('/coarse_{encoding}_boundaries', '/coarse'));
+
+statement ok
+CREATE OR REPLACE TEMP TABLE surviving_expected AS SELECT * FROM surviving_scan;
+
+# Cut through runs at both ends and include several executor batches.
+query I
+SELECT
+    (SELECT list(r ORDER BY index) FROM surviving_scan r
+     WHERE index >= 8 AND index < 12014 AND number % 2 = 0 AND coarse % 10 = 0)
+    IS NOT DISTINCT FROM
+    (SELECT list(r ORDER BY index) FROM surviving_expected r
+     WHERE index >= 8 AND index < 12014 AND number % 2 = 0 AND coarse % 10 = 0);
+----
+true
+
+# Each long coarse run overlaps many disjoint ranges retained by the number filter.
+query I
+SELECT
+    (SELECT list(r ORDER BY index) FROM surviving_scan r
+     WHERE number % 2 = 0 AND abs(coarse) = 40)
+    IS NOT DISTINCT FROM
+    (SELECT list(r ORDER BY index) FROM surviving_expected r
+     WHERE number % 2 = 0 AND abs(coarse) = 40);
+----
+true
+
+# Reverse the roles: coarse pruning restricts the finer-grained number expression.
+query I
+SELECT
+    (SELECT list(r ORDER BY index) FROM surviving_scan r
+     WHERE coarse = 40 AND abs(number) % 2 = 1)
+    IS NOT DISTINCT FROM
+    (SELECT list(r ORDER BY index) FROM surviving_expected r
+     WHERE coarse = 40 AND abs(number) % 2 = 1);
+----
+true
+
+# Include NULL coverage retained by the earlier column, at either end of the file.
+query I
+SELECT
+    (SELECT list(r ORDER BY index) FROM surviving_scan r
+     WHERE coarse IS NULL OR coarse = 40)
+    IS NOT DISTINCT FROM
+    (SELECT list(r ORDER BY index) FROM surviving_expected r
+     WHERE coarse IS NULL OR coarse = 40);
+----
+true
+
+query I
+SELECT
+    (SELECT list(r ORDER BY index) FROM surviving_scan r
+     WHERE (number IS NULL OR number % 2 = 0) AND coalesce(coarse, 40) = 40)
+    IS NOT DISTINCT FROM
+    (SELECT list(r ORDER BY index) FROM surviving_expected r
+     WHERE (number IS NULL OR number % 2 = 0) AND coalesce(coarse, 40) = 40);
+----
+true
+
+# No candidates: neither remaining run filter needs evaluation.
+query I
+SELECT count(*) FROM surviving_scan
+WHERE index < 0 AND abs(number) > 0 AND abs(coarse) > 0;
+----
+0
+
+endloop
+
+endloop

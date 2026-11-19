@@ -127,6 +127,9 @@ FROM h5_read(
 WHERE state_values = 200;
 ```
 
+h5db can skip row ranges using filters that each depend on a single run-encoded column.
+See [Filtering run-encoded columns](#filtering-run-encoded-columns).
+
 ### Example 4: Multiple RSE Columns
 
 You can mix multiple regular and RSE columns:
@@ -259,16 +262,43 @@ Typical compression ratios by use case:
 
 ### Query Performance
 
-- **Filtering** (`WHERE status = X`): Fast - simple comparisons can prune row ranges before scanning
+- **Filtering**: [Filters on run-encoded columns](#filtering-run-encoded-columns) can skip row ranges before scanning
 - **Aggregation** (`GROUP BY status`): Fast - benefits from data locality
 - **Sequential scan**: O(n) where n is the number of candidate output rows
 - **Expansion overhead**: Single-pass O(1) amortized per row
 
+### Filtering Run-Encoded Columns
+
+For both `h5_rse()` and `h5_ree()`, h5db can evaluate filters on stored run values before scanning
+the regular datasets. This can reduce I/O when the filters exclude large row ranges.
+
+Comparisons, arithmetic, casts, string functions, `IN`, and `OR` can be used for pruning when
+the expression is deterministic and refers to one run column. For example, if `ts` stores
+microseconds since the Unix epoch:
+
+```sql
+SELECT measurement
+FROM h5_read(
+    'experiment.h5',
+    '/data/measurement',
+    h5_rse('/data/time_run_starts', '/data/ts')
+)
+WHERE make_timestamp(ts) >= TIMESTAMP '2026-05-12';
+```
+
+Filters such as `state_values IN (100, 200)` or `contains(label, 'sample')` can also prune.
+Separate filters on different run columns can each prune when combined with `AND`. An expression that compares two columns,
+or an `OR` across different columns, is applied after scanning instead. Volatile functions
+such as `random()`, subqueries, and lambda expressions are also excluded from run pruning.
+
+Pruning is conservative: h5db may read through small excluded gaps or retain ranges when filter
+evaluation fails. DuckDB still applies the original SQL filters, including their normal error behavior.
+
 ### I/O Benefits
 
-For remote files handled through DuckDB-backed schemes (HTTP/S, S3, R2, GCS, HF, etc.) or `sftp://`:
-- Only need to read small run_starts and values datasets
-- Significant bandwidth savings (100x-1000x less data transferred)
+Run-encoded columns read only their boundaries and stored values. Regular columns still need to be
+read for the retained row ranges. Bandwidth savings depend on run lengths, filter selectivity, and
+the HDF5 storage layout; this can be especially useful for remote files.
 
 ## Validation and Error Handling
 
@@ -401,7 +431,8 @@ assert all(run_starts[i] <= run_starts[i+1] for i in range(len(run_starts)-1))
 ## Limitations
 
 1. **At least one non-scalar regular column required** - Cannot query RSE columns alone
-2. **Limited predicate pushdown** - Simple range-like filters can prune row ranges; other filters are applied after scan
+2. **Predicate pushdown** - Each predicate used for [run pruning](#filtering-run-encoded-columns) must reference
+   a single run-encoded column. Predicates that reference multiple columns are applied after scanning
 3. **Memory overhead** - run_starts and values loaded into memory
 4. **No compression in output** - DuckDB receives fully expanded data
 
@@ -411,7 +442,6 @@ Potential future improvements:
 - Automatic RSE detection based on naming conventions
 - Support for RSE-only queries (auto-generate index)
 - Integration with DuckDB's internal compression
-- Broader predicate pushdown support
 
 ## Examples Repository
 

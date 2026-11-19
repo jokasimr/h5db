@@ -4,7 +4,6 @@
 #include "h5_raii.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/types/vector_cache.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/cast/default_casts.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -12,8 +11,10 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 #include "duckdb/common/vector/array_vector.hpp"
@@ -27,7 +28,13 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/expression_barrier.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
+#include "duckdb/storage/table/column_segment.hpp"
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/common/value_operations/value_operations.hpp"
 #include <utility>
@@ -294,8 +301,8 @@ struct RowRange {
 	idx_t end_row;
 };
 
-// Filter claimed during pushdown complex filter callback
-struct ClaimedFilter {
+// Index comparison claimed during pushdown complex filter callback
+struct ClaimedIndexFilter {
 	idx_t column_index;        // Which column (index into the shared output schema)
 	ExpressionType comparison; // Comparison type (>, <, =, >=, <=)
 	Value constant;            // The constant value to compare against
@@ -322,7 +329,9 @@ struct H5ReadBindData : public TableFunctionData {
 	shared_ptr<const H5ReadFileMetadata> schema_file; // Original first file, even if pruned from the scan
 	bool swmr = false;
 	NodeStatistics cardinality_stats;
-	vector<ClaimedFilter> claimed_filters; // Filters we claimed during pushdown
+	vector<ClaimedIndexFilter> index_filters; // Index comparisons used for binary-search pruning.
+	// Keys are shared output-schema indices; expressions reference run-value vector 0.
+	TableFilterSet run_filters;
 	std::optional<idx_t> visible_filename_idx;
 
 	bool SupportStatementCache() const override {
@@ -738,24 +747,24 @@ static idx_t AdjustPositionDoneForRanges(const std::vector<RowRange> &ranges, id
 enum class H5ReadFilterEvalResult : uint8_t { FALSE, TRUE, UNKNOWN };
 
 // Mutable cast state belongs to this file's range construction, not the shared bind data.
-struct ClaimedFilterState {
-	ClaimedFilterState(ClientContext &context, const ClaimedFilter &filter_p) : filter(filter_p) {
+struct ClaimedIndexFilterState {
+	ClaimedIndexFilterState(ClientContext &context, const ClaimedIndexFilter &filter_p) : filter(filter_p) {
 		if (filter.bound_cast && filter.bound_cast->HasInitLocalState()) {
 			CastLocalStateParameters parameters(context, filter.bound_cast->GetCastData());
 			cast_state = filter.bound_cast->InitLocalState(parameters);
 		}
 	}
 
-	const ClaimedFilter &filter;
+	const ClaimedIndexFilter &filter;
 	unique_ptr<FunctionLocalState> cast_state;
 };
 
-static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const ClaimedFilterState &state,
+static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const ClaimedIndexFilterState &state,
                                                       ExpressionType comparison);
 static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vector<RowRange> &b);
 static bool H5ReadIndexComparisonTypeIsMonotone(const LogicalType &comparison_type, idx_t max_index);
 
-static bool EvaluateIndexComparison(idx_t index, const ClaimedFilterState &state, ExpressionType comparison) {
+static bool EvaluateIndexComparison(idx_t index, const ClaimedIndexFilterState &state, ExpressionType comparison) {
 	auto result = EvaluateValueComparison(Value::BIGINT(static_cast<int64_t>(index)), state, comparison);
 	if (result == H5ReadFilterEvalResult::UNKNOWN) {
 		throw InternalException("h5_read index pushdown admitted a comparison that cannot be evaluated");
@@ -763,8 +772,8 @@ static bool EvaluateIndexComparison(idx_t index, const ClaimedFilterState &state
 	return result == H5ReadFilterEvalResult::TRUE;
 }
 
-static vector<RowRange> BuildIndexRanges(const vector<ClaimedFilterState> &filters, idx_t num_rows) {
-	auto build_single_filter_ranges = [&](const ClaimedFilterState &state) -> vector<RowRange> {
+static vector<RowRange> BuildIndexRanges(const vector<ClaimedIndexFilterState> &filters, idx_t num_rows) {
+	auto build_single_filter_ranges = [&](const ClaimedIndexFilterState &state) -> vector<RowRange> {
 		const auto &filter = state.filter;
 		auto find_first_true = [&](ExpressionType comparison) -> idx_t {
 			idx_t lo = 0;
@@ -840,7 +849,7 @@ static vector<RowRange> BuildIndexRanges(const vector<ClaimedFilterState> &filte
 	return result;
 }
 
-static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const ClaimedFilterState &state,
+static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const ClaimedIndexFilterState &state,
                                                       ExpressionType comparison) {
 	const auto &filter = state.filter;
 	Value lhs = value;
@@ -885,130 +894,132 @@ static H5ReadFilterEvalResult EvaluateValueComparison(const Value &value, const 
 	return result ? H5ReadFilterEvalResult::TRUE : H5ReadFilterEvalResult::FALSE;
 }
 
-static void EvaluateRunComparison(Vector &source, const ClaimedFilterState &state, Vector &cast_result,
-                                  Vector &result) {
-	const auto &filter = state.filter;
-	if (filter.bound_cast) {
-		string error_message;
-		CastParameters parameters(filter.bound_cast->GetCastData(), false, &error_message, state.cast_state.get());
-		if (!filter.bound_cast->Cast(source, cast_result, source.size(), parameters)) {
-			// A failed batch cast does not identify every failing row (in particular
-			// for nested targets). Fall back to scalar evaluation for this batch,
-			// keeping UNKNOWN runs for DuckDB's post-scan filter to evaluate.
-			FlatVector::SetSize(result, source.size());
-			auto matches = FlatVector::GetDataMutable<bool>(result);
-			for (idx_t i = 0; i < source.size(); i++) {
-				matches[i] = EvaluateValueComparison(source.GetValue(i), state, filter.comparison) !=
-				             H5ReadFilterEvalResult::FALSE;
+// Speculative evaluation: a recoverable error retains the failed batch while successful batches still prune.
+static vector<RowRange> BuildRunFilterRanges(ClientContext &context, const TableFilter &filter,
+                                             const RunEncodedColumnSpec &spec, const RunEncodedColumnState &state,
+                                             idx_t num_rows, const vector<RowRange> &candidates) {
+	D_ASSERT(!candidates.empty());
+	unique_ptr<TableFilterState> filter_state;
+	DataChunk batch;
+	batch.Initialize(Allocator::DefaultAllocator(), {spec.column_type});
+	SelectionVector selected;
+	auto select_runs = [&]() {
+		// An unset selection means all rows of this batch, regardless of the previous batch's matches.
+		selected.Initialize(nullptr);
+		try {
+			if (!filter_state) {
+				filter_state = TableFilterState::Initialize(context, filter);
 			}
+			idx_t count = batch.size();
+			return ColumnSegment::FilterSelection(selected, batch.data[0], *filter_state, batch.size(), count);
+		} catch (std::exception &ex) {
+			// Match DuckDB's TRY classification. Interrupts, allocation failures,
+			// and internal errors must still propagate.
+			if (!Exception::IsExecutionError(ErrorData(ex).Type())) {
+				throw;
+			}
+			// Retain the entire failed batch, discarding any partial selection.
+			// Start the next batch with fresh executor and function-local state.
+			selected.Initialize(nullptr);
+			filter_state.reset();
+			return batch.size();
+		}
+	};
+	vector<RowRange> ranges;
+	auto append_range = [&](idx_t start, idx_t end) {
+		if (start >= end) {
 			return;
 		}
-	}
-	auto &lhs = filter.bound_cast ? cast_result : source;
-	Vector rhs(filter.constant, count_t(source.size()));
-	switch (filter.comparison) {
-	case ExpressionType::COMPARE_EQUAL:
-		VectorOperations::Equals(lhs, rhs, result);
-		break;
-	case ExpressionType::COMPARE_GREATERTHAN:
-		VectorOperations::GreaterThan(lhs, rhs, result);
-		break;
-	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		VectorOperations::GreaterThanEquals(lhs, rhs, result);
-		break;
-	case ExpressionType::COMPARE_LESSTHAN:
-		VectorOperations::LessThan(lhs, rhs, result);
-		break;
-	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		VectorOperations::LessThanEquals(lhs, rhs, result);
-		break;
-	default:
-		throw InternalException("Unsupported h5_read run comparison");
-	}
-}
+		if (!ranges.empty() && ranges.back().end_row == start) {
+			ranges.back().end_row = end;
+		} else {
+			ranges.push_back({start, end});
+		}
+	};
 
-static vector<RowRange> BuildRangesForRunEncodedColumn(const RunEncodedColumnSpec &encoded_spec,
-                                                       const RunEncodedColumnState &encoded_state,
-                                                       const vector<ClaimedFilterState> &col_filters) {
-	return DispatchOnDuckDBType(encoded_spec.column_type, [&](auto type_tag) -> vector<RowRange> {
+	// Unlike ordinary comparisons, general expressions can match the NULL coverage.
+	bool null_matches = false;
+	if (state.run_starts.empty() || candidates.front().start_row < state.run_starts.front() ||
+	    candidates.back().end_row > state.non_null_end) {
+		batch.SetChildCardinality(1);
+		batch.data[0].Reference(Value(spec.column_type), count_t(1));
+		null_matches = select_runs() != 0;
+	}
+	if (state.run_starts.empty()) {
+		if (null_matches) {
+			return candidates;
+		}
+		return ranges;
+	}
+	if (null_matches) {
+		append_range(0, state.run_starts.front());
+	}
+
+	DispatchOnDuckDBType(spec.column_type, [&](auto type_tag) {
 		using T = typename decltype(type_tag)::type;
-		auto &typed_values = std::get<std::vector<T>>(encoded_state.values);
-		D_ASSERT(encoded_state.run_starts.size() == typed_values.size());
-		if (typed_values.empty()) {
-			return {};
-		}
-
-		// Reuse input and cast buffers across batches. Uncast filters need no
-		// cast buffer, but retain a slot so the indices match col_filters.
-		vector<LogicalType> types {encoded_spec.column_type};
-		vector<bool> initialize {true};
-		for (const auto &state : col_filters) {
-			types.push_back(state.filter.comparison_type);
-			initialize.push_back(bool(state.filter.bound_cast));
-		}
-		auto capacity = MinValue<idx_t>(STANDARD_VECTOR_SIZE, typed_values.size());
-		auto &allocator = Allocator::DefaultAllocator();
-		DataChunk batch;
-		batch.Initialize(allocator, types, initialize, capacity);
-		VectorCache comparison_cache(allocator, LogicalType::BOOLEAN, capacity);
-
-		// Loop through runs, building ranges where ALL filters are satisfied
-		vector<RowRange> col_result;
-		idx_t current_start = encoded_state.run_starts[0];
-		bool in_range = false;
-
-		for (idx_t offset = 0; offset < typed_values.size(); offset += capacity) {
-			auto count = MinValue<idx_t>(capacity, typed_values.size() - offset);
+		const auto &values = std::get<std::vector<T>>(state.values);
+		std::array<idx_t, STANDARD_VECTOR_SIZE> run_ids;
+		idx_t run_count = 0;
+		auto evaluate_batch = [&]() {
+			ThrowIfInterrupted(context);
 			batch.Reset();
-			batch.SetChildCardinality(count);
+			batch.SetChildCardinality(run_count);
 			auto &source = batch.data[0];
 			if constexpr (std::is_same_v<T, string>) {
 				auto data = FlatVector::GetDataMutable<string_t>(source);
-				for (idx_t i = 0; i < count; i++) {
-					data[i] = StringVector::AddString(source, typed_values[offset + i]);
+				for (idx_t i = 0; i < run_count; i++) {
+					data[i] = StringVector::AddString(source, values[run_ids[i]]);
 				}
 			} else {
-				std::copy_n(typed_values.data() + offset, count, FlatVector::GetDataMutable<T>(source));
-			}
-
-			std::array<bool, STANDARD_VECTOR_SIZE> matches;
-			matches.fill(true);
-			for (idx_t filter_idx = 0; filter_idx < col_filters.size(); filter_idx++) {
-				Vector comparison_result(comparison_cache);
-				EvaluateRunComparison(source, col_filters[filter_idx], batch.data[filter_idx + 1], comparison_result);
-				bool any_matches = false;
-				for (auto match : comparison_result.Values<bool>()) {
-					matches[match.GetIndex()] &= match.IsValid() && match.GetValue();
-					any_matches |= matches[match.GetIndex()];
-				}
-				if (!any_matches) {
-					break;
-				}
-			}
-
-			// Carry an open range across batch boundaries. Leading NULLs and rows
-			// after non_null_end never satisfy these comparison filters.
-			for (idx_t i = 0; i < count; i++) {
-				auto run_start = encoded_state.run_starts[offset + i];
-				if (matches[i] && !in_range) {
-					current_start = run_start;
-					in_range = true;
-				} else if (!matches[i] && in_range) {
-					if (current_start < run_start) {
-						col_result.push_back({current_start, run_start});
+				auto data = FlatVector::GetDataMutable<T>(source);
+				if (run_ids[run_count - 1] - run_ids[0] + 1 == run_count) {
+					std::copy_n(values.data() + run_ids[0], run_count, data);
+				} else {
+					for (idx_t i = 0; i < run_count; i++) {
+						data[i] = values[run_ids[i]];
 					}
-					in_range = false;
 				}
 			}
+			auto match_count = select_runs();
+			for (idx_t i = 0; i < match_count; i++) {
+				auto run = run_ids[selected.get_index(i)];
+				auto end = run + 1 < values.size() ? state.run_starts[run + 1] : state.non_null_end;
+				append_range(state.run_starts[run], end);
+			}
+			run_count = 0;
+		};
+		// Seek directly to surviving intervals, packing disjoint runs into full executor batches.
+		// A run can overlap several candidates; evaluate it only once, then intersect below.
+		idx_t next_run = 0;
+		for (const auto &candidate : candidates) {
+			ThrowIfInterrupted(context);
+			auto start = MaxValue<idx_t>(candidate.start_row, state.run_starts.front());
+			auto end = MinValue<idx_t>(candidate.end_row, state.non_null_end);
+			if (start >= end) {
+				continue;
+			}
+			auto first = std::upper_bound(state.run_starts.begin(), state.run_starts.end(), start);
+			auto run = MaxValue<idx_t>(next_run, idx_t(first - state.run_starts.begin() - 1));
+			for (; run < values.size() && state.run_starts[run] < end; run++) {
+				auto run_end = run + 1 < values.size() ? state.run_starts[run + 1] : state.non_null_end;
+				if (state.run_starts[run] == run_end) {
+					continue; // Duplicate boundaries can describe empty runs.
+				}
+				run_ids[run_count++] = run;
+				if (run_count == STANDARD_VECTOR_SIZE) {
+					evaluate_batch();
+				}
+			}
+			next_run = run;
 		}
-
-		// Close final range if still open. Rows at or after non_null_end are NULLs.
-		if (in_range && current_start < encoded_state.non_null_end) {
-			col_result.push_back({current_start, encoded_state.non_null_end});
+		if (run_count > 0) {
+			evaluate_batch();
 		}
-
-		return col_result;
 	});
+	if (null_matches) {
+		append_range(state.non_null_end, num_rows);
+	}
+	return IntersectRowRanges(candidates, ranges);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1508,18 +1519,21 @@ static vector<RowRange> IntersectRowRanges(const vector<RowRange> &a, const vect
 	return result;
 }
 
-static vector<RowRange> BuildRangesForColumn(GlobalColumnIdx global_idx, const vector<ClaimedFilterState> &col_filters,
-                                             const H5ReadFileMetadata &metadata, const H5ReadFileState &gstate) {
-	if (std::holds_alternative<RunEncodedColumnSpec>(metadata.columns[global_idx])) {
-		LocalColumnIdx local_idx = GlobalToLocal(gstate, global_idx);
-		auto &encoded_spec = std::get<RunEncodedColumnSpec>(metadata.columns[global_idx]);
-		auto &encoded_state = std::get<RunEncodedColumnState>(gstate.column_states[local_idx]);
-		return BuildRangesForRunEncodedColumn(encoded_spec, encoded_state, col_filters);
+// Coalesce sorted, disjoint ranges in place, retaining gaps of at least min_gap rows.
+static void CoalesceRowRanges(vector<RowRange> &ranges, idx_t min_gap) {
+	if (ranges.size() < 2 || min_gap == 0) {
+		return;
 	}
-	if (std::holds_alternative<IndexColumnSpec>(metadata.columns[global_idx])) {
-		return BuildIndexRanges(col_filters, metadata.num_rows);
+	idx_t retained_count = 1;
+	for (idx_t i = 1; i < ranges.size(); i++) {
+		auto &previous = ranges[retained_count - 1];
+		if (ranges[i].start_row - previous.end_row < min_gap) {
+			previous.end_row = ranges[i].end_row;
+		} else {
+			ranges[retained_count++] = ranges[i];
+		}
 	}
-	return {};
+	ranges.resize(retained_count);
 }
 
 // Open, inspect, and initialize one file for scanning.
@@ -1805,31 +1819,42 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 		result->cache_refresh_order.push_back(entry.local_idx);
 	}
 
-	// Compute row ranges based on claimed filters (from pushdown_complex_filter)
-	// Group claimed filters by column
-	unordered_map<idx_t, vector<ClaimedFilterState>> filters_by_column;
-	for (const auto &filter : bind_data.claimed_filters) {
+	// Index comparisons retain binary-search pruning, independently of run expressions.
+	unordered_map<idx_t, vector<ClaimedIndexFilterState>> filters_by_column;
+	for (const auto &filter : bind_data.index_filters) {
 		filters_by_column[filter.column_index].emplace_back(context, filter);
 	}
-
-	// If we have filters on run-encoded or index columns, compute row ranges
-	if (!filters_by_column.empty()) {
-		vector<RowRange> ranges = {{0, metadata.num_rows}};
-
-		for (const auto &[global_idx_raw, col_filters] : filters_by_column) {
-			// Map global column index to local column_states index
-			GlobalColumnIdx global_idx(global_idx_raw);
-			vector<RowRange> col_ranges = BuildRangesForColumn(global_idx, col_filters, metadata, *result);
-
-			// Intersect ranges from this column with accumulated ranges
-			ranges = IntersectRowRanges(ranges, col_ranges);
-		}
-
-		result->valid_row_ranges = std::move(ranges);
-	} else {
-		// No pushdown filters - all rows are valid
-		result->valid_row_ranges.push_back({0, metadata.num_rows});
+	result->valid_row_ranges.push_back({0, metadata.num_rows});
+	for (const auto &entry : filters_by_column) {
+		auto ranges = BuildIndexRanges(entry.second, metadata.num_rows);
+		result->valid_row_ranges = IntersectRowRanges(result->valid_row_ranges, ranges);
 	}
+	// Index comparisons intersect to at most one interval. Merging internal run
+	// gaps below therefore cannot reintroduce rows excluded by index pruning.
+	D_ASSERT(result->valid_row_ranges.size() <= 1);
+
+	// Use DuckDB's initial cost order, as its scanners do. Each column retains its
+	// grouped conjunction and speculative state; the residual SQL filters are unchanged.
+	vector<GlobalColumnIdx> run_filter_columns;
+	for (const auto &filter : bind_data.run_filters) {
+		run_filter_columns.emplace_back(filter.GetIndex().GetIndex());
+	}
+	for (auto filter_idx : ExpressionHeuristics::GetInitialOrder(bind_data.run_filters)) {
+		if (result->valid_row_ranges.empty() || metadata.num_rows == 0) {
+			break;
+		}
+		auto global_idx = run_filter_columns[filter_idx];
+		const auto &filter = bind_data.run_filters.GetFilterByColumnIndex(ProjectionIndex(global_idx.index));
+		auto local_idx = GlobalToLocal(*result, global_idx);
+		const auto &spec = std::get<RunEncodedColumnSpec>(metadata.columns[global_idx]);
+		const auto &state = std::get<RunEncodedColumnState>(result->column_states[local_idx]);
+		result->valid_row_ranges =
+		    BuildRunFilterRanges(context, filter, spec, state, metadata.num_rows, result->valid_row_ranges);
+	}
+
+	// Merge only after all run filters have evaluated exact candidates.
+	// Residual SQL filters remove the extra rows; wide rows reduce the gap threshold.
+	CoalesceRowRanges(result->valid_row_ranges, result->scan_batch_size / 2);
 
 	result->position_done = AdjustPositionDoneForRanges(result->valid_row_ranges, 0);
 
@@ -1981,9 +2006,10 @@ static bool H5ReadCanClaimPushdownBetween(const ColumnSpec &column, const Pushdo
 	return H5ReadCanClaimPushdownFilter(column, ref, lower) && H5ReadCanClaimPushdownFilter(column, ref, upper);
 }
 
-static void H5ReadAddClaimedFilter(vector<ClaimedFilter> &claimed, idx_t column_index, ExpressionType comparison,
-                                   const Value &constant, const PushdownColumnRef &ref) {
-	ClaimedFilter filter;
+static void H5ReadAddClaimedIndexFilter(vector<ClaimedIndexFilter> &claimed, idx_t column_index,
+                                        ExpressionType comparison, const Value &constant,
+                                        const PushdownColumnRef &ref) {
+	ClaimedIndexFilter filter;
 	filter.column_index = column_index;
 	filter.comparison = comparison;
 	filter.constant = constant;
@@ -1994,12 +2020,12 @@ static void H5ReadAddClaimedFilter(vector<ClaimedFilter> &claimed, idx_t column_
 	claimed.push_back(std::move(filter));
 }
 
-// Helper: Try to claim a filter on a run-encoded or index column
+// Helper: Try to claim a comparison on an index column
 template <typename TableIndexT>
-static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const TableIndexT &table_index,
-                                   const unordered_map<idx_t, idx_t> &get_to_bind_map,
-                                   const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
-                                   vector<ClaimedFilter> &claimed) {
+static bool TryClaimIndexFilter(const unique_ptr<Expression> &expr, const TableIndexT &table_index,
+                                const unordered_map<idx_t, idx_t> &get_to_bind_map,
+                                const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
+                                vector<ClaimedIndexFilter> &claimed) {
 	// Handle comparison expressions: col > 10, col = 20, 10 < col, etc.
 	if (BoundComparisonExpression::IsComparison(*expr)) {
 		auto &comp = expr->Cast<BoundFunctionExpression>();
@@ -2030,7 +2056,7 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 		    !H5ReadCanClaimPushdownFilter(columns[bind_data_col_idx], ref, constant->GetValue())) {
 			return false;
 		}
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, comparison, constant->GetValue(), ref);
+		H5ReadAddClaimedIndexFilter(claimed, bind_data_col_idx, comparison, constant->GetValue(), ref);
 		return true;
 	}
 
@@ -2054,40 +2080,84 @@ static bool TryClaimPushdownFilter(const unique_ptr<Expression> &expr, const Tab
 		if (!H5ReadCanClaimPushdownBetween(columns[bind_data_col_idx], ref, lower_const, upper_const)) {
 			return false;
 		}
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, BoundBetweenExpression::LowerComparisonType(between),
-		                       lower_const, ref);
-		H5ReadAddClaimedFilter(claimed, bind_data_col_idx, BoundBetweenExpression::UpperComparisonType(between),
-		                       upper_const, ref);
+		H5ReadAddClaimedIndexFilter(claimed, bind_data_col_idx, BoundBetweenExpression::LowerComparisonType(between),
+		                            lower_const, ref);
+		H5ReadAddClaimedIndexFilter(claimed, bind_data_col_idx, BoundBetweenExpression::UpperComparisonType(between),
+		                            upper_const, ref);
 		return true;
 	}
 
-	// Handle CONJUNCTION_AND (for other compound filters)
-	if (expr->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
-		auto &conj = expr->Cast<BoundConjunctionExpression>();
+	return false; // Can't handle this filter
+}
 
-		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
-			// Try to claim pushdown-eligible filters from all children of a flattened AND
-			vector<ClaimedFilter> temp_claimed;
-			bool claimed_any = false;
-			for (const auto &child : conj.GetChildren()) {
-				claimed_any |= TryClaimPushdownFilter(child, table_index, get_to_bind_map, pushdown_columns, columns,
-				                                      temp_claimed);
-			}
-
-			// If we claimed any pushdown filters, add them to optimize I/O and return true
-			if (claimed_any) {
-				for (auto &filter : temp_claimed) {
-					claimed.push_back(std::move(filter));
-				}
-				return true; // Indicate we claimed something
-			}
-
-			// No run-encoded filters in this conjunction
+// Accept ordinary scalar expression trees over exactly one run-encoded column.
+// Be conservative about other expression classes (including lambda-local references).
+static bool ResolveRunExpressionColumn(const Expression &expr, const LogicalGet &get,
+                                       const unordered_map<idx_t, idx_t> &get_to_bind_map,
+                                       const vector<ColumnSpec> &columns, std::optional<idx_t> &column_index) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COLUMN_REF: {
+		const auto &ref = expr.Cast<BoundColumnRefExpression>();
+		auto entry = get_to_bind_map.find(ref.Binding().column_index);
+		if (ref.Depth() != 0 || ref.Binding().table_index != get.table_index || entry == get_to_bind_map.end() ||
+		    !std::holds_alternative<RunEncodedColumnSpec>(columns[entry->second]) ||
+		    (column_index && *column_index != entry->second)) {
 			return false;
 		}
+		column_index = entry->second;
+		return true;
 	}
+	case ExpressionClass::BOUND_FUNCTION: {
+		const auto &function = expr.Cast<BoundFunctionExpression>();
+		if (function.Function().RequiresOrderedExecution() || function.Function().HasBindLambdaCallback() ||
+		    ExpressionBarrier::IsBarrier(expr)) {
+			return false;
+		}
+		break;
+	}
+	case ExpressionClass::BOUND_CONSTANT:
+	case ExpressionClass::BOUND_CONJUNCTION:
+	case ExpressionClass::BOUND_OPERATOR:
+	case ExpressionClass::BOUND_CASE:
+		break;
+	default:
+		return false;
+	}
+	bool eligible = true;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		eligible = eligible && ResolveRunExpressionColumn(child, get, get_to_bind_map, columns, column_index);
+	});
+	return eligible;
+}
 
-	return false; // Can't handle this filter
+static void ClaimH5ReadFilters(const unique_ptr<Expression> &expr, const LogicalGet &get,
+                               const unordered_map<idx_t, idx_t> &get_to_bind_map,
+                               const unordered_set<idx_t> &pushdown_columns, const vector<ColumnSpec> &columns,
+                               H5ReadBindData &bind_data) {
+	// Extract eligible conjuncts; accepted run predicates are grouped by column below.
+	if (expr->GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		for (const auto &child : expr->Cast<BoundConjunctionExpression>().GetChildren()) {
+			ClaimH5ReadFilters(child, get, get_to_bind_map, pushdown_columns, columns, bind_data);
+		}
+		return;
+	}
+	if (TryClaimIndexFilter(expr, get.table_index, get_to_bind_map, pushdown_columns, columns,
+	                        bind_data.index_filters)) {
+		return;
+	}
+	if (!expr->IsConsistent()) {
+		return;
+	}
+	std::optional<idx_t> column_index;
+	if (!ResolveRunExpressionColumn(*expr, get, get_to_bind_map, columns, column_index) || !column_index) {
+		return;
+	}
+	auto copy = expr->Copy();
+	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+	    copy, [](BoundColumnRefExpression &ref, unique_ptr<Expression> &node) {
+		    node = make_uniq<BoundReferenceExpression>(ref.GetReturnType(), 0);
+	    });
+	bind_data.run_filters.PushFilter(ProjectionIndex(*column_index), make_uniq<ExpressionFilter>(std::move(copy)));
 }
 
 // Pushdown complex filter callback
@@ -2099,11 +2169,10 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 	bind_data.cardinality_stats = GetH5ReadCardinalityStatistics(bind_data);
 	const auto &columns = GetCanonicalColumns(bind_data);
 
-	// Build set of pushdown-eligible column indices (run-encoded or index)
+	// Only index columns use the specialized comparison recognizer.
 	unordered_set<idx_t> pushdown_column_indices;
 	for (idx_t i = 0; i < columns.size(); i++) {
-		if (std::holds_alternative<RunEncodedColumnSpec>(columns[i]) ||
-		    std::holds_alternative<IndexColumnSpec>(columns[i])) {
+		if (std::holds_alternative<IndexColumnSpec>(columns[i])) {
 			pushdown_column_indices.insert(i);
 		}
 	}
@@ -2126,13 +2195,10 @@ static void H5ReadPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 		}
 	}
 
-	const auto &table_index = get.table_index;
-
 	// Claim filters for I/O optimization (but keep them in filter list for post-scan)
 	// DuckDB will apply all filters after scan to ensure correctness (defensive approach)
 	for (const auto &expr : filters) {
-		TryClaimPushdownFilter(expr, table_index, get_to_bind_map, pushdown_column_indices, columns,
-		                       bind_data.claimed_filters);
+		ClaimH5ReadFilters(expr, get, get_to_bind_map, pushdown_column_indices, columns, bind_data);
 	}
 }
 
@@ -2926,7 +2992,7 @@ static unique_ptr<BaseStatistics> H5ReadStatistics(ClientContext &, TableFunctio
 			NumericStats::SetMin(stats, Value::BIGINT(0));
 			NumericStats::SetMax(stats, Value::BIGINT(static_cast<int64_t>(num_rows - 1)));
 			// Bounds remain valid for a subset, but its distinct count is not known.
-			if (bind_data.claimed_filters.empty()) {
+			if (bind_data.index_filters.empty() && !bind_data.run_filters.HasFilters()) {
 				stats.SetDistinctCount(static_cast<idx_t>(num_rows));
 			}
 		}

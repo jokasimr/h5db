@@ -106,6 +106,7 @@ WHERE int_rse_values = 10 OR int_rse_values = 50;
 statement ok
 PRAGMA disable_profiling;
 
+# Each file reads through the 600-row gap between its two matching runs.
 query I
 SELECT COUNT(*)
 FROM read_text('h5db_glob_pushdown_profile.json')
