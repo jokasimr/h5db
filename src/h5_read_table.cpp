@@ -1833,18 +1833,31 @@ static unique_ptr<H5ReadFileState> InitH5ReadFileState(ClientContext &context, c
 	// Index comparisons intersect to at most one interval. Merging internal run
 	// gaps below therefore cannot reintroduce rows excluded by index pruning.
 	D_ASSERT(result->valid_row_ranges.size() <= 1);
-
-	// Use DuckDB's initial cost order, as its scanners do. Each column retains its
-	// grouped conjunction and speculative state; the residual SQL filters are unchanged.
-	vector<GlobalColumnIdx> run_filter_columns;
-	for (const auto &filter : bind_data.run_filters) {
-		run_filter_columns.emplace_back(filter.GetIndex().GetIndex());
+	if (result->valid_row_ranges.empty() || metadata.num_rows == 0) {
+		return result;
 	}
-	for (auto filter_idx : ExpressionHeuristics::GetInitialOrder(bind_data.run_filters)) {
-		if (result->valid_row_ranges.empty() || metadata.num_rows == 0) {
+
+	// Estimate total predicate work using this file's stored run counts. Ordering
+	// ignores candidate intervals; evaluation below still visits only surviving runs.
+	// Pairs sort by cost, then column index for deterministic ties.
+	vector<std::pair<idx_t, GlobalColumnIdx>> run_filter_costs;
+	run_filter_costs.reserve(bind_data.run_filters.FilterCount());
+	for (const auto &entry : bind_data.run_filters) {
+		GlobalColumnIdx global_idx(entry.GetIndex().GetIndex());
+		auto local_idx = GlobalToLocal(*result, global_idx);
+		const auto &state = std::get<RunEncodedColumnState>(result->column_states[local_idx]);
+		// Empty encodings can still require evaluating NULL coverage.
+		auto run_count = MaxValue<idx_t>(state.run_starts.size(), 1);
+		auto expression_cost = ExpressionHeuristics::Cost(*entry.Filter().Cast<ExpressionFilter>().expr);
+		auto max_cost = NumericLimits<idx_t>::Maximum();
+		auto cost = expression_cost > max_cost / run_count ? max_cost : expression_cost * run_count;
+		run_filter_costs.emplace_back(cost, global_idx);
+	}
+	std::sort(run_filter_costs.begin(), run_filter_costs.end());
+	for (const auto &[cost, global_idx] : run_filter_costs) {
+		if (result->valid_row_ranges.empty()) {
 			break;
 		}
-		auto global_idx = run_filter_columns[filter_idx];
 		const auto &filter = bind_data.run_filters.GetFilterByColumnIndex(ProjectionIndex(global_idx.index));
 		auto local_idx = GlobalToLocal(*result, global_idx);
 		const auto &spec = std::get<RunEncodedColumnSpec>(metadata.columns[global_idx]);

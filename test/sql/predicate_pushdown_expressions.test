@@ -357,7 +357,7 @@ SELECT
 ----
 true
 
-# Each long coarse run overlaps many disjoint ranges retained by the number filter.
+# Unequal run counts: coarse pruning can precede filtering the finer-grained number column.
 query I
 SELECT
     (SELECT list(r ORDER BY index) FROM surviving_scan r
@@ -406,6 +406,25 @@ SELECT count(*) FROM surviving_scan
 WHERE index < 0 AND abs(number) > 0 AND abs(coarse) > 0;
 ----
 0
+
+# Empty encodings still evaluate their NULL coverage when ordered alongside
+# populated run columns. Test both retaining and rejecting all candidate rows.
+foreach fallback 0 1
+
+query I
+SELECT
+    (SELECT count(*)
+     FROM h5_read({files}, '/row_id',
+         h5_{encoding}('/{encoding}_boundaries', '/number'),
+         h5_{encoding}('/empty_boundaries', '/empty_values'))
+     WHERE coalesce(empty_values, {fallback}) = 0 AND number % 2 = 0)
+    = CASE WHEN {fallback} = 0 THEN
+        (SELECT count(*) FROM surviving_expected WHERE number % 2 = 0)
+      ELSE 0 END;
+----
+true
+
+endloop
 
 endloop
 
