@@ -967,8 +967,9 @@ static vector<RowRange> BuildRunFilterRanges(ClientContext &context, const Table
 			auto &source = batch.data[0];
 			if constexpr (std::is_same_v<T, string>) {
 				auto data = FlatVector::GetDataMutable<string_t>(source);
+				// Borrow immutable run strings: their state outlives this batch and its filter executor.
 				for (idx_t i = 0; i < run_count; i++) {
-					data[i] = StringVector::AddString(source, values[run_ids[i]]);
+					data[i] = string_t(values[run_ids[i]]);
 				}
 			} else {
 				auto data = FlatVector::GetDataMutable<T>(source);
@@ -2355,11 +2356,10 @@ static void ScanRunEncodedColumn(const RunEncodedColumnSpec &spec, RunEncodedCol
 
 			// Tight loop: fill all rows with same value (no conditionals!)
 			if constexpr (std::is_same_v<T, string>) {
-				// VARCHAR: need to call StringVector::AddString for each
+				// Own one copy per run segment; repeated descriptors share the output vector's heap.
 				auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
-				for (idx_t j = 0; j < rows_to_fill; j++) {
-					result_data[result_offset + i + j] = StringVector::AddString(result_vector, run_value);
-				}
+				auto value = StringVector::AddString(result_vector, run_value);
+				std::fill_n(result_data + result_offset + i, rows_to_fill, value);
 			} else {
 				// Numeric types: direct assignment - compiler can vectorize this!
 				auto result_data = FlatVector::GetDataMutable<T>(result_vector);

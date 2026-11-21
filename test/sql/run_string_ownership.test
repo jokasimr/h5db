@@ -1,0 +1,62 @@
+# name: test/sql/run_string_ownership.test
+# description: Run strings survive batch resets, expression references, and file transitions
+# group: [sql]
+
+require h5db
+
+foreach encoding rse ree
+
+# Small batches split three-row runs; large batches contain many distinct strings.
+foreach budget '64B' '32KB'
+
+statement ok
+SET h5db_batch_size = {budget};
+
+# The fixture has 4113 distinct 30-byte strings, exercising multiple predicate
+# batches and output heap growth. Materialize across files before checking values.
+statement ok
+CREATE OR REPLACE TEMP TABLE retained_run_strings AS
+SELECT row_id, text
+FROM h5_read(
+    ['test/data/predicate_pushdown_expressions_clean.h5',
+     'test/data/predicate_pushdown_expressions_clean.h5'],
+    '/row_id', h5_{encoding}('/{encoding}_boundaries', '/text'));
+
+query III
+SELECT count(*), count(text), count(*) FILTER (WHERE text IS DISTINCT FROM
+    CASE WHEN ('{encoding}' = 'rse' AND row_id < 3)
+           OR ('{encoding}' = 'ree' AND row_id >= 12339) THEN NULL
+         ELSE lpad((row_id // 3 - CASE WHEN '{encoding}' = 'rse' THEN 1 ELSE 0 END)::VARCHAR, 30, '0') END)
+FROM retained_run_strings;
+----
+24684	24678	0
+
+# regexp_extract returns references into its input. Keep NULL coverage as well,
+# and check strings from both full and partial predicate batches after execution.
+statement ok
+CREATE OR REPLACE TEMP TABLE retained_run_strings AS
+SELECT row_id, text
+FROM h5_read(
+    ['test/data/predicate_pushdown_expressions_clean.h5',
+     'test/data/predicate_pushdown_expressions_clean.h5'],
+    '/row_id', h5_{encoding}('/{encoding}_boundaries', '/text'))
+WHERE coalesce(regexp_extract(text, '^([0-9]{30})$', 1), repeat('9', 30)) >= lpad('2047', 30, '0');
+
+query III
+SELECT count(*), count(text), count(*) FILTER (WHERE text IS DISTINCT FROM
+    CASE WHEN ('{encoding}' = 'rse' AND row_id < 3)
+           OR ('{encoding}' = 'ree' AND row_id >= 12339) THEN NULL
+         ELSE lpad((row_id // 3 - CASE WHEN '{encoding}' = 'rse' THEN 1 ELSE 0 END)::VARCHAR, 30, '0') END)
+FROM retained_run_strings;
+----
+12402	12396	0
+
+statement ok
+DROP TABLE retained_run_strings;
+
+endloop
+
+endloop
+
+statement ok
+RESET h5db_batch_size;
