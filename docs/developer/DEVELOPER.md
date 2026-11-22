@@ -135,7 +135,7 @@ The setup script also configures activation to source `.env`. A venv created man
 
 ### Quick Start
 
-The source targets the DuckDB v2.0.0 release pinned by the submodule. From the repository root:
+The source targets the DuckDB v2.0.1 release pinned by the submodule. From the repository root:
 
 ```bash
 # Activate virtual environment (includes all tools and environment variables)

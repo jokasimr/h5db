@@ -26,6 +26,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/time_point.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -2046,8 +2047,9 @@ private:
 	}
 
 	void ReadAndProfile(idx_t offset, idx_t size, void *buf) {
+		const auto start = TimePoint::Tick();
 		GetEngine().Read(offset, size, buf);
-		QueryProfiler::Get(context).TrackBytesRead(size);
+		QueryProfiler::Get(context).TrackBytesRead(size, NumericCast<idx_t>(start.ElapsedMicros()));
 	}
 
 	BufferHandle PinOrReadBlock(CacheBlock &block) {

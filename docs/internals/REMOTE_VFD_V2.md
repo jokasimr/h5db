@@ -1,6 +1,6 @@
 # Remote HDF5 Read Paths
 
-This note describes the implementation targeting DuckDB v2.0.0. The `V2` filename refers to an earlier h5db VFD
+This note describes the implementation targeting DuckDB v2.0.1. The `V2` filename refers to an earlier h5db VFD
 redesign, not the DuckDB release number.
 
 Relevant sources:

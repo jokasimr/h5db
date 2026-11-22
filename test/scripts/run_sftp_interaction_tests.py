@@ -2,6 +2,7 @@
 import argparse
 import base64
 import hashlib
+import json
 import logging
 import os
 import re
@@ -1299,6 +1300,38 @@ class SFTPInteractionTests(unittest.TestCase):
         connections, _ = self.multi_key_server.telemetry.snapshot()
         negotiated = [record.negotiated_host_key for record in connections if record.negotiated_host_key]
         self.assertEqual(negotiated, ["ssh-rsa"], msg=str(negotiated))
+
+    def test_sftp_reads_report_io_metrics(self) -> None:
+        url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"
+        profile_path = (self.tempdir / "sftp_io_profile.json").as_posix()
+        for cache_enabled in (False, True):
+            with self.subTest(cache_enabled=cache_enabled):
+                result = self.run_sql(
+                    textwrap.dedent(
+                        f"""
+                    LOAD h5db;
+                    SET enable_external_file_cache={str(cache_enabled).lower()};
+                    CREATE TEMPORARY SECRET profiling_sftp (
+                        TYPE sftp,
+                        SCOPE 'sftp://127.0.0.1:{self.password_server.port}/',
+                        USERNAME 'h5db',
+                        PASSWORD 'h5db',
+                        KNOWN_HOSTS_PATH '{self.password_known_hosts}',
+                        PORT {self.password_server.port}
+                    );
+                    SET tracked_metrics = ['io.total_bytes_read', 'io.total_read_operations', 'io.total_read_time'];
+                    PRAGMA enable_profiling='json';
+                    PRAGMA profiling_output='{profile_path}';
+                    SELECT COUNT(*) FROM h5_tree('{url}');
+                    PRAGMA disable_profiling;
+                """
+                    )
+                )
+                self.assertEqual(result.returncode, 0, msg=result.output)
+                profile = json.loads(Path(profile_path).read_text())
+                self.assertGreater(profile["io"]["total_bytes_read"], 0)
+                self.assertGreater(profile["io"]["total_read_operations"], 0)
+                self.assertGreater(profile["io"]["total_read_time"], 0)
 
     def test_repeated_metadata_query_uses_external_cache(self) -> None:
         url = f"sftp://127.0.0.1:{self.password_server.port}/simple.h5"

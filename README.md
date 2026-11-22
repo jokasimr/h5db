@@ -191,7 +191,7 @@ Use the API reference for exact behavior and options:
 
 ## Build From Source
 
-The source targets DuckDB v2.0.0. Use the release pinned by the submodule when building.
+The source targets DuckDB v2.0.1. Use the release pinned by the submodule when building.
 
 ### Prerequisites
 
